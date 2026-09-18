@@ -1,0 +1,238 @@
+# Standalone kei-connector-runtime release workflow.
+#
+# Triggered by pushing a proxy-vX.Y.Z tag, or manually with a version bump.
+# The workflow mirrors the kei-cli release flow while keeping runtime-daemon
+# artifacts under their own S3 prefix.
+
+name: Release kei-proxy
+
+on:
+  push:
+    tags:
+      - 'proxy-v*'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version increment to publish (defaults to patch)
+        required: false
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-runtime-daemon-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  AWS_S3_RELEASES_BUCKET: ${{ vars.AWS_S3_RELEASES_BUCKET || 'kei-cli-releases' }}
+  AWS_S3_RELEASES_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  GORELEASER_KEY: kei-cli-releases@haikeilabs.com
+
+jobs:
+  authorize_manual_release:
+    name: Authorize manual release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require repository or organization owner
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const permission = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner,
+              repo,
+              username: context.actor,
+            });
+
+            if (permission.data.permission !== 'admin') {
+              core.setFailed(`@${context.actor} must be a repository or organization owner to run a manual release`);
+            }
+
+  validate-tag:
+    name: Validate tag
+    needs: [authorize_manual_release]
+    if: always() && (needs.authorize_manual_release.result == 'success' || needs.authorize_manual_release.result == 'skipped')
+    runs-on: kei-eks-deploy
+    outputs:
+      tag: ${{ steps.parse.outputs.tag }}
+      version: ${{ steps.parse.outputs.version }}
+      channel: ${{ steps.parse.outputs.channel }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse and validate tag
+        id: parse
+        env:
+          INPUT_BUMP: ${{ inputs.bump }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            git fetch --tags --force origin
+            LATEST_TAG="$(git tag --list 'proxy-v*' | grep -E '^proxy-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)"
+            if [ -z "$LATEST_TAG" ]; then
+              TAG="proxy-v0.0.1"
+              echo "No stable daemon tag found; using initial release tag $TAG"
+            else
+              IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#proxy-v}"
+              case "${INPUT_BUMP:-patch}" in
+                patch) PATCH=$((PATCH + 1)) ;;
+                minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+                major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+                *) echo "ERROR: bump must be patch, minor, or major"; exit 1 ;;
+              esac
+              TAG="proxy-v${MAJOR}.${MINOR}.${PATCH}"
+            fi
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "Tag: $TAG"
+
+          if ! echo "$TAG" | grep -qE '^proxy-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-zA-Z0-9._-]+)?$'; then
+            echo "ERROR: tag '$TAG' must match proxy-vX.Y.Z[-prerelease]"
+            exit 1
+          fi
+
+          VERSION="${TAG#proxy-v}"
+          if echo "$TAG" | grep -qE '\-rc\.|\-alpha\.|\-beta\.'; then
+            CHANNEL="prerelease"
+          else
+            CHANNEL="stable"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag does not already exist
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && git ls-remote --exit-code --tags origin "refs/tags/${{ steps.parse.outputs.tag }}" >/dev/null 2>&1; then
+            echo "ERROR: tag '${{ steps.parse.outputs.tag }}' already exists"
+            exit 1
+          fi
+          echo "Release tag ${{ steps.parse.outputs.tag }} validated."
+
+  release:
+    name: Release
+    needs: [validate-tag]
+    runs-on: kei-eks-deploy
+    permissions:
+      contents: write
+    environment: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create local tag for manual release
+        if: github.event_name == 'workflow_dispatch'
+        run: git tag "v${{ needs.validate-tag.outputs.version }}" "$GITHUB_SHA"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '~1.27'
+          cache: true
+          cache-dependency-path: go.sum
+
+      # goreleaser builds this module, and its pre-hook runs `go mod verify`.
+      # The connector contract is a released private module, so both need
+      # authenticated access to GitHub.
+      - name: Authenticate for private modules
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=github.com/HaikeiLabs/*" >> "$GITHUB_ENV"
+
+      - name: Import GPG signing key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GORELEASER_SIGNING_KEY }}
+          passphrase: ''
+          git_config_global: true
+          git_user_signingkey: true
+          git_commit_gpgsign: false
+
+      - name: Verify GPG key is available
+        run: |
+          gpg --list-keys --keyid-format LONG "$GORELEASER_KEY" || {
+            echo "ERROR: GPG key $GORELEASER_KEY not found after import."
+            exit 1
+          }
+
+      - name: Validate runner AWS identity
+        run: |
+          aws sts get-caller-identity
+          echo "Runner AWS identity validated."
+
+      - name: Validate S3 bucket accessibility
+        run: |
+          aws s3api list-objects-v2 \
+            --bucket "${{ env.AWS_S3_RELEASES_BUCKET }}" \
+            --prefix "kei-proxy/" \
+            --max-items 1 \
+            --region "${{ env.AWS_REGION }}"
+
+      - name: Run Goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> 2'
+          args: release --clean --config .goreleaser.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ env.GORELEASER_KEY }}
+          AWS_S3_RELEASES_BUCKET: ${{ env.AWS_S3_RELEASES_BUCKET }}
+          AWS_S3_RELEASES_REGION: ${{ env.AWS_REGION }}
+          GORELEASER_CURRENT_TAG: v${{ needs.validate-tag.outputs.version }}
+
+      - name: Upload install.sh to public release endpoint
+        run: |
+          aws s3 cp scripts/install.sh \
+            "s3://${{ env.AWS_S3_RELEASES_BUCKET }}/kei-proxy/install.sh" \
+            --region "${{ env.AWS_REGION }}" \
+            --content-type "text/x-shellscript" \
+            --cache-control "no-cache"
+
+      - name: Verify no credentials leaked in artifacts
+        run: |
+          DIST="${RUNNER_TEMP}/goreleaser-dist"
+          mkdir -p "$DIST"
+          BUCKET="${{ env.AWS_S3_RELEASES_BUCKET }}"
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+          CHECKSUMS_FILE="kei-proxy_${VERSION}_checksums.txt"
+
+          aws s3 cp "s3://${BUCKET}/kei-proxy/${VERSION}/${CHECKSUMS_FILE}" "${DIST}/checksums.txt" --region "${{ env.AWS_REGION }}"
+          if grep -qiE '(AWS[A-Z_]*KEY|AWS_SECRET|BEGIN RSA|BEGIN PGP PRIVATE)' "${DIST}/checksums.txt"; then
+            echo "ERROR: Potential credential leak detected in checksums file."
+            exit 1
+          fi
+
+          aws s3 cp "s3://${BUCKET}/kei-proxy/install.sh" "${DIST}/install.sh" --region "${{ env.AWS_REGION }}"
+          if grep -qiE '(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|BEGIN RSA|BEGIN PGP PRIVATE)' "${DIST}/install.sh"; then
+            echo "ERROR: Potential credential leak detected in install.sh."
+            exit 1
+          fi
+
+          echo "Artifact leak check passed."
+
+      - name: Write latest.txt (stable releases only)
+        if: needs.validate-tag.outputs.channel == 'stable'
+        run: |
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+          echo -n "$VERSION" | aws s3 cp - \
+            "s3://${{ env.AWS_S3_RELEASES_BUCKET }}/kei-proxy/latest.txt" \
+            --region "${{ env.AWS_REGION }}" \
+            --content-type "text/plain" \
+            --cache-control "no-cache"

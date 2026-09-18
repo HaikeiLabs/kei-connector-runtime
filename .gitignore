@@ -1,0 +1,8 @@
+# Build artifacts. A 17MB `proxy` binary was committed to the kei monorepo
+# because the ignore list named only `kei-proxy` and `proxy-linux`; it is
+# deliberately not carried into this repository.
+kei-proxy
+proxy
+proxy-linux
+kei-connector-runtime
+dist/

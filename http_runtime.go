@@ -1,0 +1,338 @@
+package main
+
+// This file is the runtime-side implementation of the frozen HTTP API
+// connector contract (docs/http-api-connector-contract.md). It deliberately
+// has no URL or credential fields in the invocation, and it never writes
+// credential material to an audit record or log. Every boundary is
+// fail-closed: a missing resolver, a denied invocation, an unresolvable or
+// reserved target, a cross-host redirect, an over-limit response, or a
+// missing credential all abort the call with an error.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/HaikeiLabs/kei-connector-contracts"
+)
+
+var (
+	errHTTPResponseTooLarge = errors.New("HTTP response exceeds configured limit")
+	errHTTPReservedTarget   = errors.New("HTTP target is reserved")
+)
+
+// CredentialResolver resolves an opaque connector credential reference. An
+// implementation may delegate to SecretStore or a control-plane-backed
+// binding; callers never provide a secret literal to ExecuteHTTP.
+type CredentialResolver interface {
+	Resolve(context.Context, string) (string, error)
+}
+
+// SecretStoreCredentialResolver adapts the existing external secret-store
+// boundary. The backend is deployment configuration; ref remains opaque
+// metadata and is the only credential identifier accepted by this path.
+type SecretStoreCredentialResolver struct {
+	Store   SecretStore
+	Backend string
+}
+
+// Resolve validates the reference through the shared contract and the proxy's
+// secret-store boundary before any backend I/O. A malformed reference or a
+// backend failure yields a generic error that never echoes the reference.
+func (r SecretStoreCredentialResolver) Resolve(ctx context.Context, ref string) (string, error) {
+	if r.Store == nil || r.Backend == "" || connectors.ValidateCredentialRef(ref) != nil {
+		return "", errors.New("invalid credential reference")
+	}
+	value, err := r.Store.Get(ctx, r.Backend, ref)
+	if err != nil || value == nil || *value == "" {
+		return "", errors.New("credential unavailable")
+	}
+	return *value, nil
+}
+
+// HTTPExecutionAudit is the audit/trace lineage for one governed HTTP
+// invocation. It preserves the full propagation chain — human subject, org,
+// workspace, agent, connector, capability, action, resource, trace id, and
+// approval reference — and never carries credential material.
+type HTTPExecutionAudit struct {
+	Subject     string            `json:"subject"`
+	OrgID       string            `json:"org_id"`
+	WorkspaceID string            `json:"workspace_id"`
+	AgentID     string            `json:"agent_id"`
+	ConnectorID string            `json:"connector_id"`
+	Capability  string            `json:"capability"`
+	Action      connectors.Action `json:"action"`
+	Resource    string            `json:"resource"`
+	TraceID     string            `json:"trace_id"`
+	ApprovalID  string            `json:"approval_id,omitempty"`
+}
+
+// HTTPExecutionResult is the governed result of one invocation. Headers and
+// body are already redacted; the audit carries the caller lineage.
+type HTTPExecutionResult struct {
+	StatusCode int                `json:"status_code"`
+	Headers    http.Header        `json:"headers"`
+	Body       []byte             `json:"body"`
+	Audit      HTTPExecutionAudit `json:"audit"`
+}
+
+// HTTPExecutor is the governed runtime for provider-neutral HTTP API
+// connectors. Credentials is the only mandatory field; Client and LookupIP
+// are injectable seams for tests.
+type HTTPExecutor struct {
+	Credentials CredentialResolver
+	Client      *http.Client
+	LookupIP    func(context.Context, string) ([]net.IP, error)
+}
+
+func executeHTTPInvocation(ctx context.Context, metadata connectors.Metadata, in connectors.Invocation, resolver CredentialResolver, client *http.Client) (*HTTPExecutionResult, error) {
+	return (HTTPExecutor{Credentials: resolver, Client: client}).ExecuteHTTP(ctx, metadata, in)
+}
+
+// ExecuteHTTP enforces the full governed path: contract validation
+// (method/path/query), credential-reference resolution, registered-host URL
+// construction, SSRF target rejection, redirect policy, timeout and
+// response-size limits, and output redaction. It fails closed at every step.
+func (e HTTPExecutor) ExecuteHTTP(ctx context.Context, metadata connectors.Metadata, in connectors.Invocation) (*HTTPExecutionResult, error) {
+	if e.Credentials == nil {
+		return nil, errors.New("credential resolver is required")
+	}
+	// ValidateCall enforces the connector metadata, tenant/workspace scope,
+	// active status, declared capability, action, and the HTTP invocation
+	// boundary (method, relative path, query allowlist).
+	if err := connectors.ValidateCall(metadata, in); err != nil {
+		return nil, fmt.Errorf("HTTP invocation denied: %w", err)
+	}
+	if err := connectors.ValidateCredentialRef(metadata.CredentialRef); err != nil {
+		return nil, errors.New("invalid credential reference")
+	}
+	secret, err := e.Credentials.Resolve(ctx, metadata.CredentialRef)
+	if err != nil || secret == "" {
+		return nil, errors.New("credential resolution failed")
+	}
+
+	h := metadata.HTTPAPI
+	base, err := url.Parse(h.RegisteredBaseURL)
+	if err != nil {
+		return nil, errors.New("invalid registered base URL")
+	}
+	if err := e.checkHost(ctx, base.Hostname()); err != nil {
+		return nil, err
+	}
+
+	// Join paths without allowing ResolveReference to discard the registered
+	// base path. ValidateCall has already rejected traversal and URL syntax,
+	// and the invocation carries only a relative path.
+	joined := *base
+	joined.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(in.HTTP.Path, "/")
+	joined.RawPath = ""
+	q := url.Values{}
+	for name, values := range in.HTTP.Query {
+		for _, value := range values {
+			q.Add(name, value)
+		}
+	}
+	joined.RawQuery = q.Encode()
+
+	timeout := time.Duration(h.TimeoutMS) * time.Millisecond
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, string(in.HTTP.Method), joined.String(), nil)
+	if err != nil {
+		return nil, errors.New("build HTTP request failed")
+	}
+	value := secret
+	if h.CredentialInjection.Scheme != "" {
+		value = h.CredentialInjection.Scheme + " " + value
+	}
+	req.Header.Set(h.CredentialInjection.Name, value)
+
+	client := e.Client
+	if client == nil {
+		client = &http.Client{}
+	}
+	copyClient := *client
+	previousRedirect := client.CheckRedirect
+	copyClient.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if !h.AllowRedirects {
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= h.MaxRedirects {
+			return errors.New("HTTP redirect limit exceeded")
+		}
+		if !strings.EqualFold(r.URL.Hostname(), base.Hostname()) {
+			return errors.New("cross-host HTTP redirect denied")
+		}
+		if err := e.checkHost(requestCtx, r.URL.Hostname()); err != nil {
+			return err
+		}
+		if previousRedirect != nil {
+			return previousRedirect(r, via)
+		}
+		return nil
+	}
+
+	resp, err := copyClient.Do(req)
+	if err != nil {
+		return nil, classifyHTTPError(err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, h.ResponseMaxBytes+1))
+	if err != nil {
+		return nil, errors.New("read HTTP response failed")
+	}
+	if int64(len(body)) > h.ResponseMaxBytes {
+		return nil, errHTTPResponseTooLarge
+	}
+
+	return &HTTPExecutionResult{
+		StatusCode: resp.StatusCode,
+		Headers:    redactHeaders(resp.Header, h.Redaction.Headers),
+		Body:       redactResponseBody(body, h.Redaction.ResponseFields),
+		Audit: HTTPExecutionAudit{
+			Subject:     in.Subject,
+			OrgID:       in.TenantID,
+			WorkspaceID: in.WorkspaceID,
+			AgentID:     in.AgentID,
+			ConnectorID: in.ConnectorID,
+			Capability:  in.Capability,
+			Action:      in.Action,
+			Resource:    in.Resource,
+			TraceID:     in.TraceID,
+			ApprovalID:  in.ApprovalID,
+		},
+	}, nil
+}
+
+// classifyHTTPError maps transport failures to generic, stable messages. A
+// deadline is reported as a timeout; every other failure is opaque so a
+// provider's error never leaks into logs.
+func classifyHTTPError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.New("HTTP request timed out")
+	}
+	return errors.New("HTTP request failed")
+}
+
+// checkHost resolves host and rejects the call if any resolved address is a
+// reserved/private/metadata target. This is the SSRF boundary: the contract
+// validates the registered hostname syntactically, and the runtime checks its
+// actual DNS resolution.
+func (e HTTPExecutor) checkHost(ctx context.Context, host string) error {
+	lookup := e.LookupIP
+	if lookup == nil {
+		lookup = func(ctx context.Context, host string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(ctx, "ip", host)
+		}
+	}
+	ips, err := lookup(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return errors.New("HTTP target could not be resolved")
+	}
+	for _, ip := range ips {
+		if reservedIP(ip) {
+			return errHTTPReservedTarget
+		}
+	}
+	return nil
+}
+
+// reservedIP reports whether ip must never be a connector target. It covers
+// loopback, private RFC1918, link-local (including the cloud metadata
+// addresses), CGNAT, benchmark, and documentation ranges, plus the
+// "this network" zero block.
+func reservedIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 0 {
+			return true
+		}
+		// 100.64.0.0/10 CGNAT
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
+		// 198.18.0.0/15 benchmarking
+		if ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19 {
+			return true
+		}
+		// 192.0.0.0/24 IETF protocol assignments
+		if ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0 {
+			return true
+		}
+		// Documentation ranges 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+		if ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 2 {
+			return true
+		}
+		if ip4[0] == 198 && ip4[1] == 51 && ip4[2] == 100 {
+			return true
+		}
+		if ip4[0] == 203 && ip4[1] == 0 && ip4[2] == 113 {
+			return true
+		}
+	}
+	return false
+}
+
+// redactHeaders clones headers and replaces every configured name's value with
+// the sentinel, so credential or sensitive response headers never leave the
+// governed path with their value intact.
+func redactHeaders(headers http.Header, names []string) http.Header {
+	out := headers.Clone()
+	for _, name := range names {
+		if out.Get(name) != "" {
+			out.Set(name, "[REDACTED]")
+		}
+	}
+	return out
+}
+
+// redactResponseBody replaces every configured JSON field with the sentinel.
+// Non-JSON bodies are returned unchanged (there is no structured field to
+// redact), and a body that fails to marshal back is also returned as-is.
+func redactResponseBody(body []byte, fields []string) []byte {
+	if len(fields) == 0 {
+		return body
+	}
+	var value any
+	if json.Unmarshal(body, &value) != nil {
+		return body
+	}
+	redactJSON(value, fields)
+	out, err := json.Marshal(value)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func redactJSON(value any, fields []string) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			for _, field := range fields {
+				if strings.EqualFold(key, field) {
+					v[key] = "[REDACTED]"
+					child = nil
+					break
+				}
+			}
+			if child != nil {
+				redactJSON(child, fields)
+			}
+		}
+	case []any:
+		for _, child := range v {
+			redactJSON(child, fields)
+		}
+	}
+}
