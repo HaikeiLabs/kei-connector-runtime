@@ -50,16 +50,29 @@ go build ./...
 go test ./...
 ```
 
-### CI requires `MODULE_READ_TOKEN`
+### CI needs a credential for the private contract module
 
 The default `GITHUB_TOKEN` is **not** sufficient. It is scoped to the repository
 running the workflow, so fetching a private module from a sibling repository
-fails with `remote: Repository not found` — which reads like a missing repo
-rather than a permissions problem.
+fails with `remote: Repository not found` — which reads like a missing
+repository rather than a permissions problem.
 
-CI needs a repository or organization secret `MODULE_READ_TOKEN` (PAT or GitHub
-App token) with `contents:read` on `HaikeiLabs/kei-connector-contracts`. The
-workflow fails with an explicit message when it is absent.
+Two options, in order of preference:
+
+**1. GitHub App token (preferred).** Set the repository/organization variable
+`MODULE_READ_APP_ID` and the secret `MODULE_READ_APP_PRIVATE_KEY`. CI mints an
+installation token per run, scoped to `kei-connector-contracts` alone, and it
+expires with the run — nothing long-lived is stored. The organization already
+runs a GitHub App for the Actions runner scale sets, so this may need only an
+installation-scope change rather than a new App.
+
+**2. PAT fallback.** Set the secret `MODULE_READ_TOKEN` to a token with
+`contents:read` on `HaikeiLabs/kei-connector-contracts`. Prefer a *fine-grained*
+PAT limited to that one repository: a classic PAT carries the whole account's
+access, and it belongs to a person, so it expires and needs rotating.
+
+CI uses the App token when present and falls back to the PAT, failing with an
+explicit message when neither is configured.
 
 Container builds take the token as a build secret, never a build arg — an arg is
 recorded in the image history:

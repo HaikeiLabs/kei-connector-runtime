@@ -148,17 +148,32 @@ jobs:
       # goreleaser builds this module, and its pre-hook runs `go mod verify`.
       # The connector contract is a released private module, so both need
       # authenticated access to GitHub.
+      # Prefer a per-run GitHub App installation token over a long-lived PAT.
+      # See .github/workflows/ci.yaml for the full rationale.
+      - name: Mint a GitHub App token
+        id: app_token
+        if: ${{ vars.MODULE_READ_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.MODULE_READ_APP_ID }}
+          private-key: ${{ secrets.MODULE_READ_APP_PRIVATE_KEY }}
+          owner: HaikeiLabs
+          repositories: kei-connector-contracts
+
       - name: Authenticate for private modules
         env:
+          APP_TOKEN: ${{ steps.app_token.outputs.token }}
           MODULE_READ_TOKEN: ${{ secrets.MODULE_READ_TOKEN }}
         run: |
           # The default GITHUB_TOKEN is scoped to this repository only and
           # cannot read the private kei-connector-contracts module.
-          if [ -z "${MODULE_READ_TOKEN}" ]; then
-            echo "::error::MODULE_READ_TOKEN is not set; cannot fetch the connector contract."
+          TOKEN="${APP_TOKEN:-${MODULE_READ_TOKEN}}"
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::No credential for the connector contract module."
+            echo "Set MODULE_READ_APP_ID + MODULE_READ_APP_PRIVATE_KEY, or MODULE_READ_TOKEN."
             exit 1
           fi
-          git config --global url."https://x-access-token:${MODULE_READ_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
           echo "GOPRIVATE=github.com/HaikeiLabs/*" >> "$GITHUB_ENV"
 
       - name: Import GPG signing key
