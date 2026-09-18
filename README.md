@@ -43,12 +43,22 @@ The connector contract is a released **private** module, so builds need
 authenticated access:
 
 ```sh
-export GOPRIVATE='github.com/HaikeiLabs/*'
+# GOPRIVATE names the single module, not a wildcard: only this path bypasses the
+# public module proxy and the checksum database.
+export GOPRIVATE='github.com/HaikeiLabs/kei-connector-contracts'
+
+# x-access-token is the username a GitHub App installation token requires. A
+# classic PAT also accepts https://TOKEN:x-oauth-basic@github.com/, but the App
+# token does not, so this form is used everywhere for consistency.
 git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
 go build ./...
 go test ./...
 ```
+
+Use the environment variable rather than `go env -w GOPRIVATE=...`: `go env -w`
+writes to a persistent config file that does not survive a fresh CI runner or a
+Docker build layer, so it would silently have no effect there.
 
 ### CI needs a credential for the private contract module
 
@@ -59,12 +69,17 @@ repository rather than a permissions problem.
 
 Two options, in order of preference:
 
-**1. GitHub App token (preferred).** Set the repository/organization variable
-`MODULE_READ_APP_ID` and the secret `MODULE_READ_APP_PRIVATE_KEY`. CI mints an
-installation token per run, scoped to `kei-connector-contracts` alone, and it
-expires with the run — nothing long-lived is stored. The organization already
-runs a GitHub App for the Actions runner scale sets, so this may need only an
-installation-scope change rather than a new App.
+**1. GitHub App token (preferred, and the chosen approach).** Set the
+repository/organization variable `MODULE_READ_APP_ID` and the secret
+`MODULE_READ_APP_PRIVATE_KEY`. CI mints an installation token per run, scoped to
+`kei-connector-contracts` alone, and it expires with the run — nothing
+long-lived is stored. The App backing the Actions runner scale sets is reused
+for this, so it needs an installation-scope change rather than a new App.
+
+The contract repository stays **private**. GitHub's `internal` visibility, which
+would grant read access to the whole organization without per-repository grants,
+requires Enterprise Cloud; this organization is on the free plan, so `internal`
+is not available and private plus a scoped App token is the equivalent.
 
 **2. PAT fallback.** Set the secret `MODULE_READ_TOKEN` to a token with
 `contents:read` on `HaikeiLabs/kei-connector-contracts`. Prefer a *fine-grained*

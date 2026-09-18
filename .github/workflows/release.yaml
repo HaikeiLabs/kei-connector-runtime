@@ -174,7 +174,7 @@ jobs:
             exit 1
           fi
           git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
-          echo "GOPRIVATE=github.com/HaikeiLabs/*" >> "$GITHUB_ENV"
+          echo "GOPRIVATE=github.com/HaikeiLabs/kei-connector-contracts" >> "$GITHUB_ENV"
 
       - name: Import GPG signing key
         uses: crazy-max/ghaction-import-gpg@v6

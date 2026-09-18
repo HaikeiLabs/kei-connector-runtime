@@ -87,7 +87,7 @@ jobs:
           # The token is masked by Actions, but write it through git config
           # rather than the environment so it is not inherited by the toolchain.
           git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
-          echo "GOPRIVATE=github.com/HaikeiLabs/*" >> "$GITHUB_ENV"
+          echo "GOPRIVATE=github.com/HaikeiLabs/kei-connector-contracts" >> "$GITHUB_ENV"
 
       - name: Build
         run: go build ./...

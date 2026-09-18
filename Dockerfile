@@ -10,16 +10,28 @@ COPY go.mod go.sum ./
 
 # The connector contract is a released module rather than a path copied out of
 # the kei tree, so this build no longer depends on that repository's layout. It
-# is a private module: pass GITHUB_TOKEN (contents:read on
+# is a private module: pass the token (contents:read on
 # HaikeiLabs/kei-connector-contracts) as a build secret, never as a build arg —
 # an arg is recorded in the image history.
-ENV GOPRIVATE=github.com/HaikeiLabs/*
+#
+# GOPRIVATE names the single module rather than a wildcard, so only this one
+# path bypasses the public proxy and checksum database.
+ENV GOPRIVATE=github.com/HaikeiLabs/kei-connector-contracts
+# The x-access-token username is required for a GitHub App installation token.
+# A bare https://TOKEN@github.com/ works for a classic PAT but fails for an App
+# token, and the App is the credential this build is expected to receive.
+#
+# git config is written inside the RUN rather than persisted: the credential
+# lives only in this layer's execution, and the layer records the config file's
+# absence, not the token.
 RUN --mount=type=secret,id=github_token \
     if [ -s /run/secrets/github_token ]; then \
-      git config --global url."https://$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/"; \
+      git config --global \
+        url."https://x-access-token:$(cat /run/secrets/github_token)@github.com/".insteadOf \
+        "https://github.com/"; \
     fi && \
     go mod download && \
-    git config --global --unset-all url."https://$(cat /run/secrets/github_token 2>/dev/null)@github.com/".insteadOf 2>/dev/null || true
+    rm -f /root/.gitconfig
 
 COPY . .
 
