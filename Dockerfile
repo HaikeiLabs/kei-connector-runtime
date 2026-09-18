@@ -15,7 +15,7 @@ RUN go mod download
 
 COPY . .
 
-# The binary keeps the name kei-proxy. Kei-Chat-Harness resolves it through
+# The binary keeps the name kei-proxy. kei-chat-harness resolves it through
 # KEI_PROXY_PATH and kei-cli through exec.LookPath("kei-proxy") with a
 # /tmp/kei-proxy fallback, and it is published under the kei-proxy/ S3 release
 # prefix. ADR-017 treats those as external contracts, not cosmetics: renaming

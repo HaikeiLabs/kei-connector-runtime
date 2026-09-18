@@ -27,7 +27,7 @@ signed envelope that fails closed on any non-200.
 
 ## The binary is `kei-proxy`
 
-Not a cosmetic detail. `Kei-Chat-Harness` resolves it through `KEI_PROXY_PATH`,
+Not a cosmetic detail. `kei-chat-harness` resolves it through `KEI_PROXY_PATH`,
 `kei-cli` through `exec.LookPath("kei-proxy")` with a `/tmp/kei-proxy` fallback,
 and releases publish to the `kei-proxy/` S3 prefix with `install.sh`,
 `latest.txt` and checksums. ADR-017 §4 makes those external contracts: the
