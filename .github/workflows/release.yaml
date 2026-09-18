@@ -150,9 +150,15 @@ jobs:
       # authenticated access to GitHub.
       - name: Authenticate for private modules
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODULE_READ_TOKEN: ${{ secrets.MODULE_READ_TOKEN }}
         run: |
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          # The default GITHUB_TOKEN is scoped to this repository only and
+          # cannot read the private kei-connector-contracts module.
+          if [ -z "${MODULE_READ_TOKEN}" ]; then
+            echo "::error::MODULE_READ_TOKEN is not set; cannot fetch the connector contract."
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${MODULE_READ_TOKEN}@github.com/".insteadOf "https://github.com/"
           echo "GOPRIVATE=github.com/HaikeiLabs/*" >> "$GITHUB_ENV"
 
       - name: Import GPG signing key

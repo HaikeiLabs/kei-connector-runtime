@@ -50,6 +50,17 @@ go build ./...
 go test ./...
 ```
 
+### CI requires `MODULE_READ_TOKEN`
+
+The default `GITHUB_TOKEN` is **not** sufficient. It is scoped to the repository
+running the workflow, so fetching a private module from a sibling repository
+fails with `remote: Repository not found` — which reads like a missing repo
+rather than a permissions problem.
+
+CI needs a repository or organization secret `MODULE_READ_TOKEN` (PAT or GitHub
+App token) with `contents:read` on `HaikeiLabs/kei-connector-contracts`. The
+workflow fails with an explicit message when it is absent.
+
 Container builds take the token as a build secret, never a build arg — an arg is
 recorded in the image history:
 

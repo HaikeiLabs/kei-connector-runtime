@@ -28,14 +28,28 @@ jobs:
           go-version: "1.27"
           cache-dependency-path: go.sum
 
-      # The connector contract is a released private module, so the public
-      # module proxy cannot serve it and Go must authenticate to GitHub.
-      # GOPRIVATE also keeps it out of the public checksum database.
+      # The connector contract is a released private module in a *different*
+      # repository, so the public module proxy cannot serve it and Go must
+      # authenticate to GitHub. GOPRIVATE also keeps it out of the public
+      # checksum database.
+      #
+      # The default GITHUB_TOKEN is not sufficient: it is scoped to this
+      # repository alone, so fetching a private sibling fails with
+      # "remote: Repository not found" rather than a permission error.
+      # MODULE_READ_TOKEN must be an org-scoped secret (PAT or GitHub App token)
+      # with contents:read on HaikeiLabs/kei-connector-contracts.
       - name: Authenticate for private modules
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODULE_READ_TOKEN: ${{ secrets.MODULE_READ_TOKEN }}
         run: |
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ -z "${MODULE_READ_TOKEN}" ]; then
+            echo "::error::MODULE_READ_TOKEN is not set."
+            echo "Go cannot fetch github.com/HaikeiLabs/kei-connector-contracts without it:"
+            echo "the default GITHUB_TOKEN grants access only to this repository."
+            echo "Add an org-scoped secret with contents:read on that repository."
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${MODULE_READ_TOKEN}@github.com/".insteadOf "https://github.com/"
           echo "GOPRIVATE=github.com/HaikeiLabs/*" >> "$GITHUB_ENV"
 
       - name: Build
