@@ -2,10 +2,15 @@ COMPOSE ?= docker compose
 DEV_COMPOSE = $(COMPOSE) -f compose.dev.yaml
 OPENWEBUI_COMPOSE = $(DEV_COMPOSE) --profile openwebui
 # Works from either the repository checkout or a worktree under .worktrees.
-CONTROL_PLANE_DIR ?= $(if $(wildcard ../kei-policy-catalog/Makefile),../kei-policy-catalog,../../kei-policy-catalog)
+# kei-console starts the policy catalog and exposes the runtime/CLI proxy routes.
+CONTROL_PLANE_DIR ?= $(if $(wildcard ../kei-console/Makefile),../kei-console,../../kei-console)
 CONTROL_PLANE_TARGET ?= dev
+KEI_CLI ?= kei
+KEI_CLI_API_URL ?= http://localhost:3000
+KEI_RUNTIME_CONTROL_PLANE_URL ?= http://host.docker.internal:8082
+RUNTIME_ENV_FILE ?= .runtime.env
 
-.PHONY: dev dev-down dev-logs dev-config dev-control-plane dev-control-plane-down dev-control-plane-logs dev-openwebui dev-openwebui-down dev-openwebui-logs test
+.PHONY: dev dev-down dev-logs dev-config dev-control-plane dev-control-plane-down dev-control-plane-logs dev-runtime-token dev-openwebui dev-openwebui-down dev-openwebui-logs test
 
 # Start the connector runtime. OpenWebUI is an optional client added in a
 # later development profile; the default target is the runtime itself.
@@ -30,6 +35,21 @@ dev-control-plane-down:
 
 dev-control-plane-logs:
 	$(MAKE) -C "$(CONTROL_PLANE_DIR)" dev-logs
+
+# Retrieve a one-time runtime credential for an installation created through
+# the Kei console/CLI flow, without printing the token to the terminal.
+dev-runtime-token:
+	@test -n "$(KEI_INSTALLATION_ID)" || (echo "KEI_INSTALLATION_ID is required" >&2; exit 1)
+	@command -v "$(KEI_CLI)" >/dev/null || (echo "$(KEI_CLI) is not on PATH" >&2; exit 1)
+	@set -eu; \
+		tmp="$$(mktemp)"; \
+		trap 'rm -f "$$tmp"' EXIT; \
+		"$(KEI_CLI)" bot credential --api-url "$(KEI_CLI_API_URL)" --installation "$(KEI_INSTALLATION_ID)" > "$$tmp"; \
+		token="$$(tr -d '\r\n' < "$$tmp")"; \
+		test -n "$$token"; \
+		umask 077; \
+		{ printf 'export KEI_RUNTIME_CONTROL_PLANE_URL="%s"\n' "$(KEI_RUNTIME_CONTROL_PLANE_URL)"; printf 'export KEI_RUNTIME_TOKEN="%s"\n' "$$token"; } > "$(RUNTIME_ENV_FILE)"; \
+		echo "Wrote runtime environment to $(RUNTIME_ENV_FILE); source it before make dev-openwebui."
 
 dev-openwebui:
 	$(OPENWEBUI_COMPOSE) up --build
