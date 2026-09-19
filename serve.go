@@ -50,6 +50,7 @@ func runServe(args []string) int {
 type runtimeHTTPHandler struct {
 	cfg      Config
 	profiles ControlPlaneModelProfileClient
+	abac     ABACClient
 	client   *http.Client
 }
 
@@ -57,6 +58,7 @@ func newRuntimeHTTPHandler(cfg Config) http.Handler {
 	return &runtimeHTTPHandler{
 		cfg:      cfg,
 		profiles: NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second),
+		abac:     NewABACClient(cfg.RuntimeControlPlaneURL, "", 10*time.Second),
 		client:   &http.Client{Timeout: 2 * time.Minute},
 	}
 }
@@ -122,6 +124,10 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		writeRuntimeError(w, http.StatusServiceUnavailable, "model_unavailable", "configured model is not active")
 		return
 	}
+	if err := h.authorizeModel(ctx, profile); err != nil {
+		writeRuntimeError(w, http.StatusForbidden, "model_not_authorized", err.Error())
+		return
+	}
 
 	response, err := h.invokeProvider(ctx, profile, body)
 	if err != nil {
@@ -136,6 +142,37 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, response.Body)
+}
+
+func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile) error {
+	// Use the same policy-catalog /api/v1/authorize path as the authorize CLI.
+	// The initial HTTP adapter receives a trusted subject from runtime
+	// configuration; OpenWebUI subject assertions will be added separately.
+	subject := envOr("KEI_PROXY_INVOKING_SUBJECT", "")
+	resource := "model:" + profile.ProfileID
+	decision, err := h.abac.Authorize(ctx, AuthorizeRequest{
+		HarnessToken:    h.cfg.RuntimeToken,
+		UserID:          subject,
+		ProviderUserID:  h.cfg.ProviderUserID,
+		Action:          "model.invoke",
+		Resource:        resource,
+		Service:         "model",
+		InvokingSubject: subject,
+		AgentID:         envOr("KEI_PROXY_AGENT_ID", ""),
+		AgentVersion:    h.cfg.RuntimeVersion,
+		Framework:       envOr("KEI_PROXY_FRAMEWORK", "openai-http"),
+		Resources:       []string{resource},
+	})
+	if err != nil {
+		return err
+	}
+	if decision.Decision != "allow" {
+		if decision.Reason != "" {
+			return errors.New(decision.Reason)
+		}
+		return errors.New("policy denied model invocation")
+	}
+	return nil
 }
 
 func (h *runtimeHTTPHandler) runtimeConfigError() error {

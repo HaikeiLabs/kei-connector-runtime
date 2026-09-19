@@ -71,9 +71,11 @@ kei-proxy serve
 ```
 
 The initial endpoints are `GET /healthz`, `GET /readyz`, and
-`POST /v1/chat/completions`. OpenWebUI configuration and a bundled local
-OpenWebUI service will be added separately; the runtime remains independently
-usable without that client.
+`POST /v1/chat/completions`. Chat requests authenticate with the runtime token,
+obtain a `model.invoke` decision from policy-catalog, and only then resolve
+provider credentials and call the model endpoint. OpenWebUI configuration and
+a bundled local OpenWebUI service will be added separately; the runtime
+remains independently usable without that client.
 
 It was briefly private, which required a GitHub App token or PAT in CI and a
 build secret in the Dockerfile. Making the contract public removed all of that:
