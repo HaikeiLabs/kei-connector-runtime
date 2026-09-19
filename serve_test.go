@@ -58,6 +58,32 @@ func TestRuntimeHTTPHandlerRequiresBearerToken(t *testing.T) {
 	}
 }
 
+func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
+	config := Config{
+		RuntimeControlPlaneURL: "http://control-plane.test",
+		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
+	}
+	handler := &runtimeHTTPHandler{
+		cfg: config,
+		profiles: fakeRuntimeProfiles{profile: &ModelProfile{
+			ProfileID: "profile-1",
+			Status:    "active",
+		}},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer "+config.RuntimeToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"id":"profile-1"`) {
+		t.Fatalf("body = %s", response.Body.String())
+	}
+}
+
 type fakeRuntimeProfiles struct {
 	profile *ModelProfile
 }

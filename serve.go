@@ -70,11 +70,53 @@ func (h *runtimeHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	case r.Method == http.MethodGet && r.URL.Path == "/readyz":
 		h.handleReady(w)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+		h.handleModels(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		h.handleChatCompletions(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type openAIModelList struct {
+	Object string        `json:"object"`
+	Data   []openAIModel `json:"data"`
+}
+
+type openAIModel struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	OwnedBy string `json:"owned_by"`
+}
+
+func (h *runtimeHTTPHandler) handleModels(w http.ResponseWriter, r *http.Request) {
+	if err := h.runtimeConfigError(); err != nil {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
+		return
+	}
+	if !h.authorized(r) {
+		writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	profile, err := h.profiles.GetRuntimeAssignedModelProfile(ctx)
+	if err != nil {
+		writeRuntimeError(w, http.StatusBadGateway, "profile_unavailable", err.Error())
+		return
+	}
+	models := openAIModelList{Object: "list", Data: []openAIModel{}}
+	if profile != nil && profile.Status == "active" {
+		models.Data = append(models.Data, openAIModel{
+			ID:      profile.ProfileID,
+			Object:  "model",
+			OwnedBy: "kei",
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(models)
 }
 
 func (h *runtimeHTTPHandler) handleReady(w http.ResponseWriter) {

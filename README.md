@@ -70,8 +70,9 @@ KEI_RUNTIME_TOKEN=kh_live_... \
 kei-proxy serve
 ```
 
-The initial endpoints are `GET /healthz`, `GET /readyz`, and
-`POST /v1/chat/completions`. Chat requests authenticate with the runtime token,
+The initial endpoints are `GET /healthz`, `GET /readyz`, `GET /v1/models`, and
+`POST /v1/chat/completions`. The models endpoint advertises the active profile
+assigned to the runtime. Chat requests authenticate with the runtime token,
 obtain a `model.invoke` decision from policy-catalog, and only then resolve
 provider credentials and call the model endpoint. OpenWebUI configuration and
 a bundled local OpenWebUI service will be added separately; the runtime
