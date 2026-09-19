@@ -62,6 +62,19 @@ Run the local container with:
 make dev
 ```
 
+To start the runtime with the optional OpenWebUI client:
+
+```sh
+make dev-openwebui
+```
+
+OpenWebUI is available at `http://localhost:3000` and is configured to use
+the runtime at `http://connector-runtime:8085/v1`. Set
+`KEI_RUNTIME_CONTROL_PLANE_URL` and `KEI_RUNTIME_TOKEN` before starting the
+stack. OpenWebUI persists its connection settings in the local
+`openwebui-data` volume; remove that volume when changing its first-launch
+environment configuration.
+
 Or run the binary already on your `PATH`:
 
 ```sh
