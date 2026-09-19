@@ -68,6 +68,26 @@ To start the runtime with the optional OpenWebUI client:
 make dev-openwebui
 ```
 
+The runtime can also delegate local control-plane startup to the sibling
+`kei-policy-catalog` checkout:
+
+```sh
+make dev-control-plane
+```
+
+By default this runs `kei-policy-catalog`'s `make dev` target and serves the
+policy catalog on `http://localhost:8080`. Override `CONTROL_PLANE_DIR` when
+the checkout is elsewhere. In a second terminal, point the runtime at it:
+
+```sh
+export KEI_RUNTIME_CONTROL_PLANE_URL=http://host.docker.internal:8080
+export KEI_RUNTIME_TOKEN=kh_live_...
+make dev-openwebui
+```
+
+`host.docker.internal` is used because the runtime and OpenWebUI run in Docker
+while the delegated control plane's port is published on the host.
+
 OpenWebUI is available at `http://localhost:3000` and is configured to use
 the runtime at `http://connector-runtime:8085/v1`. Set
 `KEI_RUNTIME_CONTROL_PLANE_URL` and `KEI_RUNTIME_TOKEN` before starting the

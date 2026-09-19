@@ -12,6 +12,8 @@ services:
       KEI_RUNTIME_VERSION: ${KEI_RUNTIME_VERSION:-local}
     ports:
       - "${KEI_PROXY_PORT:-8085}:8085"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/healthz"]
       interval: 2s
