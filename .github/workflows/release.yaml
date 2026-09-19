@@ -60,7 +60,7 @@ jobs:
     name: Validate tag
     needs: [authorize_manual_release]
     if: always() && (needs.authorize_manual_release.result == 'success' || needs.authorize_manual_release.result == 'skipped')
-    runs-on: kei-eks-deploy
+    runs-on: kei-cli-release
     outputs:
       tag: ${{ steps.parse.outputs.tag }}
       version: ${{ steps.parse.outputs.version }}
@@ -124,7 +124,7 @@ jobs:
   release:
     name: Release
     needs: [validate-tag]
-    runs-on: kei-eks-deploy
+    runs-on: kei-cli-release
     permissions:
       contents: write
     environment: release
