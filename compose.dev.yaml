@@ -1,0 +1,14 @@
+services:
+  connector-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["serve"]
+    environment:
+      ENV: ${ENV:-local}
+      KEI_PROXY_LISTEN_ADDR: ${KEI_PROXY_LISTEN_ADDR:-0.0.0.0:8085}
+      KEI_RUNTIME_CONTROL_PLANE_URL: ${KEI_RUNTIME_CONTROL_PLANE_URL:-}
+      KEI_RUNTIME_TOKEN: ${KEI_RUNTIME_TOKEN:-}
+      KEI_RUNTIME_VERSION: ${KEI_RUNTIME_VERSION:-local}
+    ports:
+      - "${KEI_PROXY_PORT:-8085}:8085"

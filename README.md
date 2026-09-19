@@ -50,6 +50,31 @@ go test ./...
 docker build -t kei-connector-runtime .
 ```
 
+## Local HTTP development
+
+The runtime can expose its OpenAI-compatible adapter with `serve`. It is
+bound to port `8085` by default and requires the runtime installation token
+and control-plane URL before it will report ready or accept model requests.
+
+Run the local container with:
+
+```sh
+make dev
+```
+
+Or run the binary already on your `PATH`:
+
+```sh
+KEI_RUNTIME_CONTROL_PLANE_URL=https://... \
+KEI_RUNTIME_TOKEN=kh_live_... \
+kei-proxy serve
+```
+
+The initial endpoints are `GET /healthz`, `GET /readyz`, and
+`POST /v1/chat/completions`. OpenWebUI configuration and a bundled local
+OpenWebUI service will be added separately; the runtime remains independently
+usable without that client.
+
 It was briefly private, which required a GitHub App token or PAT in CI and a
 build secret in the Dockerfile. Making the contract public removed all of that:
 the module resolves through the public proxy and is verified against the public

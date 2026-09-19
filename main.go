@@ -36,6 +36,8 @@ func main() {
 		code = runInit(args[1:], os.Stdout, os.Stderr)
 	} else if args[0] == "runtime" {
 		code = runRuntime(args[1:])
+	} else if args[0] == "serve" {
+		code = runServe(args[1:])
 	} else if args[0] == "version" || args[0] == "-v" || args[0] == "--version" {
 		printVersion(os.Stdout)
 	} else if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
@@ -97,6 +99,7 @@ Commands:
   org          manage organization members (list, add, remove, update)
   init         provision a member and/or agent via canonical ABAC initialization
   runtime      report and maintain a customer runtime installation heartbeat
+  serve        start the local OpenAI-compatible HTTP listener
   help         show this help
 
 Environment:
