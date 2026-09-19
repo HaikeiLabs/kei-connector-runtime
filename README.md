@@ -69,24 +69,59 @@ make dev-openwebui
 ```
 
 The runtime can also delegate local control-plane startup to the sibling
-`kei-policy-catalog` checkout:
+`kei-console` checkout:
 
 ```sh
 make dev-control-plane
 ```
 
-By default this runs `kei-policy-catalog`'s `make dev` target and serves the
-policy catalog on `http://localhost:8080`. Override `CONTROL_PLANE_DIR` when
-the checkout is elsewhere. In a second terminal, point the runtime at it:
+By default this runs `kei-console`'s `make dev` target, which starts the
+console, policy catalog, OIDC bridge, and PostgreSQL. Override
+`CONTROL_PLANE_DIR` when the checkout is elsewhere. The runtime reaches the
+console's runtime proxy on port `8082` from its container:
 
 ```sh
-export KEI_RUNTIME_CONTROL_PLANE_URL=http://host.docker.internal:8080
+export KEI_RUNTIME_CONTROL_PLANE_URL=http://host.docker.internal:8082
 export KEI_RUNTIME_TOKEN=kh_live_...
 make dev-openwebui
 ```
 
+Use `http://host.docker.internal:8082` for `KEI_RUNTIME_CONTROL_PLANE_URL`.
 `host.docker.internal` is used because the runtime and OpenWebUI run in Docker
-while the delegated control plane's port is published on the host.
+while the delegated control plane is published on the host.
+
+### Provision a local runtime token
+
+The runtime token is a one-time credential issued for a Kei runtime
+installation. First install and log in to `kei-cli` against the local console
+frontend/API:
+
+```sh
+kei login --api-url http://localhost:3000
+```
+
+Create an installation through the CLI or console, assigning it to the agent
+whose model profile should be used:
+
+```sh
+kei bot init \
+  --api-url http://localhost:3000 \
+  --platform slack \
+  --name local-openwebui \
+  --agent AGENT_ID
+```
+
+Copy the returned installation ID, then retrieve its runtime credential into a
+mode-600 local environment file:
+
+```sh
+make dev-runtime-token KEI_INSTALLATION_ID=INSTALLATION_ID
+source .runtime.env
+```
+
+The target uses `kei bot credential`, never prints the token, and writes the
+control-plane URL and token to `.runtime.env`. That file is local-only and must
+not be committed.
 
 OpenWebUI is available at `http://localhost:3000` and is configured to use
 the runtime at `http://connector-runtime:8085/v1`. Set
