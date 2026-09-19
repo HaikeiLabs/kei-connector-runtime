@@ -106,7 +106,7 @@ whose model profile should be used:
 ```sh
 kei bot init \
   --api-url http://localhost:3000 \
-  --platform slack \
+  --platform cli \
   --name local-openwebui \
   --agent AGENT_ID
 ```
@@ -118,6 +118,18 @@ mode-600 local environment file:
 make dev-runtime-token KEI_INSTALLATION_ID=INSTALLATION_ID
 source .runtime.env
 ```
+
+Or let the runtime repository perform both steps after `kei login`:
+
+```sh
+make dev-provision-runtime KEI_AGENT_ID=AGENT_ID
+source .runtime.env
+```
+
+The combined target uses `kei bot init --platform cli` and then
+`kei bot credential`. Pass `KEI_INSTALLATION_ID=...` to reuse an existing
+installation instead of creating another one. Set `KEI_SUBJECT` if the local
+policy configuration requires a fixed development subject.
 
 The target uses `kei bot credential`, never prints the token, and writes the
 control-plane URL and token to `.runtime.env`. That file is local-only and must
