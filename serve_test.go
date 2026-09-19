@@ -84,17 +84,48 @@ func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
 	}
 }
 
+func TestRuntimeHTTPHandlerFallsBackToOrganizationDefaultModel(t *testing.T) {
+	config := Config{
+		RuntimeControlPlaneURL: "http://control-plane.test",
+		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
+	}
+	handler := &runtimeHTTPHandler{
+		cfg: config,
+		profiles: fakeRuntimeProfiles{defaultProfile: &ModelProfile{
+			ProfileID: "org-default-profile",
+			Status:    "active",
+		}},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer "+config.RuntimeToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"org-default-profile"`) {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 type fakeRuntimeProfiles struct {
-	profile *ModelProfile
+	profile        *ModelProfile
+	assigned       *ModelProfile
+	defaultProfile *ModelProfile
 }
 
 func (f fakeRuntimeProfiles) GetRuntimeModelProfile(context.Context, string) (*ModelProfile, error) {
 	return f.profile, nil
 }
 func (f fakeRuntimeProfiles) GetRuntimeDefaultModelProfile(context.Context) (*ModelProfile, error) {
+	if f.defaultProfile != nil {
+		return f.defaultProfile, nil
+	}
 	return f.profile, nil
 }
 func (f fakeRuntimeProfiles) GetRuntimeAssignedModelProfile(context.Context) (*ModelProfile, error) {
+	if f.assigned != nil {
+		return f.assigned, nil
+	}
 	return f.profile, nil
 }
 

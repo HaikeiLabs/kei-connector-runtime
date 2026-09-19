@@ -102,7 +102,7 @@ func (h *runtimeHTTPHandler) handleModels(w http.ResponseWriter, r *http.Request
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	profile, err := h.profiles.GetRuntimeAssignedModelProfile(ctx)
+	profile, err := h.resolveAssignedOrDefaultProfile(ctx)
 	if err != nil {
 		writeRuntimeError(w, http.StatusBadGateway, "profile_unavailable", err.Error())
 		return
@@ -241,9 +241,20 @@ func (h *runtimeHTTPHandler) authorized(r *http.Request) bool {
 
 func (h *runtimeHTTPHandler) resolveProfile(ctx context.Context, model string) (*ModelProfile, error) {
 	if model == "" {
-		return h.profiles.GetRuntimeAssignedModelProfile(ctx)
+		return h.resolveAssignedOrDefaultProfile(ctx)
 	}
 	return h.profiles.GetRuntimeModelProfile(ctx, model)
+}
+
+func (h *runtimeHTTPHandler) resolveAssignedOrDefaultProfile(ctx context.Context) (*ModelProfile, error) {
+	profile, err := h.profiles.GetRuntimeAssignedModelProfile(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if profile != nil {
+		return profile, nil
+	}
+	return h.profiles.GetRuntimeDefaultModelProfile(ctx)
 }
 
 func (h *runtimeHTTPHandler) invokeProvider(ctx context.Context, profile *ModelProfile, body []byte) (*http.Response, error) {

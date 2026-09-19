@@ -40,7 +40,6 @@ dev-control-plane-logs:
 # Create a platform-neutral local runtime installation, mint its credential,
 # and write the environment needed by the local Compose stack.
 dev-provision-runtime:
-	@test -n "$(KEI_AGENT_ID)" || (echo "KEI_AGENT_ID is required" >&2; exit 1)
 	@command -v "$(KEI_CLI)" >/dev/null || (echo "$(KEI_CLI) is not on PATH" >&2; exit 1)
 	@set -eu; \
 		installation_id="$(KEI_INSTALLATION_ID)"; \
@@ -48,7 +47,11 @@ dev-provision-runtime:
 		token_tmp="$$(mktemp)"; \
 		trap 'rm -f "$$installation_tmp" "$$token_tmp"' EXIT; \
 		if [ -z "$$installation_id" ]; then \
-			"$(KEI_CLI)" bot init --api-url "$(KEI_CLI_API_URL)" --platform cli --name "$(KEI_INSTALLATION_NAME)" --agent "$(KEI_AGENT_ID)" > "$$installation_tmp"; \
+			if [ -n "$(KEI_AGENT_ID)" ]; then \
+				"$(KEI_CLI)" bot init --api-url "$(KEI_CLI_API_URL)" --platform cli --name "$(KEI_INSTALLATION_NAME)" --agent "$(KEI_AGENT_ID)" > "$$installation_tmp"; \
+			else \
+				"$(KEI_CLI)" bot init --api-url "$(KEI_CLI_API_URL)" --platform cli --name "$(KEI_INSTALLATION_NAME)" > "$$installation_tmp"; \
+			fi; \
 			installation_id="$$(sed -n 's/.*"installation_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$$installation_tmp")"; \
 		fi; \
 		test -n "$$installation_id" || { echo "could not determine installation ID" >&2; exit 1; }; \
