@@ -57,15 +57,11 @@ type authorizeParams struct {
 	workspaceID     string
 }
 
-func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
-	service := p.registry.Service(p.tool)
-
-	// Prepend service to resource if not already present (e.g., HaikeiLabs/kei -> github:repo:HaikeiLabs/kei)
-	resource := p.resource
-	if service != "" && !strings.HasPrefix(resource, service+":") {
-		resource = service + ":repo:" + resource
-	}
-
+// authorizeDecision is the shared policy-catalog decision path used by both
+// the authorize CLI and long-running runtime adapters. Credential resolution
+// stays outside this helper so every caller can enforce allow before touching
+// secret material.
+func authorizeDecision(p authorizeParams, service, resource string) (*AuthorizeResponse, error) {
 	resp, err := p.abac.Authorize(p.ctx, AuthorizeRequest{
 		HarnessToken:    p.harness,
 		UserID:          p.user,
@@ -84,7 +80,23 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 		Resources:       p.resources,
 	})
 	if err != nil {
-		return AuthorizeOutput{}, fmt.Errorf("authorization unavailable (fail closed): %w", err)
+		return nil, fmt.Errorf("authorization unavailable (fail closed): %w", err)
+	}
+	return resp, nil
+}
+
+func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
+	service := p.registry.Service(p.tool)
+
+	// Prepend service to resource if not already present (e.g., HaikeiLabs/kei -> github:repo:HaikeiLabs/kei)
+	resource := p.resource
+	if service != "" && !strings.HasPrefix(resource, service+":") {
+		resource = service + ":repo:" + resource
+	}
+
+	resp, err := authorizeDecision(p, service, resource)
+	if err != nil {
+		return AuthorizeOutput{}, err
 	}
 
 	out := AuthorizeOutput{}
