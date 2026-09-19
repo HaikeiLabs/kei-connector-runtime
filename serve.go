@@ -150,19 +150,21 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	// configuration; OpenWebUI subject assertions will be added separately.
 	subject := envOr("KEI_PROXY_INVOKING_SUBJECT", "")
 	resource := "model:" + profile.ProfileID
-	decision, err := h.abac.Authorize(ctx, AuthorizeRequest{
-		HarnessToken:    h.cfg.RuntimeToken,
-		UserID:          subject,
-		ProviderUserID:  h.cfg.ProviderUserID,
-		Action:          "model.invoke",
-		Resource:        resource,
-		Service:         "model",
-		InvokingSubject: subject,
-		AgentID:         envOr("KEI_PROXY_AGENT_ID", ""),
-		AgentVersion:    h.cfg.RuntimeVersion,
-		Framework:       envOr("KEI_PROXY_FRAMEWORK", "openai-http"),
-		Resources:       []string{resource},
-	})
+	decision, err := authorizeDecision(authorizeParams{
+		ctx:             ctx,
+		user:            subject,
+		providerUser:    h.cfg.ProviderUserID,
+		action:          "model.invoke",
+		resource:        resource,
+		harness:         h.cfg.RuntimeToken,
+		abac:            h.abac,
+		invokingSubject: subject,
+		agentID:         envOr("KEI_PROXY_AGENT_ID", ""),
+		agentVersion:    h.cfg.RuntimeVersion,
+		framework:       envOr("KEI_PROXY_FRAMEWORK", "openai-http"),
+		spanID:          envOr("KEI_PROXY_SPAN_ID", ""),
+		resources:       []string{resource},
+	}, "model", resource)
 	if err != nil {
 		return err
 	}
