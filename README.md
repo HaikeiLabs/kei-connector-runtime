@@ -100,16 +100,18 @@ frontend/API:
 kei login --api-url http://localhost:3000
 ```
 
-Create an installation through the CLI or console, assigning it to the agent
-whose model profile should be used:
+Create an installation through the CLI or console:
 
 ```sh
 kei bot init \
   --api-url http://localhost:3000 \
   --platform cli \
-  --name local-openwebui \
-  --agent AGENT_ID
+  --name local-openwebui
 ```
+
+The agent assignment is optional. Without `--agent`, the runtime uses the
+organization default model profile. Provide `--agent AGENT_ID` when the local
+installation should use that agent's model profile.
 
 Copy the returned installation ID, then retrieve its runtime credential into a
 mode-600 local environment file:
@@ -122,12 +124,13 @@ source .runtime.env
 Or let the runtime repository perform both steps after `kei login`:
 
 ```sh
-make dev-provision-runtime KEI_AGENT_ID=AGENT_ID
+make dev-provision-runtime
 source .runtime.env
 ```
 
 The combined target uses `kei bot init --platform cli` and then
-`kei bot credential`. Pass `KEI_INSTALLATION_ID=...` to reuse an existing
+`kei bot credential`. Pass `KEI_AGENT_ID=AGENT_ID` when an agent-specific model
+profile is desired, or `KEI_INSTALLATION_ID=...` to reuse an existing
 installation instead of creating another one. Set `KEI_SUBJECT` if the local
 policy configuration requires a fixed development subject.
 
