@@ -49,7 +49,7 @@ jobs:
         run: go test -count=1 -race ./...
 
       - name: Binary name compatibility
-        # ADR-017 §4: Kei-Chat-Harness resolves this binary through
+        # ADR-017 §4: kei-chat-harness resolves this binary through
         # KEI_PROXY_PATH and kei-cli through exec.LookPath("kei-proxy") with a
         # /tmp/kei-proxy fallback. The release artifact is published under the
         # kei-proxy/ S3 prefix. Renaming the binary breaks those consumers, so
