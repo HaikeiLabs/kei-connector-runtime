@@ -62,6 +62,21 @@ Run the local container with:
 make dev
 ```
 
+The local runtime Compose stack includes MiniStack as an AWS Secrets Manager
+emulator. It is persisted in the `ministack-data` volume and the runtime uses
+the normal AWS Secrets Manager backend with an opt-in endpoint override:
+
+```sh
+make dev-ministack
+curl -fsS http://localhost:4566/_ministack/health
+```
+
+`make dev` starts MiniStack automatically. Use `make dev-ministack-down` to
+remove only its container while preserving its state volume. The override is
+local-only; production deployments continue to use AWS Secrets Manager through
+workload identity. Set `MINISTACK_IMAGE` to test another pinned MiniStack
+image version.
+
 To start the runtime with the optional OpenWebUI client:
 
 ```sh

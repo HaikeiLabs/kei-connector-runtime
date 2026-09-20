@@ -6,6 +6,23 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
+func TestNewAWSSecretsManagerStoreUsesLocalEndpointOverride(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("KEI_AWS_SECRETS_MANAGER_ENDPOINT", "http://ministack:4566")
+
+	store, err := NewAWSSecretsManagerStore()
+	if err != nil {
+		t.Fatalf("NewAWSSecretsManagerStore: %v", err)
+	}
+	awsStore, ok := store.(*awsSecretsManagerStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *awsSecretsManagerStore", store)
+	}
+	if awsStore.base.BaseEndpoint == nil || *awsStore.base.BaseEndpoint != "http://ministack:4566" {
+		t.Fatalf("base endpoint = %v, want http://ministack:4566", awsStore.base.BaseEndpoint)
+	}
+}
+
 // TestNewAWSSecretsManagerStoreFromConfigIsInjectable exercises the
 // workload-identity seam: an injected aws.Config (which in production carries
 // the IRSA web-identity provider) is used to build the store, and region

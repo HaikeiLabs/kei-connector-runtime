@@ -11,12 +11,18 @@ KEI_RUNTIME_CONTROL_PLANE_URL ?= http://host.docker.internal:8082
 KEI_INSTALLATION_NAME ?= local-openwebui
 RUNTIME_ENV_FILE ?= .runtime.env
 
-.PHONY: dev dev-down dev-logs dev-config dev-control-plane dev-control-plane-down dev-control-plane-logs dev-provision-runtime dev-runtime-token dev-openwebui dev-openwebui-down dev-openwebui-logs dev-local test
+.PHONY: dev dev-down dev-logs dev-config dev-ministack dev-ministack-down dev-control-plane dev-control-plane-down dev-control-plane-logs dev-provision-runtime dev-runtime-token dev-openwebui dev-openwebui-down dev-openwebui-logs dev-local test
 
 # Start the connector runtime. OpenWebUI is an optional client added in a
 # later development profile; the default target is the runtime itself.
 dev:
 	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(DEV_COMPOSE) up -d --build
+
+dev-ministack:
+	$(DEV_COMPOSE) up -d ministack
+
+dev-ministack-down:
+	$(DEV_COMPOSE) rm -sf ministack
 
 dev-down:
 	$(DEV_COMPOSE) down

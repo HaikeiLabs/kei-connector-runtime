@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -40,6 +41,12 @@ func NewAWSSecretsManagerStore() (SecretStore, error) {
 	awsCfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("create AWS config: %w", err)
+	}
+	// Local development can point the normal AWS Secrets Manager client at an
+	// emulator such as MiniStack. Production keeps the default AWS endpoint and
+	// workload-identity behavior because this override is opt-in.
+	if endpoint := strings.TrimSpace(os.Getenv("KEI_AWS_SECRETS_MANAGER_ENDPOINT")); endpoint != "" {
+		awsCfg.BaseEndpoint = aws.String(endpoint)
 	}
 	return NewAWSSecretsManagerStoreFromConfig(awsCfg)
 }
