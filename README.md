@@ -68,6 +68,17 @@ To start the runtime with the optional OpenWebUI client:
 make dev-openwebui
 ```
 
+To start the control plane, runtime, and OpenWebUI together after provisioning
+the local installation:
+
+```sh
+make dev-local
+```
+
+This starts the runtime with a bootstrap heartbeat and then binds the pending
+installation automatically. The target expects `KEI_RUNTIME_INSTALLATION_ID`
+in `.runtime.env`, which is written by `make dev-provision-runtime`.
+
 The runtime can also delegate local control-plane startup to the sibling
 `kei-console` checkout:
 
@@ -147,7 +158,7 @@ The target uses `kei bot credential`, never prints the token, and writes the
 control-plane URL and token to `.runtime.env`. That file is local-only and must
 not be committed.
 
-OpenWebUI is available at `http://localhost:3000` and is configured to use
+OpenWebUI is available at `http://localhost:3001` by default and is configured to use
 the runtime at `http://connector-runtime:8085/v1`. Set
 `KEI_RUNTIME_CONTROL_PLANE_URL` and `KEI_RUNTIME_TOKEN` before starting the
 stack. OpenWebUI persists its connection settings in the local
