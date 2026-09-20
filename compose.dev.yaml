@@ -3,7 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["serve"]
+    # Report the installation heartbeat before serving so local setup can bind
+    # the pending installation after the container is healthy.
+    command: ["sh", "-c", "if [ -n \"$${KEI_RUNTIME_TOKEN:-}\" ]; then ./kei-proxy runtime bootstrap; fi; exec ./kei-proxy serve"]
     environment:
       ENV: ${ENV:-local}
       KEI_PROXY_LISTEN_ADDR: ${KEI_PROXY_LISTEN_ADDR:-0.0.0.0:8085}
@@ -27,12 +29,13 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://connector-runtime:8085/v1
       OPENAI_API_KEY: ${KEI_RUNTIME_TOKEN:-}
+      WEBUI_AUTH: ${OPENWEBUI_AUTH:-false}
       ENABLE_SIGNUP: ${OPENWEBUI_ENABLE_SIGNUP:-true}
     depends_on:
       connector-runtime:
         condition: service_healthy
     ports:
-      - "${OPENWEBUI_PORT:-3000}:8080"
+      - "${OPENWEBUI_PORT:-3001}:8080"
     volumes:
       - openwebui-data:/app/backend/data
 

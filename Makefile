@@ -59,7 +59,7 @@ dev-provision-runtime:
 		token="$$(tr -d '\r\n' < "$$token_tmp")"; \
 		test -n "$$token"; \
 		umask 077; \
-		{ printf 'export KEI_RUNTIME_CONTROL_PLANE_URL="%s"\n' "$(KEI_RUNTIME_CONTROL_PLANE_URL)"; printf 'export KEI_RUNTIME_TOKEN="%s"\n' "$$token"; printf 'export KEI_PROXY_INVOKING_SUBJECT="%s"\n' "$(KEI_SUBJECT)"; } > "$(RUNTIME_ENV_FILE)"; \
+		{ printf 'export KEI_RUNTIME_CONTROL_PLANE_URL="%s"\n' "$(KEI_RUNTIME_CONTROL_PLANE_URL)"; printf 'export KEI_RUNTIME_INSTALLATION_ID="%s"\n' "$$installation_id"; printf 'export KEI_RUNTIME_TOKEN="%s"\n' "$$token"; printf 'export KEI_PROXY_INVOKING_SUBJECT="%s"\n' "$(KEI_SUBJECT)"; } > "$(RUNTIME_ENV_FILE)"; \
 		echo "Provisioned installation $$installation_id and wrote runtime environment to $(RUNTIME_ENV_FILE)."
 
 # Retrieve a one-time runtime credential for an installation created through
@@ -74,7 +74,7 @@ dev-runtime-token:
 		token="$$(tr -d '\r\n' < "$$tmp")"; \
 		test -n "$$token"; \
 		umask 077; \
-		{ printf 'export KEI_RUNTIME_CONTROL_PLANE_URL="%s"\n' "$(KEI_RUNTIME_CONTROL_PLANE_URL)"; printf 'export KEI_RUNTIME_TOKEN="%s"\n' "$$token"; } > "$(RUNTIME_ENV_FILE)"; \
+		{ printf 'export KEI_RUNTIME_CONTROL_PLANE_URL="%s"\n' "$(KEI_RUNTIME_CONTROL_PLANE_URL)"; printf 'export KEI_RUNTIME_INSTALLATION_ID="%s"\n' "$(KEI_INSTALLATION_ID)"; printf 'export KEI_RUNTIME_TOKEN="%s"\n' "$$token"; } > "$(RUNTIME_ENV_FILE)"; \
 		echo "Wrote runtime environment to $(RUNTIME_ENV_FILE); source it before make dev-openwebui."
 
 dev-openwebui:
@@ -84,8 +84,16 @@ dev-openwebui:
 # intentionally separate because it requires an authenticated CLI session and
 # may encounter an existing local installation.
 dev-local: dev-control-plane
-	@test -f "$(RUNTIME_ENV_FILE)" || { echo "$(RUNTIME_ENV_FILE) is required; run make dev-provision-runtime first" >&2; exit 1; }
-	$(MAKE) dev-openwebui
+	@set -eu; \
+		test -f "$(RUNTIME_ENV_FILE)" || { echo "$(RUNTIME_ENV_FILE) is required; run make dev-provision-runtime first" >&2; exit 1; }; \
+		set -a; . "$(RUNTIME_ENV_FILE)"; set +a; \
+		test -n "$${KEI_RUNTIME_INSTALLATION_ID:-}" || { echo "KEI_RUNTIME_INSTALLATION_ID is missing; run make dev-provision-runtime or make dev-runtime-token KEI_INSTALLATION_ID=..." >&2; exit 1; }; \
+		$(MAKE) dev-openwebui; \
+		attempt=0; until curl -fsS "http://localhost:$${KEI_PROXY_PORT:-8085}/healthz" >/dev/null; do \
+			attempt=$$((attempt + 1)); test "$$attempt" -lt 30 || { echo "connector runtime did not become healthy" >&2; exit 1; }; sleep 1; \
+		done; \
+		"$(KEI_CLI)" bot bind --api-url "$(KEI_CLI_API_URL)" --installation "$${KEI_RUNTIME_INSTALLATION_ID}" || { echo "runtime started but binding failed; inspect the installation with kei bot status" >&2; exit 1; }; \
+		echo "Local control plane, connector runtime, and OpenWebUI are running."
 
 dev-openwebui-down:
 	$(OPENWEBUI_COMPOSE) down
