@@ -7,8 +7,34 @@ services:
     environment:
       ENV: ${ENV:-local}
       KEI_PROXY_LISTEN_ADDR: ${KEI_PROXY_LISTEN_ADDR:-0.0.0.0:8085}
-      KEI_RUNTIME_CONTROL_PLANE_URL: ${KEI_RUNTIME_CONTROL_PLANE_URL:-}
+      KEI_RUNTIME_CONTROL_PLANE_URL: ${KEI_RUNTIME_CONTROL_PLANE_URL:-http://host.docker.internal:8082}
       KEI_RUNTIME_TOKEN: ${KEI_RUNTIME_TOKEN:-}
       KEI_RUNTIME_VERSION: ${KEI_RUNTIME_VERSION:-local}
+      KEI_PROXY_INVOKING_SUBJECT: ${KEI_PROXY_INVOKING_SUBJECT:-}
     ports:
       - "${KEI_PROXY_PORT:-8085}:8085"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/healthz"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    profiles: ["openwebui"]
+    environment:
+      OPENAI_API_BASE_URL: http://connector-runtime:8085/v1
+      OPENAI_API_KEY: ${KEI_RUNTIME_TOKEN:-}
+      ENABLE_SIGNUP: ${OPENWEBUI_ENABLE_SIGNUP:-true}
+    depends_on:
+      connector-runtime:
+        condition: service_healthy
+    ports:
+      - "${OPENWEBUI_PORT:-3000}:8080"
+    volumes:
+      - openwebui-data:/app/backend/data
+
+volumes:
+  openwebui-data:
