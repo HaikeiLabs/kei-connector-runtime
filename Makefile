@@ -11,12 +11,12 @@ KEI_RUNTIME_CONTROL_PLANE_URL ?= http://host.docker.internal:8082
 KEI_INSTALLATION_NAME ?= local-openwebui
 RUNTIME_ENV_FILE ?= .runtime.env
 
-.PHONY: dev dev-down dev-logs dev-config dev-control-plane dev-control-plane-down dev-control-plane-logs dev-provision-runtime dev-runtime-token dev-openwebui dev-openwebui-down dev-openwebui-logs test
+.PHONY: dev dev-down dev-logs dev-config dev-control-plane dev-control-plane-down dev-control-plane-logs dev-provision-runtime dev-runtime-token dev-openwebui dev-openwebui-down dev-openwebui-logs dev-local test
 
 # Start the connector runtime. OpenWebUI is an optional client added in a
 # later development profile; the default target is the runtime itself.
 dev:
-	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(DEV_COMPOSE) up --build
+	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(DEV_COMPOSE) up -d --build
 
 dev-down:
 	$(DEV_COMPOSE) down
@@ -78,7 +78,14 @@ dev-runtime-token:
 		echo "Wrote runtime environment to $(RUNTIME_ENV_FILE); source it before make dev-openwebui."
 
 dev-openwebui:
-	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(OPENWEBUI_COMPOSE) up --build
+	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(OPENWEBUI_COMPOSE) up -d --build
+
+# Start the control plane, runtime, and OpenWebUI together. Provisioning is
+# intentionally separate because it requires an authenticated CLI session and
+# may encounter an existing local installation.
+dev-local: dev-control-plane
+	@test -f "$(RUNTIME_ENV_FILE)" || { echo "$(RUNTIME_ENV_FILE) is required; run make dev-provision-runtime first" >&2; exit 1; }
+	$(MAKE) dev-openwebui
 
 dev-openwebui-down:
 	$(OPENWEBUI_COMPOSE) down
