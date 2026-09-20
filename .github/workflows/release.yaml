@@ -146,6 +146,11 @@ jobs:
           git tag "$RELEASE_TAG" "$GITHUB_SHA"
           git push origin "refs/tags/$RELEASE_TAG"
 
+      - name: Create local GoReleaser semver tag
+        env:
+          GORELEASER_TAG: v${{ needs.validate-tag.outputs.version }}
+        run: git tag --force "$GORELEASER_TAG" "$GITHUB_SHA"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
