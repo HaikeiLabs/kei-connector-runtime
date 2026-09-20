@@ -5,7 +5,8 @@ services:
       dockerfile: Dockerfile
     # Report the installation heartbeat before serving so local setup can bind
     # the pending installation after the container is healthy.
-    command: ["sh", "-c", "if [ -n \"$${KEI_RUNTIME_TOKEN:-}\" ]; then ./kei-proxy runtime bootstrap; fi; exec ./kei-proxy serve"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["if [ -n \"$${KEI_RUNTIME_TOKEN:-}\" ]; then ./kei-proxy runtime bootstrap; fi; exec ./kei-proxy serve"]
     environment:
       ENV: ${ENV:-local}
       KEI_PROXY_LISTEN_ADDR: ${KEI_PROXY_LISTEN_ADDR:-0.0.0.0:8085}
