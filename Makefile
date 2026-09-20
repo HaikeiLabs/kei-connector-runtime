@@ -6,7 +6,7 @@ OPENWEBUI_COMPOSE = $(DEV_COMPOSE) --profile openwebui
 CONTROL_PLANE_DIR ?= $(if $(wildcard ../kei-console/Makefile),../kei-console,../../kei-console)
 CONTROL_PLANE_TARGET ?= dev
 KEI_CLI ?= kei
-KEI_CLI_API_URL ?= http://localhost:3000
+KEI_CLI_API_URL ?= http://localhost:8082
 KEI_RUNTIME_CONTROL_PLANE_URL ?= http://host.docker.internal:8082
 KEI_INSTALLATION_NAME ?= local-openwebui
 RUNTIME_ENV_FILE ?= .runtime.env
@@ -16,7 +16,7 @@ RUNTIME_ENV_FILE ?= .runtime.env
 # Start the connector runtime. OpenWebUI is an optional client added in a
 # later development profile; the default target is the runtime itself.
 dev:
-	$(DEV_COMPOSE) up --build
+	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(DEV_COMPOSE) up --build
 
 dev-down:
 	$(DEV_COMPOSE) down
@@ -25,7 +25,7 @@ dev-logs:
 	$(DEV_COMPOSE) logs -f
 
 dev-config:
-	$(DEV_COMPOSE) config
+	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(DEV_COMPOSE) config
 
 # Start the local policy-catalog control plane from its sibling repository.
 dev-control-plane:
@@ -78,7 +78,7 @@ dev-runtime-token:
 		echo "Wrote runtime environment to $(RUNTIME_ENV_FILE); source it before make dev-openwebui."
 
 dev-openwebui:
-	$(OPENWEBUI_COMPOSE) up --build
+	@set -a; [ ! -f "$(RUNTIME_ENV_FILE)" ] || . "$(RUNTIME_ENV_FILE)"; set +a; $(OPENWEBUI_COMPOSE) up --build
 
 dev-openwebui-down:
 	$(OPENWEBUI_COMPOSE) down
