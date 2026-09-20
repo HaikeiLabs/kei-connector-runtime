@@ -1,6 +1,8 @@
 # Standalone kei-connector-runtime release workflow.
 #
 # Triggered by pushing a proxy-vX.Y.Z tag, or manually with a version bump.
+# Manual dispatches first create the calculated tag, then release it in the
+# same run so the version is persisted for future increments.
 # The workflow mirrors the kei-cli release flow while keeping runtime-daemon
 # artifacts under their own S3 prefix.
 
@@ -134,9 +136,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create local tag for manual release
+      - name: Create and push release tag for manual release
         if: github.event_name == 'workflow_dispatch'
-        run: git tag "v${{ needs.validate-tag.outputs.version }}" "$GITHUB_SHA"
+        env:
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$RELEASE_TAG"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -188,7 +196,7 @@ jobs:
           GORELEASER_KEY: ${{ env.GORELEASER_KEY }}
           AWS_S3_RELEASES_BUCKET: ${{ env.AWS_S3_RELEASES_BUCKET }}
           AWS_S3_RELEASES_REGION: ${{ env.AWS_REGION }}
-          GORELEASER_CURRENT_TAG: v${{ needs.validate-tag.outputs.version }}
+          GORELEASER_CURRENT_TAG: ${{ needs.validate-tag.outputs.tag }}
 
       - name: Upload install.sh to public release endpoint
         run: |
