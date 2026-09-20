@@ -196,7 +196,9 @@ jobs:
           GORELEASER_KEY: ${{ env.GORELEASER_KEY }}
           AWS_S3_RELEASES_BUCKET: ${{ env.AWS_S3_RELEASES_BUCKET }}
           AWS_S3_RELEASES_REGION: ${{ env.AWS_REGION }}
-          GORELEASER_CURRENT_TAG: ${{ needs.validate-tag.outputs.tag }}
+          # The repository tag uses the proxy-v prefix, but GoReleaser parses
+          # its current tag as semver and therefore needs the v-prefixed form.
+          GORELEASER_CURRENT_TAG: v${{ needs.validate-tag.outputs.version }}
 
       - name: Upload install.sh to public release endpoint
         run: |
