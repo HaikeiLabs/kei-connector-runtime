@@ -1,4 +1,20 @@
 services:
+  ministack:
+    image: ${MINISTACK_IMAGE:-ministackorg/ministack:1.5.14}
+    environment:
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      PERSIST_STATE: ${MINISTACK_PERSIST_STATE:-1}
+      STATE_DIR: /data/state
+    ports:
+      - "${MINISTACK_PORT:-4566}:4566"
+    volumes:
+      - ministack-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4566/_ministack/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   connector-runtime:
     build:
       context: .
@@ -14,6 +30,10 @@ services:
       KEI_RUNTIME_TOKEN: ${KEI_RUNTIME_TOKEN:-}
       KEI_RUNTIME_VERSION: ${KEI_RUNTIME_VERSION:-local}
       KEI_PROXY_INVOKING_SUBJECT: ${KEI_PROXY_INVOKING_SUBJECT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-local}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-local}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      KEI_AWS_SECRETS_MANAGER_ENDPOINT: ${KEI_AWS_SECRETS_MANAGER_ENDPOINT:-http://ministack:4566}
     ports:
       - "${KEI_PROXY_PORT:-8085}:8085"
     extra_hosts:
@@ -23,6 +43,9 @@ services:
       interval: 2s
       timeout: 5s
       retries: 15
+    depends_on:
+      ministack:
+        condition: service_healthy
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
@@ -42,3 +65,4 @@ services:
 
 volumes:
   openwebui-data:
+  ministack-data:
