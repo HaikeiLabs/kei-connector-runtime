@@ -10,10 +10,8 @@ import (
 
 type Config struct {
 	ABACURL                       string
-	HarnessToken                  string
 	RuntimeControlPlaneURL        string
 	RuntimeToken                  string
-	RuntimeVersion                string
 	CredentialSyncKeyID           string
 	CredentialSyncPrivateKey      string
 	CredentialStoreInstallationID string
@@ -45,10 +43,8 @@ func envIntOr(key string, fallback int) int {
 func configFromEnv() Config {
 	return Config{
 		ABACURL:                       envOr("ABAC_URL", "http://localhost:8080"),
-		HarnessToken:                  os.Getenv("KEI_HARNESS_TOKEN"),
 		RuntimeControlPlaneURL:        os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
 		RuntimeToken:                  os.Getenv("KEI_RUNTIME_TOKEN"),
-		RuntimeVersion:                envOr("KEI_RUNTIME_VERSION", "unknown"),
 		CredentialSyncKeyID:           os.Getenv("KEI_CREDENTIAL_SYNC_KEY_ID"),
 		CredentialSyncPrivateKey:      os.Getenv("KEI_CREDENTIAL_SYNC_PRIVATE_KEY"),
 		CredentialStoreInstallationID: os.Getenv("KEI_CREDENTIAL_STORE_INSTALLATION_ID"),
@@ -62,20 +58,9 @@ func configFromEnv() Config {
 	}
 }
 
-// IsRuntime identifies the customer-hosted installation path. It is separate
-// from the legacy harness-key path so existing internal deployments can migrate
-// deliberately rather than interpreting every harness key as a runtime token.
+// IsRuntime identifies the customer-hosted installation path.
 func (c Config) IsRuntime() bool {
 	return c.RuntimeToken != ""
-}
-
-// AuthorizationToken is the opaque credential ABAC uses to derive scope. A
-// customer runtime never supplies an org or agent ID as an authority.
-func (c Config) AuthorizationToken() string {
-	if c.IsRuntime() {
-		return c.RuntimeToken
-	}
-	return c.HarnessToken
 }
 
 // IsProduction reports whether the proxy runs in an environment where

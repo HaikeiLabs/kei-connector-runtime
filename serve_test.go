@@ -162,7 +162,6 @@ func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	config := Config{
 		RuntimeControlPlaneURL: "http://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
-		RuntimeVersion:         "test",
 	}
 	handler := &runtimeHTTPHandler{
 		cfg:      config,

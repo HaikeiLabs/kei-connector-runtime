@@ -39,7 +39,7 @@ func runOrg(args []string, stdout, stderr io.Writer) int {
 	remove := fs.Bool("remove", false, "remove user from organization")
 	update := fs.Bool("update", false, "update user's role")
 	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
-	key := fs.String("key", "", "harness key for authentication (required)")
+	key := fs.String("key", "", "runtime token for authentication (overrides KEI_RUNTIME_TOKEN env)")
 	timeout := fs.Int("timeout", 30, "request timeout in seconds")
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -50,10 +50,10 @@ func runOrg(args []string, stdout, stderr io.Writer) int {
 		cfg.ABACURL = *abacURL
 	}
 	if *key != "" {
-		cfg.HarnessToken = *key
+		cfg.RuntimeToken = *key
 	}
 
-	if cfg.HarnessToken == "" {
+	if cfg.RuntimeToken == "" {
 		fmt.Fprintln(stderr, "Error: --key is required")
 		return 1
 	}
@@ -104,7 +104,7 @@ func runOrg(args []string, stdout, stderr io.Writer) int {
 	if httpReq == nil {
 		httpReq, _ = http.NewRequest(method, url, nil)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+cfg.HarnessToken)
+	httpReq.Header.Set("Authorization", "Bearer "+cfg.RuntimeToken)
 
 	resp, err := client.Do(httpReq)
 	if err != nil {

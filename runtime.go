@@ -94,7 +94,7 @@ func runRuntimeHeartbeat(args []string, stdout, stderr io.Writer, cfg Config, ne
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := maintainRuntimeHeartbeat(ctx, newClient(cfg.RuntimeControlPlaneURL, *timeout), cfg.RuntimeToken, cfg.RuntimeVersion, *interval); err != nil {
+	if err := maintainRuntimeHeartbeat(ctx, newClient(cfg.RuntimeControlPlaneURL, *timeout), cfg.RuntimeToken, version, *interval); err != nil {
 		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
 		return 1
 	}
@@ -116,7 +116,7 @@ func bootstrapRuntimeWithClient(ctx context.Context, cfg Config, timeout time.Du
 	if identity == nil {
 		return nil, errors.New("runtime identity response is incomplete")
 	}
-	if err := client.Heartbeat(ctx, cfg.RuntimeToken, cfg.RuntimeVersion); err != nil {
+	if err := client.Heartbeat(ctx, cfg.RuntimeToken, version); err != nil {
 		return nil, fmt.Errorf("report runtime heartbeat: %w", err)
 	}
 	// Sync identity is optional for runtimes that have not yet been assigned a

@@ -31,8 +31,8 @@ func TestBootstrapRuntimeResolvesInstallationAndReportsHeartbeat(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&heartbeat); err != nil {
 				t.Fatal(err)
 			}
-			if heartbeat["runtime_version"] != "2026.08.26" {
-				t.Fatalf("runtime_version = %q", heartbeat["runtime_version"])
+			if heartbeat["runtime_version"] != version {
+				t.Fatalf("runtime_version = %q, want the build-time version %q", heartbeat["runtime_version"], version)
 			}
 			requests++
 			w.WriteHeader(http.StatusNoContent)
@@ -42,7 +42,7 @@ func TestBootstrapRuntimeResolvesInstallationAndReportsHeartbeat(t *testing.T) {
 	}))
 	defer server.Close()
 
-	identity, err := bootstrapRuntime(context.Background(), Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: server.URL, RuntimeVersion: "2026.08.26"}, time.Second)
+	identity, err := bootstrapRuntime(context.Background(), Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: server.URL}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

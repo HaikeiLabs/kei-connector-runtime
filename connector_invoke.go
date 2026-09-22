@@ -142,7 +142,7 @@ func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
 	user := fs.String("user", "", "alias for --user-id")
 	agentID := fs.String("agent-id", envOr("KEI_PROXY_AGENT_ID", ""), "agent id making the call")
 	framework := fs.String("framework", envOr("KEI_PROXY_FRAMEWORK", ""), "agent framework (e.g. claude, codex)")
-	key := fs.String("key", "", "harness key (alias for KEI_HARNESS_TOKEN env)")
+	key := fs.String("key", "", "runtime token (overrides KEI_RUNTIME_TOKEN env)")
 	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
 
@@ -154,7 +154,7 @@ func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
 		*userID = *user
 	}
 	if *key != "" {
-		os.Setenv("KEI_HARNESS_TOKEN", *key)
+		os.Setenv("KEI_RUNTIME_TOKEN", *key)
 	}
 
 	cfg := configFromEnv()
@@ -165,8 +165,8 @@ func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
 	if *connectorID == "" || *capability == "" || *action == "" || *resource == "" {
 		return connectorInvokePlan{}, fmt.Errorf("--connector, --capability, --action, and --resource are required")
 	}
-	if cfg.AuthorizationToken() == "" {
-		return connectorInvokePlan{}, fmt.Errorf("KEI_RUNTIME_TOKEN or KEI_HARNESS_TOKEN is required")
+	if cfg.RuntimeToken == "" {
+		return connectorInvokePlan{}, fmt.Errorf("KEI_RUNTIME_TOKEN is required (KEI_HARNESS_TOKEN is no longer supported)")
 	}
 	if *traceID == "" {
 		*traceID = uuid.NewString()
@@ -186,7 +186,7 @@ func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
 
 	return connectorInvokePlan{
 		req: ConnectorInvokeRequest{
-			HarnessToken:    cfg.AuthorizationToken(),
+			HarnessToken:    cfg.RuntimeToken,
 			AgentID:         *agentID,
 			ConnectorID:     *connectorID,
 			Capability:      *capability,

@@ -101,9 +101,7 @@ func (c *oidcBridgeClient) fetchToken(ctx context.Context, userID, provider stri
 	if err != nil {
 		return nil, ErrEnrollmentRequired // Bridge unreachable = enrollment required
 	}
-	if c.secret != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.secret)
-	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.secret)
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
