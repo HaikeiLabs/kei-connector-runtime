@@ -120,8 +120,8 @@ func TestRuntimeConfigDoesNotRequireInternalABACSecret(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("customer runtime should authenticate with its runtime token, not ABAC_API_SECRET: %v", err)
 	}
-	if got := cfg.AuthorizationToken(); got != "kh_live_runtime_test_token_1234567890" {
-		t.Fatalf("AuthorizationToken = %q, want runtime token", got)
+	if got := cfg.RuntimeToken; got != "kh_live_runtime_test_token_1234567890" {
+		t.Fatalf("RuntimeToken = %q, want runtime token", got)
 	}
 }
 

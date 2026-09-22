@@ -43,7 +43,7 @@ func main() {
 	} else if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		usage()
 	} else if hasTopLevelFlags(args) {
-		_ = os.Setenv("KEI_HARNESS_TOKEN", getFlagValue(args, "key"))
+		_ = os.Setenv("KEI_RUNTIME_TOKEN", getFlagValue(args, "key"))
 		code = runAuthorize(args)
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n", args[0])
@@ -106,13 +106,9 @@ Environment:
   ABAC_URL                  ABAC Engine URL (default http://localhost:8080)
   KEI_RUNTIME_CONTROL_PLANE_URL public Kei gateway URL for a customer-hosted runtime
   KEI_RUNTIME_TOKEN          installation credential from the customer secret manager
-  KEI_RUNTIME_VERSION        runtime image/version reported with each heartbeat
   KEI_CREDENTIAL_STORE_INSTALLATION_ID credential store to register for sync
   KEI_CREDENTIAL_SYNC_KEY_ID sync recipient key identifier
   KEI_CREDENTIAL_SYNC_PRIVATE_KEY base64 X25519 private key for sync
-  KEI_RUNTIME_CONTROL_PLANE_URL  Kei control-plane URL for customer runtimes
-  KEI_RUNTIME_TOKEN         installation token for customer runtimes
-  KEI_HARNESS_TOKEN         legacy org/harness key (read from env, never passed as an argument)
   KEI_PROXY_REGISTRY        tool->service registry path (default /data/config/tools.yaml)
   KEI_PROXY_AUDIT           audit JSONL file path (authorize appends, collector ships)
   KEI_PROXY_SPAN_ID         span id for the invocation (stable dedupe key)

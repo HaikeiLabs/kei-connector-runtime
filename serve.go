@@ -223,7 +223,7 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 		abac:            h.abac,
 		invokingSubject: subject,
 		agentID:         envOr("KEI_PROXY_AGENT_ID", ""),
-		agentVersion:    h.cfg.RuntimeVersion,
+		agentVersion:    version,
 		framework:       envOr("KEI_PROXY_FRAMEWORK", "openai-http"),
 		spanID:          envOr("KEI_PROXY_SPAN_ID", ""),
 		resources:       []string{resource},

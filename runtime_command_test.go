@@ -38,7 +38,7 @@ func (c *recordingRuntimeClient) RegisterCredentialSyncKey(context.Context, stri
 func TestRuntimeBootstrapReportsHeartbeatBeforeBotStartup(t *testing.T) {
 	workspaceID := "workspace-1"
 	client := &recordingRuntimeClient{identity: &RuntimeIdentity{ID: "installation-1", OrgID: "org-1", WorkspaceID: &workspaceID, Platform: "teams", Status: "pending", BindingStatus: "unverified"}}
-	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://kei.example.test", RuntimeVersion: "test"}
+	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://kei.example.test"}
 	var stdout, stderr bytes.Buffer
 	code := runRuntimeBootstrap(nil, &stdout, &stderr, cfg, func(string, time.Duration) RuntimeClient { return client })
 	if code != 0 {
@@ -52,7 +52,7 @@ func TestRuntimeBootstrapReportsHeartbeatBeforeBotStartup(t *testing.T) {
 
 func TestRuntimeBootstrapRegistersCredentialSyncKey(t *testing.T) {
 	client := &recordingRuntimeClient{identity: &RuntimeIdentity{ID: "installation-1", OrgID: "org-1", Platform: "teams", Status: "active"}}
-	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://kei.example.test", RuntimeVersion: "test", CredentialStoreInstallationID: "store-1", CredentialSyncKeyID: "key-1", CredentialSyncPrivateKey: base64.RawStdEncoding.EncodeToString(make([]byte, 32))}
+	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://kei.example.test", CredentialStoreInstallationID: "store-1", CredentialSyncKeyID: "key-1", CredentialSyncPrivateKey: base64.RawStdEncoding.EncodeToString(make([]byte, 32))}
 	var stdout, stderr bytes.Buffer
 	if code := runRuntimeBootstrap(nil, &stdout, &stderr, cfg, func(string, time.Duration) RuntimeClient { return client }); code != 0 {
 		t.Fatalf("bootstrap exit=%d stderr=%s", code, stderr.String())
@@ -110,7 +110,7 @@ func TestMaintainRuntimeHeartbeatFailsClosed(t *testing.T) {
 // silently running unscoped.
 func TestRuntimeBootstrapOmitsWorkspaceForLegacyKey(t *testing.T) {
 	client := &recordingRuntimeClient{identity: &RuntimeIdentity{ID: "installation-1", OrgID: "org-1", Platform: "teams", Status: "pending", BindingStatus: "unverified"}}
-	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://kei.example.test", RuntimeVersion: "test"}
+	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://kei.example.test"}
 	var stdout, stderr bytes.Buffer
 	if code := runRuntimeBootstrap(nil, &stdout, &stderr, cfg, func(string, time.Duration) RuntimeClient { return client }); code != 0 {
 		t.Fatalf("bootstrap exit = %d, stderr=%s", code, stderr.String())

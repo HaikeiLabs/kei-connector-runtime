@@ -78,7 +78,7 @@ func TestRuntimeBootstrapExitsNonZeroWhenWhoAmIIsRejected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{RuntimeToken: "kh_live_rejected_token_1234567890", RuntimeControlPlaneURL: server.URL, RuntimeVersion: "test"}
+	cfg := Config{RuntimeToken: "kh_live_rejected_token_1234567890", RuntimeControlPlaneURL: server.URL}
 	var stdout, stderr bytes.Buffer
 	code := runRuntimeBootstrap(nil, &stdout, &stderr, cfg, NewRuntimeClient)
 

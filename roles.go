@@ -104,8 +104,8 @@ func runRoles(args []string) int {
 		cfg.ABACURL = *abacURL
 	}
 
-	if cfg.HarnessToken == "" {
-		fmt.Fprintln(os.Stderr, "Error: KEI_HARNESS_TOKEN is not set")
+	if cfg.RuntimeToken == "" {
+		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required")
 		return 1
 	}
 
@@ -114,7 +114,7 @@ func runRoles(args []string) int {
 	roles, err := listRoles(rolesParams{
 		ctx:     context.Background(),
 		org:     *org,
-		harness: cfg.HarnessToken,
+		harness: cfg.RuntimeToken,
 		abac:    client,
 	})
 	if err != nil {

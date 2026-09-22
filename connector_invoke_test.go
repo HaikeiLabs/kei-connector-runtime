@@ -11,7 +11,7 @@ import (
 )
 
 func TestParseConnectorInvokeArgsPropagatesContext(t *testing.T) {
-	t.Setenv("KEI_HARNESS_TOKEN", "kh_live_harness_token_1234567890")
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_harness_token_1234567890")
 	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", "human-1")
 	t.Setenv("KEI_PROXY_AGENT_ID", "agent-9")
 	t.Setenv("KEI_PROXY_FRAMEWORK", "claude")
@@ -48,7 +48,7 @@ func TestParseConnectorInvokeArgsPropagatesContext(t *testing.T) {
 }
 
 func TestParseConnectorInvokeArgsMintsTraceAndRequiresFields(t *testing.T) {
-	t.Setenv("KEI_HARNESS_TOKEN", "kh_live_harness_token_1234567890")
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_harness_token_1234567890")
 
 	plan, err := parseConnectorInvokeArgs([]string{
 		"--connector", "conn-1",
@@ -73,20 +73,20 @@ func TestParseConnectorInvokeArgsMintsTraceAndRequiresFields(t *testing.T) {
 }
 
 func TestParseConnectorInvokeArgsRequiresToken(t *testing.T) {
-	t.Setenv("KEI_HARNESS_TOKEN", "")
+	// No token set at all — must fail closed.
 	if _, err := parseConnectorInvokeArgs([]string{
 		"--connector", "conn-1",
 		"--capability", "lead.read",
 		"--action", "read",
 		"--resource", "leads/42",
 	}); err == nil {
-		t.Fatal("missing harness token must fail")
+		t.Fatal("missing runtime token must fail")
 	}
 }
 
-func TestParseConnectorInvokeArgsHonorsAbacURLOverrideAndRuntimeRelay(t *testing.T) {
-	t.Setenv("KEI_HARNESS_TOKEN", "kh_live_harness_token_1234567890")
-	t.Setenv("ABAC_URL", "http://internal-abac:8080")
+func TestParseConnectorInvokeArgsRuntimeRelayUsesControlPlaneURL(t *testing.T) {
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_token_1234567890")
+	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", "https://control.example.test")
 
 	plan, err := parseConnectorInvokeArgs([]string{
 		"--connector", "conn-1",
@@ -96,29 +96,12 @@ func TestParseConnectorInvokeArgsHonorsAbacURLOverrideAndRuntimeRelay(t *testing
 		"--abac-url", "http://override:9000",
 	})
 	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if plan.abacURL != "http://override:9000" {
-		t.Fatalf("abac_url = %q, want the --abac-url override", plan.abacURL)
-	}
-	if plan.abacSecret != "" {
-		t.Fatalf("abac_secret = %q, want empty without ENV set", plan.abacSecret)
-	}
-
-	t.Setenv("KEI_RUNTIME_TOKEN", "runtime-token")
-	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", "https://control.example.test")
-	plan, err = parseConnectorInvokeArgs([]string{
-		"--connector", "conn-1",
-		"--capability", "lead.read",
-		"--action", "read",
-		"--resource", "leads/42",
-	})
-	if err != nil {
 		t.Fatalf("runtime parse: %v", err)
 	}
-	if plan.req.HarnessToken != "runtime-token" {
+	if plan.req.HarnessToken != "kh_live_runtime_token_1234567890" {
 		t.Fatalf("harness_token = %q, want the runtime token", plan.req.HarnessToken)
 	}
+	// Runtime mode always uses the control-plane URL, not an --abac-url override.
 	if plan.abacURL != "https://control.example.test" {
 		t.Fatalf("runtime abac_url = %q, want the control-plane URL", plan.abacURL)
 	}

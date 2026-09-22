@@ -276,7 +276,7 @@ func runAuthorize(args []string) int {
 	resources := fs.String("resources", envOr("KEI_PROXY_RESOURCES", ""), "comma-separated resources touched (defaults to --resource)")
 
 	userID := fs.String("user-id", "", "user_id to authorize as (alias for --user)")
-	key := fs.String("key", "", "harness key (alias for KEI_HARNESS_TOKEN env)")
+	key := fs.String("key", "", "runtime token (overrides KEI_RUNTIME_TOKEN env)")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -286,7 +286,7 @@ func runAuthorize(args []string) int {
 		*user = *userID
 	}
 	if *key != "" {
-		os.Setenv("KEI_HARNESS_TOKEN", *key)
+		os.Setenv("KEI_RUNTIME_TOKEN", *key)
 	}
 
 	cfg := configFromEnv()
@@ -314,8 +314,8 @@ func runAuthorize(args []string) int {
 		fmt.Fprintln(os.Stderr, "Error: --action is required")
 		return 1
 	}
-	if cfg.AuthorizationToken() == "" {
-		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN or KEI_HARNESS_TOKEN is required")
+	if cfg.RuntimeToken == "" {
+		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required (KEI_HARNESS_TOKEN is no longer supported)")
 		return 1
 	}
 
@@ -378,7 +378,7 @@ func runAuthorize(args []string) int {
 		tool:              *tool,
 		action:            *action,
 		resource:          *resource,
-		harness:           cfg.AuthorizationToken(),
+		harness:           cfg.RuntimeToken,
 		abac:              client,
 		credentialBinding: credentialBinding,
 		secretStore:       secretStore,
