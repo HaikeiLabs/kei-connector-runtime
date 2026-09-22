@@ -62,8 +62,8 @@ func TestRuntimeDaemonReleaseWorkflowStaticValidation(t *testing.T) {
 			t.Errorf("connector-runtime release workflow missing %q", want)
 		}
 	}
-	if got := strings.Count(src, "runs-on: kei-cli-release"); got != 2 {
-		t.Errorf("expected validate-tag and release jobs to use kei-cli-release, found %d", got)
+	if got := strings.Count(src, "runs-on: kei-cli-release"); got != 3 {
+		t.Errorf("expected authorization, validate-tag, and release jobs to use kei-cli-release, found %d", got)
 	}
 	for _, stale := range []string{"kei-eks-deploy", "kei-ecs-deploy"} {
 		if strings.Contains(src, stale) {
