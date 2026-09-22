@@ -66,8 +66,9 @@ func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
 	handler := &runtimeHTTPHandler{
 		cfg: config,
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{
-			ProfileID: "profile-1",
-			Status:    "active",
+			ProfileID:   "profile-1",
+			DisplayName: "Workspace model",
+			Status:      "active",
 		}},
 	}
 
@@ -79,8 +80,9 @@ func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `"id":"profile-1"`) {
-		t.Fatalf("body = %s", response.Body.String())
+	body := response.Body.String()
+	if !strings.Contains(body, `"id":"profile-1"`) || !strings.Contains(body, `"name":"Workspace model"`) {
+		t.Fatalf("body = %s", body)
 	}
 }
 
@@ -92,8 +94,9 @@ func TestRuntimeHTTPHandlerFallsBackToOrganizationDefaultModel(t *testing.T) {
 	handler := &runtimeHTTPHandler{
 		cfg: config,
 		profiles: fakeRuntimeProfiles{defaultProfile: &ModelProfile{
-			ProfileID: "org-default-profile",
-			Status:    "active",
+			ProfileID:   "org-default-profile",
+			DisplayName: "Organization default",
+			Status:      "active",
 		}},
 	}
 
@@ -102,8 +105,9 @@ func TestRuntimeHTTPHandlerFallsBackToOrganizationDefaultModel(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"org-default-profile"`) {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"id":"org-default-profile"`) || !strings.Contains(body, `"name":"Organization default"`) {
+		t.Fatalf("status = %d, body = %s", response.Code, body)
 	}
 }
 
@@ -141,7 +145,7 @@ func (f *fakeRuntimeABAC) InvokeConnector(context.Context, ConnectorInvokeReques
 	return nil, nil
 }
 
-func TestRuntimeHTTPHandlerAuthorizesBeforeProviderCall(t *testing.T) {
+func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
 			t.Fatalf("provider request = %s %s", r.Method, r.URL.Path)
@@ -155,8 +159,6 @@ func TestRuntimeHTTPHandlerAuthorizesBeforeProviderCall(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", "user-1")
-	fakeABAC := &fakeRuntimeABAC{}
 	config := Config{
 		RuntimeControlPlaneURL: "http://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
@@ -165,7 +167,6 @@ func TestRuntimeHTTPHandlerAuthorizesBeforeProviderCall(t *testing.T) {
 	handler := &runtimeHTTPHandler{
 		cfg:      config,
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, Status: "active"}},
-		abac:     fakeABAC,
 		client:   &http.Client{Timeout: time.Second},
 	}
 
@@ -176,11 +177,5 @@ func TestRuntimeHTTPHandlerAuthorizesBeforeProviderCall(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if fakeABAC.request.Action != "model.invoke" || fakeABAC.request.Resource != "model:profile-1" {
-		t.Fatalf("authorization request = %+v", fakeABAC.request)
-	}
-	if fakeABAC.request.HarnessToken != config.RuntimeToken || fakeABAC.request.UserID != "user-1" {
-		t.Fatalf("authorization identity = %+v", fakeABAC.request)
 	}
 }

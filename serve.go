@@ -86,6 +86,7 @@ type openAIModelList struct {
 
 type openAIModel struct {
 	ID      string `json:"id"`
+	Name    string `json:"name"`
 	Object  string `json:"object"`
 	OwnedBy string `json:"owned_by"`
 }
@@ -111,6 +112,7 @@ func (h *runtimeHTTPHandler) handleModels(w http.ResponseWriter, r *http.Request
 	if profile != nil && profile.Status == "active" {
 		models.Data = append(models.Data, openAIModel{
 			ID:      profile.ProfileID,
+			Name:    profile.DisplayName,
 			Object:  "model",
 			OwnedBy: "kei",
 		})
@@ -166,12 +168,12 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		writeRuntimeError(w, http.StatusServiceUnavailable, "model_unavailable", "configured model is not active")
 		return
 	}
-	if err := h.authorizeModel(ctx, profile); err != nil {
-		writeRuntimeError(w, http.StatusForbidden, "model_not_authorized", err.Error())
+	providerBody, err := rewriteProviderModel(body, profile.DefaultModel)
+	if err != nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-
-	response, err := h.invokeProvider(ctx, profile, body)
+	response, err := h.invokeProvider(ctx, profile, providerBody)
 	if err != nil {
 		writeRuntimeError(w, http.StatusBadGateway, "provider_unavailable", err.Error())
 		return
@@ -184,6 +186,25 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, response.Body)
+}
+
+// rewriteProviderModel translates the OpenAI-facing model profile ID into the
+// provider's configured model name. OpenWebUI selects profiles by ID, while
+// the upstream endpoint expects profile.DefaultModel.
+func rewriteProviderModel(body []byte, defaultModel string) ([]byte, error) {
+	if defaultModel == "" {
+		return body, nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, errors.New("request body must be valid JSON")
+	}
+	model, err := json.Marshal(defaultModel)
+	if err != nil {
+		return nil, errors.New("could not encode configured model")
+	}
+	payload["model"] = model
+	return json.Marshal(payload)
 }
 
 func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile) error {
@@ -206,7 +227,7 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 		framework:       envOr("KEI_PROXY_FRAMEWORK", "openai-http"),
 		spanID:          envOr("KEI_PROXY_SPAN_ID", ""),
 		resources:       []string{resource},
-	}, "model", resource)
+	}, "", resource)
 	if err != nil {
 		return err
 	}

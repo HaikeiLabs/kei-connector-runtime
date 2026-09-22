@@ -16,10 +16,7 @@ concurrency:
 jobs:
   verify:
     name: Build and test
-    # ubuntu-latest, not the self-hosted kei-eks-deploy pool: this suite needs
-    # no AWS or cluster access, and a hosted runner avoids depending on the org
-    # runner-group grant that new repositories do not receive by default.
-    runs-on: ubuntu-latest
+    runs-on: kei-cli-release
     steps:
       - uses: actions/checkout@v4
 
