@@ -11,14 +11,16 @@ Extracted from `kei` (`cmd/kei-connector-runtime`) under
 ## The boundary this service exists to hold
 
 [ADR-011](https://github.com/HaikeiLabs/kei/blob/main/docs/adr/011-tenant-side-proxy-data-plane.md)
-is canonical: this is the **data plane**. The policy catalog is the control
-plane and is *not* the live decision point for provider calls.
+is canonical: as the **data plane** the connector runtime authorises every
+provider invocation. Authorisation *is* delegated to the remote ABAC control
+plane on every call — local bundle evaluation (ADR-011 §4) is the target
+architecture but is not yet implemented.
 
-- Policy is evaluated **here**, locally, against the distributed policy bundle.
-  There is no synchronous round-trip to Kei on the provider hot path.
 - Credentials are resolved **here**, from tenant-owned secret/OAuth backends.
 - Provider payloads and results stay **here**, inside the tenant runtime.
 - Only the decision and redacted audit metadata leave — digests, never content.
+- Failing closed on any ABAC denial, transport error, or unresolvable target
+  ensures the data-plane boundary is enforced at the delegation point.
 
 Credential values, provider payloads, model prompts/completions and customer
 documents must never be sent to the Kei control plane. The authorize response
