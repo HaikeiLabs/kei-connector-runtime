@@ -339,3 +339,109 @@ func jsonMarshal(t *testing.T, v any) string {
 	}
 	return string(data)
 }
+
+// fakeLifecycleClient records lifecycle batches handed to the lifecycle seam.
+type fakeLifecycleClient struct {
+	records []json.RawMessage
+}
+
+func (f *fakeLifecycleClient) FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error) {
+	f.records = append(f.records, records...)
+	return len(records), nil
+}
+
+// TestParseBatchSplitsByEventClass pins the same-file contract: legacy lines
+// with no event_class and explicit decisions are decisions; lifecycle and
+// unknown classes are never decoded as decisions.
+func TestParseBatchSplitsByEventClass(t *testing.T) {
+	lines := []string{
+		`{"span_id":"legacy-1","decision":"allow"}`,
+		`{"event_class":"decision","span_id":"dec-1","decision":"deny"}`,
+		`{"event_class":"lifecycle","event_type":"runtime.started","outcome":"ok"}`,
+		`{"event_class":"telemetry","span_id":"not-a-decision"}`,
+		`{"event_class":"","span_id":"empty-class"}`,
+		`{"event_class":7,"span_id":"bad-class-type"}`,
+		`{not json}`,
+		`["array"]`,
+		`null`,
+	}
+	b := parseBatch(lines)
+
+	if len(b.decisions) != 2 || b.decisions[0].SpanID != "legacy-1" || b.decisions[1].SpanID != "dec-1" {
+		t.Fatalf("decisions = %+v, want [legacy-1 dec-1]", b.decisions)
+	}
+	if len(b.lifecycle) != 1 || !bytes.Contains(b.lifecycle[0], []byte("runtime.started")) {
+		t.Fatalf("lifecycle = %q, want the one lifecycle line", b.lifecycle)
+	}
+	if b.unknown != 2 {
+		t.Errorf("unknown = %d, want 2 (telemetry and empty class)", b.unknown)
+	}
+	if b.malformed != 4 {
+		t.Errorf("malformed = %d, want 4", b.malformed)
+	}
+}
+
+// TestCollectorNeverFlushesLifecycleAsDecision verifies lifecycle and unknown
+// records are counted and logged as skipped while no lifecycle route exists,
+// and that they never reach the decision flush endpoint.
+func TestCollectorNeverFlushesLifecycleAsDecision(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	data := jsonMarshal(t, ev("s1")) + "\n" +
+		`{"event_class":"lifecycle","event_type":"runtime.degraded"}` + "\n" +
+		`{"event_class":"mystery"}` + "\n" +
+		jsonMarshal(t, ev("s2")) + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var logs bytes.Buffer
+	fake := &fakeFlushClient{}
+	c := NewCollector(path, fake, 100)
+	c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	sent, err := c.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sent != 2 || fake.total() != 2 {
+		t.Fatalf("sent = %d flushed = %d, want 2 decisions only", sent, fake.total())
+	}
+	for _, e := range fake.batches[0] {
+		if e.SpanID == "" {
+			t.Fatalf("a non-decision record was flushed as a blank decision: %+v", fake.batches[0])
+		}
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("skipped lifecycle records")) {
+		t.Errorf("missing lifecycle skip log: %s", logs.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("unknown event_class")) {
+		t.Errorf("missing unknown class skip log: %s", logs.String())
+	}
+	if bytes.Contains(logs.Bytes(), []byte("runtime.degraded")) {
+		t.Errorf("skip log must carry counts, not record contents: %s", logs.String())
+	}
+}
+
+// TestCollectorRoutesLifecycleThroughSeam verifies a configured lifecycle
+// client receives lifecycle records and the decision endpoint does not.
+func TestCollectorRoutesLifecycleThroughSeam(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	data := jsonMarshal(t, ev("s1")) + "\n" + `{"event_class":"lifecycle","event_type":"runtime.started"}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	fake := &fakeFlushClient{}
+	lifecycle := &fakeLifecycleClient{}
+	c := NewCollector(path, fake, 100)
+	c.lifecycle = lifecycle
+
+	if _, err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fake.total() != 1 || len(lifecycle.records) != 1 {
+		t.Fatalf("decisions = %d lifecycle = %d, want 1/1", fake.total(), len(lifecycle.records))
+	}
+}

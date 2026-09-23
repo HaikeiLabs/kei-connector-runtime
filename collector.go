@@ -107,6 +107,15 @@ func (c *abacFlushClient) Flush(ctx context.Context, records []DecisionEvent) (i
 	return out.Upserted, nil
 }
 
+// LifecycleFlushClient ships runtime lifecycle records (state changes such as
+// started, degraded, recovered) to their own flush route. The policy catalog
+// has no such route yet, so the collector runs without one and counts and
+// logs lifecycle records as skipped; they must never reach the decision
+// endpoint, where they would be stored as blank decisions.
+type LifecycleFlushClient interface {
+	FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error)
+}
+
 // Collector ships pending JSONL decision events to ABAC. It records the number
 // of lines already sent in a state file, so it is resumable across runs. Because
 // the flush is idempotent (ABAC dedupes on span_id), re-sending an already
@@ -115,6 +124,7 @@ type Collector struct {
 	jsonlPath string
 	statePath string
 	abac      ABACFlushClient
+	lifecycle LifecycleFlushClient
 	batchSize int
 	logger    *slog.Logger
 }
@@ -155,17 +165,17 @@ func (c *Collector) Run(ctx context.Context) (int, error) {
 	}
 
 	sent := 0
+	var skipped skippedRecords
+	defer func() { skipped.log(c.logger, c.jsonlPath) }()
 	for start := sentCount; start < len(lines); start += c.batchSize {
 		end := start + c.batchSize
 		if end > len(lines) {
 			end = len(lines)
 		}
-		batch := parseBatch(lines[start:end])
-		if len(batch) > 0 {
-			if _, err := c.abac.Flush(ctx, batch); err != nil {
-				return sent, err
-			}
-			sent += len(batch)
+		n, err := c.flushBatch(ctx, parseBatch(lines[start:end]), &skipped)
+		sent += n
+		if err != nil {
+			return sent, err
 		}
 		// Advance past every line in this batch (valid or malformed) so we never
 		// re-send or re-parse them.
@@ -175,6 +185,54 @@ func (c *Collector) Run(ctx context.Context) (int, error) {
 		}
 	}
 	return sent, nil
+}
+
+// skippedRecords counts spool lines a run consumed without sending them to
+// the decision endpoint. They are logged as counts only, never contents.
+type skippedRecords struct {
+	lifecycle int
+	unknown   int
+	malformed int
+}
+
+func (s *skippedRecords) add(b parsedBatch, lifecycleShipped bool) {
+	if !lifecycleShipped {
+		s.lifecycle += len(b.lifecycle)
+	}
+	s.unknown += b.unknown
+	s.malformed += b.malformed
+}
+
+// log reports what a run skipped so a record never disappears silently.
+func (s skippedRecords) log(logger *slog.Logger, path string) {
+	if s.lifecycle > 0 {
+		logger.Warn("audit collector skipped lifecycle records; no lifecycle flush route is configured", "path", path, "records", s.lifecycle)
+	}
+	if s.unknown > 0 {
+		logger.Warn("audit collector skipped records with an unknown event_class", "path", path, "records", s.unknown)
+	}
+	if s.malformed > 0 {
+		logger.Warn("audit collector skipped malformed records", "path", path, "records", s.malformed)
+	}
+}
+
+// flushBatch sends a parsed batch's decisions to ABAC and its lifecycle
+// records to the lifecycle route when one is configured. It returns the
+// number of decisions sent. Flushes are idempotent, so a batch that fails
+// part way is safe to resend whole.
+func (c *Collector) flushBatch(ctx context.Context, b parsedBatch, skipped *skippedRecords) (int, error) {
+	if len(b.decisions) > 0 {
+		if _, err := c.abac.Flush(ctx, b.decisions); err != nil {
+			return 0, err
+		}
+	}
+	if len(b.lifecycle) > 0 && c.lifecycle != nil {
+		if _, err := c.lifecycle.FlushLifecycle(ctx, b.lifecycle); err != nil {
+			return len(b.decisions), err
+		}
+	}
+	skipped.add(b, c.lifecycle != nil)
+	return len(b.decisions), nil
 }
 
 // RunPolling runs the collector repeatedly until ctx is cancelled. A failed
@@ -258,11 +316,7 @@ func (c *Collector) pendingStats() (int, int64) {
 
 	pending := 0
 	var oldest time.Time
-	for _, line := range lines[sentCount:] {
-		var event DecisionEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
-		}
+	for _, event := range parseBatch(lines[sentCount:]).decisions {
 		pending++
 		if event.InvokedAt.IsZero() {
 			continue
@@ -346,15 +400,61 @@ func splitLines(data []byte) []string {
 	return lines
 }
 
-// parseBatch decodes raw lines into events, dropping malformed lines.
-func parseBatch(lines []string) []DecisionEvent {
-	var out []DecisionEvent
+// Decision and lifecycle records share one spool file and are told apart by
+// event_class. A line with no event_class is a decision: every line written
+// before the discriminator existed has none, and DecisionEvent itself never
+// carries one, so a decision still forwards to ABAC unchanged.
+const (
+	eventClassDecision  = "decision"
+	eventClassLifecycle = "lifecycle"
+)
+
+// parsedBatch is one batch of spool lines split by event class. Only
+// decisions are ever sent to the decision flush endpoint.
+type parsedBatch struct {
+	decisions []DecisionEvent
+	lifecycle []json.RawMessage
+	unknown   int
+	malformed int
+}
+
+// parseBatch decodes raw lines and splits them by event_class: absent or
+// "decision" is a DecisionEvent, "lifecycle" is a lifecycle record, and any
+// other class is unknown. Non-object and undecodable lines are malformed.
+// Anything that is not unambiguously a decision is never returned as one,
+// because the decision decoder would zero-fill it into a blank audit record.
+func parseBatch(lines []string) parsedBatch {
+	var out parsedBatch
 	for _, l := range lines {
-		var e DecisionEvent
-		if err := json.Unmarshal([]byte(l), &e); err != nil {
+		raw := []byte(l)
+		if len(raw) == 0 || raw[0] != '{' {
+			out.malformed++
 			continue
 		}
-		out = append(out, e)
+		var probe struct {
+			EventClass *string `json:"event_class"`
+		}
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			out.malformed++
+			continue
+		}
+		class := eventClassDecision
+		if probe.EventClass != nil {
+			class = *probe.EventClass
+		}
+		switch class {
+		case eventClassDecision:
+			var e DecisionEvent
+			if err := json.Unmarshal(raw, &e); err != nil {
+				out.malformed++
+				continue
+			}
+			out.decisions = append(out.decisions, e)
+		case eventClassLifecycle:
+			out.lifecycle = append(out.lifecycle, json.RawMessage(raw))
+		default:
+			out.unknown++
+		}
 	}
 	return out
 }
