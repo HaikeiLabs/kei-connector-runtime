@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -28,19 +29,31 @@ func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
 }
 
 func TestRuntimeHTTPHandlerRejectsInvalidToken(t *testing.T) {
+	var controlPlaneCalls, providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+	}))
+	defer provider.Close()
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controlPlaneCalls++
+	}))
+	defer controlPlane.Close()
 	config := Config{
-		RuntimeControlPlaneURL: "http://control-plane.test",
+		RuntimeControlPlaneURL: controlPlane.URL,
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 	}
 	handler := newRuntimeHTTPHandler(config)
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
 	request.Header.Set("Authorization", "Bearer wrong-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if controlPlaneCalls != 0 || providerCalls != 0 {
+		t.Fatalf("invalid token reached control plane %d times and provider %d times; want neither", controlPlaneCalls, providerCalls)
 	}
 }
 
@@ -180,6 +193,7 @@ func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	handler := &runtimeHTTPHandler{
 		cfg:      config,
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "workspace-default", Status: "active"}},
+		abac:     &fakeRuntimeABAC{},
 		client:   &http.Client{Timeout: time.Second},
 	}
 
@@ -190,5 +204,137 @@ func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	const profileID = "00000000-0000-0000-0000-000000000031"
+	const agentID = "00000000-0000-0000-0000-000000000041"
+	const subject = "user:runtime-invoker"
+	t.Setenv("KEI_PROXY_AGENT_ID", agentID)
+	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", subject)
+
+	var providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			t.Errorf("provider request = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode provider request: %v", err)
+		} else if body["model"] != "assigned-upstream-model" {
+			t.Errorf("provider model = %v, want assigned-upstream-model", body["model"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"completion-1"}`)
+	}))
+	defer provider.Close()
+
+	var profileCalls, authorizeCalls int
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned":
+			profileCalls++
+			if r.Header.Get("Authorization") != "Bearer "+runtimeToken {
+				t.Errorf("profile request bearer = %q, want configured runtime token", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"profile_id": profileID, "org_id": "00000000-0000-0000-0000-000000000011", "agent_id": agentID,
+				"display_name": "Assigned model", "endpoint": provider.URL, "default_model": "assigned-upstream-model",
+				"auth_type": "none", "status": "active",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/authorize":
+			authorizeCalls++
+			var request AuthorizeRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode authorization request: %v", err)
+			}
+			if request.HarnessToken != runtimeToken {
+				t.Errorf("authorization harness_token = %q, want configured runtime token", request.HarnessToken)
+			}
+			if request.Action != "model.invoke" || request.Resource != "model:"+profileID {
+				t.Errorf("authorization action/resource = %q/%q", request.Action, request.Resource)
+			}
+			if request.Resources == nil || len(request.Resources) != 1 || request.Resources[0] != "model:"+profileID {
+				t.Errorf("authorization resources = %#v", request.Resources)
+			}
+			if request.AgentID != agentID || request.UserID != subject || request.InvokingSubject != subject {
+				t.Errorf("authorization identity claims agent=%q user=%q invoking=%q", request.AgentID, request.UserID, request.InvokingSubject)
+			}
+			if request.Framework != "openai-http" {
+				t.Errorf("authorization framework = %q, want openai-http", request.Framework)
+			}
+			_ = json.NewEncoder(w).Encode(AuthorizeResponse{Decision: "allow"})
+		default:
+			t.Errorf("unexpected control-plane request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer controlPlane.Close()
+
+	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken})
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+profileID+`"}`))
+	request.Header.Set("Authorization", "Bearer "+runtimeToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if profileCalls != 1 || authorizeCalls != 1 || providerCalls != 1 {
+		t.Fatalf("calls profile=%d authorize=%d provider=%d, want 1 each", profileCalls, authorizeCalls, providerCalls)
+	}
+}
+
+func TestRuntimeHTTPHandlerDeniesBeforeProviderDispatch(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	const profileID = "00000000-0000-0000-0000-000000000032"
+	var providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+	}))
+	defer provider.Close()
+	var authorizeCalls int
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned" {
+			if r.Header.Get("Authorization") != "Bearer "+runtimeToken {
+				t.Errorf("profile request bearer = %q, want configured runtime token", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"profile_id": profileID, "org_id": "00000000-0000-0000-0000-000000000011", "agent_id": "00000000-0000-0000-0000-000000000041",
+				"display_name": "Assigned model", "endpoint": provider.URL, "default_model": "upstream-model", "auth_type": "none", "status": "active",
+			})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/authorize" {
+			authorizeCalls++
+			var request AuthorizeRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode authorization request: %v", err)
+			}
+			if request.HarnessToken != runtimeToken {
+				t.Errorf("authorization harness_token = %q, want configured runtime token", request.HarnessToken)
+			}
+			_ = json.NewEncoder(w).Encode(AuthorizeResponse{Decision: "deny", Reason: "policy denied"})
+			return
+		}
+		t.Errorf("unexpected control-plane request %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer controlPlane.Close()
+
+	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken})
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+profileID+`"}`))
+	request.Header.Set("Authorization", "Bearer "+runtimeToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"model_invocation_denied"`) {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if authorizeCalls != 1 || providerCalls != 0 {
+		t.Fatalf("calls authorize=%d provider=%d, want authorize once and no provider calls", authorizeCalls, providerCalls)
 	}
 }

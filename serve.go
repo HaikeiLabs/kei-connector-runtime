@@ -168,6 +168,10 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		writeRuntimeError(w, http.StatusServiceUnavailable, "model_unavailable", "configured model is not active")
 		return
 	}
+	if err := h.authorizeModel(ctx, profile); err != nil {
+		writeRuntimeError(w, http.StatusForbidden, "model_invocation_denied", err.Error())
+		return
+	}
 	providerBody, err := rewriteProviderModel(body, profile.DefaultModel)
 	if err != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", err.Error())
