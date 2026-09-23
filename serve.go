@@ -168,6 +168,10 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		writeRuntimeError(w, http.StatusServiceUnavailable, "model_unavailable", "configured model is not active")
 		return
 	}
+	if err := h.authorizeModel(ctx, profile); err != nil {
+		writeRuntimeError(w, http.StatusForbidden, "model_invocation_denied", err.Error())
+		return
+	}
 	providerBody, err := rewriteProviderModel(body, profile.DefaultModel)
 	if err != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -261,10 +265,14 @@ func (h *runtimeHTTPHandler) authorized(r *http.Request) bool {
 }
 
 func (h *runtimeHTTPHandler) resolveProfile(ctx context.Context, model string) (*ModelProfile, error) {
-	if model == "" {
-		return h.resolveAssignedOrDefaultProfile(ctx)
+	profile, err := h.resolveAssignedOrDefaultProfile(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return h.profiles.GetRuntimeModelProfile(ctx, model)
+	if model != "" && model != profile.ProfileID {
+		return nil, fmt.Errorf("model %q is not assigned to the runtime's default agent", model)
+	}
+	return profile, nil
 }
 
 func (h *runtimeHTTPHandler) resolveAssignedOrDefaultProfile(ctx context.Context) (*ModelProfile, error) {
@@ -272,10 +280,10 @@ func (h *runtimeHTTPHandler) resolveAssignedOrDefaultProfile(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
-	if profile != nil {
-		return profile, nil
+	if profile == nil {
+		return nil, fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
 	}
-	return h.profiles.GetRuntimeDefaultModelProfile(ctx)
+	return profile, nil
 }
 
 func (h *runtimeHTTPHandler) invokeProvider(ctx context.Context, profile *ModelProfile, body []byte) (*http.Response, error) {

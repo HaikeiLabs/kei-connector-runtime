@@ -44,7 +44,20 @@ func (c *controlPlaneModelProfileClient) GetRuntimeDefaultModelProfile(ctx conte
 // runtime installation's default agent. This is distinct from the
 // organization-wide default profile.
 func (c *controlPlaneModelProfileClient) GetRuntimeAssignedModelProfile(ctx context.Context) (*ModelProfile, error) {
-	return c.getRuntimeModelProfile(ctx, c.baseURL+"/api/v1/runtime/model-profiles/assigned")
+	profile, err := c.getRuntimeModelProfile(ctx, c.baseURL+"/api/v1/runtime/model-profiles/assigned")
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil {
+		return nil, fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
+	}
+	if profile.AgentID == "" || profile.AgentID == uuid.Nil.String() {
+		return nil, fmt.Errorf("runtime assigned-profile response has no valid default assigned agent")
+	}
+	if profile.ProfileID == "" || profile.ProfileID == uuid.Nil.String() {
+		return nil, fmt.Errorf("runtime default agent has no valid active assigned model profile")
+	}
+	return profile, nil
 }
 
 type controlPlaneModelProfileClient struct {
