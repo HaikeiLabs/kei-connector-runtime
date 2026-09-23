@@ -15,7 +15,7 @@ import (
 // emitted only on stdout and are never logged by the proxy.
 func runModelProfile(args []string) int {
 	fs := flag.NewFlagSet("model profile", flag.ContinueOnError)
-	profileID := fs.String("profile-id", "", "explicit model profile ID (otherwise organization default)")
+	profileID := fs.String("profile-id", "", "model profile ID (must be assigned to the runtime's default agent)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -29,17 +29,18 @@ func runModelProfile(args []string) int {
 	defer cancel()
 	var profile *ModelProfile
 	var err error
-	if *profileID != "" {
-		// Explicit IDs are still constrained by the runtime token's organization
-		// and workspace scope in the control plane.
-		fmt.Fprintf(os.Stderr, "model profile lookup: explicit profile_id=%s\n", *profileID)
-		profile, err = client.GetRuntimeModelProfile(ctx, *profileID)
-	} else {
-		// Organization-level profiles are the supported default until runtime
-		// agent assignment is provisioned for this installation. Keep the
-		// explicit profile ID path available for future agent-based routing.
-		fmt.Fprintln(os.Stderr, "model profile lookup: organization default")
-		profile, err = client.GetRuntimeDefaultModelProfile(ctx)
+	fmt.Fprintln(os.Stderr, "model profile lookup: runtime default agent assignment")
+	profile, err = client.GetRuntimeAssignedModelProfile(ctx)
+	if err == nil && profile == nil {
+		err = fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
+	}
+	if err == nil && *profileID != "" {
+		// The assigned-profile endpoint validates the runtime's workspace and
+		// default-agent scope. Permit an explicit ID only when it is exactly
+		// that authorized assignment; never resolve arbitrary profile IDs here.
+		if profile.ProfileID != *profileID {
+			err = fmt.Errorf("profile %q is not assigned to the runtime's default agent", *profileID)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "model profile resolution failed: %v\n", err)

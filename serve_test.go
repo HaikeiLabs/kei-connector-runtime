@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,7 +87,7 @@ func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
 	}
 }
 
-func TestRuntimeHTTPHandlerFallsBackToOrganizationDefaultModel(t *testing.T) {
+func TestRuntimeHTTPHandlerDoesNotFallBackToOrganizationDefaultModel(t *testing.T) {
 	config := Config{
 		RuntimeControlPlaneURL: "http://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
@@ -97,7 +98,7 @@ func TestRuntimeHTTPHandlerFallsBackToOrganizationDefaultModel(t *testing.T) {
 			ProfileID:   "org-default-profile",
 			DisplayName: "Organization default",
 			Status:      "active",
-		}},
+		}, assignedErr: errors.New("runtime has no active profile assigned to its default agent")},
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -106,14 +107,24 @@ func TestRuntimeHTTPHandlerFallsBackToOrganizationDefaultModel(t *testing.T) {
 	handler.ServeHTTP(response, request)
 
 	body := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(body, `"id":"org-default-profile"`) || !strings.Contains(body, `"name":"Organization default"`) {
+	if response.Code != http.StatusBadGateway || strings.Contains(body, "org-default-profile") {
 		t.Fatalf("status = %d, body = %s", response.Code, body)
+	}
+}
+
+func TestRuntimeHTTPHandlerRejectsModelOutsideAssignedProfile(t *testing.T) {
+	handler := &runtimeHTTPHandler{
+		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "assigned-profile", Status: "active"}},
+	}
+	if _, err := handler.resolveProfile(context.Background(), "other-profile"); err == nil || !strings.Contains(err.Error(), "not assigned") {
+		t.Fatalf("resolveProfile error = %v, want assignment authorization error", err)
 	}
 }
 
 type fakeRuntimeProfiles struct {
 	profile        *ModelProfile
 	assigned       *ModelProfile
+	assignedErr    error
 	defaultProfile *ModelProfile
 }
 
@@ -129,6 +140,9 @@ func (f fakeRuntimeProfiles) GetRuntimeDefaultModelProfile(context.Context) (*Mo
 func (f fakeRuntimeProfiles) GetRuntimeAssignedModelProfile(context.Context) (*ModelProfile, error) {
 	if f.assigned != nil {
 		return f.assigned, nil
+	}
+	if f.assignedErr != nil {
+		return nil, f.assignedErr
 	}
 	return f.profile, nil
 }
@@ -165,11 +179,11 @@ func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	}
 	handler := &runtimeHTTPHandler{
 		cfg:      config,
-		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, Status: "active"}},
+		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "workspace-default", Status: "active"}},
 		client:   &http.Client{Timeout: time.Second},
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"workspace-default"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
 	request.Header.Set("Authorization", "Bearer "+config.RuntimeToken)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
