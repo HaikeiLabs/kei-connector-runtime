@@ -244,3 +244,45 @@ jobs:
             --region "${{ env.AWS_REGION }}" \
             --content-type "text/plain" \
             --cache-control "no-cache"
+
+  publish-container:
+    name: Publish proxy container
+    needs: [validate-tag, release]
+    runs-on: kei-eks-deploy
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tags
+        id: image-tags
+        env:
+          RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.validate-tag.outputs.channel }}
+          IMAGE_REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE_REGISTRY/kei/proxy:$RELEASE_VERSION"
+            echo "$IMAGE_REGISTRY/kei/proxy:$GITHUB_SHA"
+            if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+              echo "$IMAGE_REGISTRY/kei/proxy:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push kei-proxy image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.image-tags.outputs.tags }}
