@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -91,7 +92,7 @@ func DiagnoseWhoamiError(err error) WhoamiFailureCategory {
 
 type RuntimeClient interface {
 	WhoAmI(ctx context.Context, token string) (*RuntimeIdentity, error)
-	Heartbeat(ctx context.Context, token, version string) error
+	Heartbeat(ctx context.Context, token string, report HeartbeatReport) error
 	RegisterCredentialSyncKey(ctx context.Context, token, storeID, keyID, publicKey string) error
 }
 
@@ -128,8 +129,8 @@ func (c *runtimeClient) WhoAmI(ctx context.Context, token string) (*RuntimeIdent
 	return &identity, nil
 }
 
-func (c *runtimeClient) Heartbeat(ctx context.Context, token, version string) error {
-	body, err := json.Marshal(map[string]string{"runtime_version": version})
+func (c *runtimeClient) Heartbeat(ctx context.Context, token string, report HeartbeatReport) error {
+	body, err := json.Marshal(report)
 	if err != nil {
 		return fmt.Errorf("encode runtime heartbeat: %w", err)
 	}
@@ -141,11 +142,17 @@ func (c *runtimeClient) Heartbeat(ctx context.Context, token, version string) er
 	req.Header.Set("Content-Type", "application/json")
 	response, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("runtime heartbeat request failed: %w", err)
+		return &HeartbeatFailure{Outcome: classifyTransportError(err), Wrapped: fmt.Errorf("runtime heartbeat request failed: %w", err)}
 	}
 	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	if response.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("runtime heartbeat returned %d", response.StatusCode)
+		return &HeartbeatFailure{
+			Outcome:    classifyHeartbeatStatus(response.StatusCode),
+			StatusCode: response.StatusCode,
+			RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now()),
+			Wrapped:    fmt.Errorf("runtime heartbeat returned %d", response.StatusCode),
+		}
 	}
 	return nil
 }

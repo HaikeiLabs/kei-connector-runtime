@@ -223,6 +223,38 @@ the module resolves through the public proxy and is verified against the public
 checksum database. Do not reintroduce `GOPRIVATE` or credential plumbing for
 this dependency.
 
+## Runtime heartbeat (liveness)
+
+`kei-proxy runtime heartbeat` reports that this runtime installation is
+connected to kei-policy-catalog (`POST /api/v1/runtime/heartbeat`). It is the
+runtime-to-catalog **liveness** leg; a harness-local `/healthz` or `whoami` is
+readiness only. The installation, org, and workspace come only from the token
+via `whoami`. The heartbeat body never carries identity, credentials, provider
+payloads, or results.
+
+A transient catalog failure (unreachable, timeout, 5xx) is retried once within
+the tick and then the loop continues; it no longer exits the process. A `429`
+stretches the next tick to its `Retry-After`, capped at five intervals. Ticks
+are jittered by ±10%.
+
+Two flags, both off by default, form the supervised contract used by the
+Agentware `RuntimeLink`:
+
+- `--output jsonl` writes one JSON event per line (`identity`, `beat` with a
+  closed `outcome`, `terminal`), sends the v2 heartbeat body, and uses
+  classified exit codes: `0` graceful, `1` transient, `2` contract (catalog
+  `400` or a malformed `whoami`), `3` unauthorized/revoked, `4` invalid config.
+  It forwards only the allowlisted harness envelope: `KEI_HARNESS_KIND`,
+  `KEI_HARNESS_VERSION`, `KEI_DEPLOYMENT_ENV`, `KEI_AGENTWARE_SDK_LANG`,
+  `KEI_AGENTWARE_SDK_VERSION`, and `KEI_HEARTBEAT_RUN_ID`. A malformed value
+  exits `4` without echoing it.
+- `--parent-stdin` exits `0` as soon as stdin reaches EOF, so a heartbeat child
+  never outlives the harness that started it.
+
+Without `--output jsonl` the legacy contract is unchanged: one identity line on
+stdout, the v1 body `{"runtime_version": ...}`, and exit `1` on a failure that
+a retry cannot clear.
+
 ## Releases
 
 Tag `proxy-v*` to publish via goreleaser to the shared S3 release bucket under
