@@ -109,10 +109,15 @@ func TestCollectorPendingStats(t *testing.T) {
 	event.InvokedAt = time.Now().Add(-2 * time.Minute)
 	writeJSONL(t, path, []DecisionEvent{event, ev("s2")})
 
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
 	c := NewCollector(path, &fakeFlushClient{}, 100)
-	pending, oldestAge := c.pendingStats()
-	if pending != 2 {
-		t.Fatalf("pending = %d, want 2", pending)
+	pendingBytes, pendingFiles, oldestAge := c.pendingStats()
+	if pendingBytes != info.Size() || pendingFiles != 1 {
+		t.Fatalf("pending = %d bytes in %d files, want %d in 1", pendingBytes, pendingFiles, info.Size())
 	}
 	if oldestAge < 100 {
 		t.Fatalf("oldest age = %d seconds, want at least 100", oldestAge)
@@ -121,9 +126,9 @@ func TestCollectorPendingStats(t *testing.T) {
 	if _, err := c.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	pending, oldestAge = c.pendingStats()
-	if pending != 0 || oldestAge != 0 {
-		t.Fatalf("after flush pending=%d age=%d, want 0/0", pending, oldestAge)
+	pendingBytes, pendingFiles, oldestAge = c.pendingStats()
+	if pendingBytes != 0 || pendingFiles != 0 || oldestAge != 0 {
+		t.Fatalf("after flush pending=%d/%d age=%d, want 0/0/0", pendingBytes, pendingFiles, oldestAge)
 	}
 }
 
@@ -165,7 +170,11 @@ func TestCollectorResumable(t *testing.T) {
 	}
 
 	// Append two more records and re-run: only the new ones are sent.
-	writeJSONL(t, path, []DecisionEvent{ev("s1"), ev("s2"), ev("s3"), ev("s4"), ev("s5")})
+	for _, e := range []DecisionEvent{ev("s4"), ev("s5")} {
+		if err := appendDecisionEvent(path, 0, e); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
 	if _, err := c.Run(context.Background()); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
@@ -182,24 +191,25 @@ func TestCollectorResumable(t *testing.T) {
 func TestCollectorResendsAfterStateLoss(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
-	writeJSONL(t, path, []DecisionEvent{ev("s1"), ev("s2")})
+	writeJSONL(t, path, []DecisionEvent{ev("s1"), ev("s2"), ev("s3")})
 
-	fake := &fakeFlushClient{}
-	c := NewCollector(path, fake, 100)
-
-	if _, err := c.Run(context.Background()); err != nil {
-		t.Fatalf("first Run: %v", err)
+	// The second batch fails, leaving the segment on disk part-shipped.
+	fake := &failAfterFlushClient{okBatches: 1}
+	c := NewCollector(path, fake, 2)
+	if _, err := c.Run(context.Background()); err == nil {
+		t.Fatal("expected the second batch to fail")
 	}
-	// Simulate a crash that lost the state file: the collector re-sends, which
-	// is safe because ABAC dedupes on span_id.
-	if err := os.Remove(path + ".offset"); err != nil {
+	// Simulate a crash that lost the state file: the collector re-sends the
+	// whole segment, which is safe because ABAC dedupes on span_id.
+	if err := os.Remove(path + ".state"); err != nil {
 		t.Fatalf("remove state: %v", err)
 	}
+	fake.okBatches = -1
 	if _, err := c.Run(context.Background()); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
-	if fake.total() != 4 {
-		t.Errorf("total sent = %d, want 4 (re-sent 2 after state loss)", fake.total())
+	if got := fake.spans(); len(got) != 5 || got[2] != "s1" {
+		t.Errorf("sent = %v, want [s1 s2 s1 s2 s3] (re-sent after state loss)", got)
 	}
 }
 
@@ -251,9 +261,17 @@ func TestCollectorStopsOnError(t *testing.T) {
 	if _, err := c.Run(context.Background()); err == nil {
 		t.Fatal("expected error when ABAC is down, got nil")
 	}
-	// No state should have been written, so a retry re-sends everything.
-	if _, err := os.Stat(path + ".offset"); !os.IsNotExist(err) {
-		t.Errorf("state file should not exist after a failed run")
+	// No position should have been recorded, so a retry re-sends everything.
+	st, err := readCollectorState(path + ".state")
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if st.LinesSent != 0 {
+		t.Errorf("lines_sent = %d after a failed run, want 0", st.LinesSent)
+	}
+	fake.err = nil
+	if sent, err := c.Run(context.Background()); err != nil || sent != 3 {
+		t.Fatalf("retry sent %d err %v, want 3 nil", sent, err)
 	}
 }
 

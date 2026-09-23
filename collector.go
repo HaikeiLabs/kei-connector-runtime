@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
@@ -116,73 +118,253 @@ type LifecycleFlushClient interface {
 	FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error)
 }
 
-// Collector ships pending JSONL decision events to ABAC. It records the number
-// of lines already sent in a state file, so it is resumable across runs. Because
-// the flush is idempotent (ABAC dedupes on span_id), re-sending an already
-// flushed batch after a crash is safe.
+// Collector ships pending JSONL decision events to ABAC. Each run seals the
+// active spool file into a segment under the spool lock, then streams sealed
+// segments oldest first, so it never rereads data it has already shipped. Its
+// position, {segment, lines_sent}, lives in <jsonlPath>.state, so it is
+// resumable across runs, and a segment is deleted only after every line in it
+// has been acknowledged. Because the flush is idempotent (ABAC dedupes on
+// span_id), re-sending an already flushed batch after a crash is safe.
 type Collector struct {
 	jsonlPath string
 	statePath string
-	abac      ABACFlushClient
-	lifecycle LifecycleFlushClient
-	batchSize int
-	logger    *slog.Logger
+	// legacyOffsetPath is the pre-segment state file: a plain count of lines
+	// already sent from the single, never-rotated spool file.
+	legacyOffsetPath string
+	spool            *auditSpool
+	abac             ABACFlushClient
+	lifecycle        LifecycleFlushClient
+	batchSize        int
+	logger           *slog.Logger
+	// open is os.Open; tests replace it to observe which files a run reads.
+	open func(name string) (*os.File, error)
+}
+
+// collectorState is the collector's position in the spool plus the loss
+// counters it has already reported.
+type collectorState struct {
+	// Segment is the segment being shipped, or 0 when none is in progress.
+	Segment      uint64    `json:"segment"`
+	LinesSent    int       `json:"lines_sent"`
+	ReportedLoss spoolLoss `json:"reported_loss"`
 }
 
 // NewCollector builds a collector for the given JSONL path. The state file
-// defaults to <jsonlPath>.offset.
+// defaults to <jsonlPath>.state.
 func NewCollector(jsonlPath string, abac ABACFlushClient, batchSize int) *Collector {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
 	return &Collector{
-		jsonlPath: jsonlPath,
-		statePath: jsonlPath + ".offset",
+		jsonlPath:        jsonlPath,
+		statePath:        jsonlPath + ".state",
+		legacyOffsetPath: jsonlPath + ".offset",
+		// The collector never appends, so the cap does not apply to it.
+		spool:     newAuditSpool(jsonlPath, 0),
 		abac:      abac,
 		batchSize: batchSize,
 		logger:    slog.Default(),
+		open:      os.Open,
 	}
 }
 
 // Run flushes all pending records and returns how many were sent.
 func (c *Collector) Run(ctx context.Context) (int, error) {
-	sentCount, err := c.readSentCount()
+	st, err := readCollectorState(c.statePath)
+	if err != nil {
+		// Resending is safe and a stuck collector is not: start over from the
+		// oldest segment rather than failing every poll.
+		c.logger.Warn("audit collector state unreadable; resending from the oldest segment", "path", c.statePath, "error", err)
+		st = collectorState{}
+	}
+	if _, err := os.Stat(filepath.Dir(c.jsonlPath)); os.IsNotExist(err) {
+		return 0, nil
+	}
+
+	var (
+		segs []spoolSegment
+		loss spoolLoss
+	)
+	err = c.spool.withLock(func() error {
+		if err := c.migrateLegacyOffset(&st); err != nil {
+			return err
+		}
+		meta := c.spool.readMeta()
+		if _, err := c.spool.sealActiveLocked(&meta, st.Segment+1); err != nil {
+			return err
+		}
+		loss = meta.Loss
+		segs, err = c.spool.segments()
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
-
-	data, err := os.ReadFile(c.jsonlPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("read jsonl: %w", err)
-	}
-
-	lines := splitLines(data)
-	if len(lines) <= sentCount {
-		return 0, nil
+	if err := c.reportLoss(&st, loss); err != nil {
+		return 0, err
 	}
 
 	sent := 0
 	var skipped skippedRecords
 	defer func() { skipped.log(c.logger, c.jsonlPath) }()
-	for start := sentCount; start < len(lines); start += c.batchSize {
-		end := start + c.batchSize
-		if end > len(lines) {
-			end = len(lines)
-		}
-		n, err := c.flushBatch(ctx, parseBatch(lines[start:end]), &skipped)
+	for _, seg := range segs {
+		n, err := c.shipSegment(ctx, seg, &st, &skipped)
 		sent += n
 		if err != nil {
 			return sent, err
 		}
-		// Advance past every line in this batch (valid or malformed) so we never
-		// re-send or re-parse them.
-		sentCount = end
-		if err := c.writeSentCount(sentCount); err != nil {
+	}
+	return sent, nil
+}
+
+// migrateLegacyOffset converts a pre-segment .offset file into segment state.
+// That count describes the single spool file as it existed before this
+// version, which becomes segment 1 when it is first rotated: by a writer
+// that crossed the segment size, or here. If segment 1 was since evicted,
+// those lines are gone and the count no longer applies. Called under the
+// spool lock.
+func (c *Collector) migrateLegacyOffset(st *collectorState) error {
+	data, err := os.ReadFile(c.legacyOffsetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read legacy offset: %w", err)
+	}
+	if _, err := os.Stat(c.statePath); err == nil {
+		// Already migrated; the remove below was interrupted.
+		return removeFile(c.legacyOffsetPath)
+	}
+	sentCount, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return fmt.Errorf("parse legacy offset: %w", err)
+	}
+	*st = collectorState{}
+	segs, err := c.spool.segments()
+	if err != nil {
+		return err
+	}
+	meta := c.spool.readMeta()
+	switch {
+	case len(segs) > 0 && segs[0].seq == 1:
+		*st = collectorState{Segment: 1, LinesSent: sentCount}
+	case len(segs) == 0 && meta.NextSeq <= 1:
+		// Nothing has rotated yet, so the legacy file is still the active
+		// file. Seal it now so the count is tied to that exact data.
+		seq, err := c.spool.sealActiveLocked(&meta, 1)
+		if err != nil {
+			return err
+		}
+		if seq != 0 {
+			*st = collectorState{Segment: seq, LinesSent: sentCount}
+		}
+	}
+	if err := c.writeState(*st); err != nil {
+		return err
+	}
+	return removeFile(c.legacyOffsetPath)
+}
+
+// reportLoss logs any spool loss since the last report. Eviction must never
+// be silent: the counters live in the spool sidecar and each increase is
+// logged once here.
+func (c *Collector) reportLoss(st *collectorState, loss spoolLoss) error {
+	if loss == st.ReportedLoss {
+		return nil
+	}
+	prev := st.ReportedLoss
+	if loss.EvictedSegments > prev.EvictedSegments || loss.EvictedRecords > prev.EvictedRecords {
+		c.logger.Warn("audit spool evicted unsent records to stay within its cap",
+			"path", c.jsonlPath,
+			"evicted_segments", loss.EvictedSegments-prev.EvictedSegments,
+			"evicted_records", loss.EvictedRecords-prev.EvictedRecords,
+			"evicted_bytes", loss.EvictedBytes-prev.EvictedBytes,
+			"evicted_records_total", loss.EvictedRecords)
+	}
+	if loss.LifecycleRefused > prev.LifecycleRefused {
+		c.logger.Warn("audit spool refused lifecycle records to keep space for decisions",
+			"path", c.jsonlPath,
+			"refused_records", loss.LifecycleRefused-prev.LifecycleRefused,
+			"refused_records_total", loss.LifecycleRefused)
+	}
+	if loss.OversizeRefused > prev.OversizeRefused {
+		c.logger.Warn("audit spool refused records larger than its cap",
+			"path", c.jsonlPath,
+			"refused_records", loss.OversizeRefused-prev.OversizeRefused,
+			"refused_records_total", loss.OversizeRefused)
+	}
+	// A reset sidecar lowers the counters; adopt them without logging.
+	st.ReportedLoss = loss
+	return c.writeState(*st)
+}
+
+// shipSegment streams one sealed segment in batches, resuming after the lines
+// already acknowledged when st points at it, and deletes it once every line
+// has been handled. A segment evicted before or during the read is skipped or
+// finished from the open descriptor; either way its loss was counted by the
+// writer that evicted it.
+func (c *Collector) shipSegment(ctx context.Context, seg spoolSegment, st *collectorState, skipped *skippedRecords) (int, error) {
+	skip := 0
+	if st.Segment == seg.seq {
+		skip = st.LinesSent
+	}
+	f, err := c.open(seg.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("open audit segment: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	r := bufio.NewReader(f)
+	sent, lineNo := 0, 0
+	var batch []string
+	flush := func() error {
+		n, err := c.flushBatch(ctx, parseBatch(batch), skipped)
+		sent += n
+		if err != nil {
+			return err
+		}
+		// Advance past every line in this batch (valid or malformed) so we
+		// never re-send or re-parse them.
+		st.Segment, st.LinesSent = seg.seq, lineNo
+		batch = batch[:0]
+		return c.writeState(*st)
+	}
+	for {
+		line, err := nextSpoolLine(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return sent, fmt.Errorf("read audit segment: %w", err)
+		}
+		lineNo++
+		if lineNo <= skip {
+			continue
+		}
+		batch = append(batch, string(line))
+		if len(batch) == c.batchSize {
+			if err := flush(); err != nil {
+				return sent, err
+			}
+		}
+	}
+	if len(batch) > 0 {
+		if err := flush(); err != nil {
 			return sent, err
 		}
+	}
+
+	// Clear the position before deleting: a crash in between re-sends this
+	// segment, which is safe, rather than applying its position to another.
+	st.Segment, st.LinesSent = 0, 0
+	if err := c.writeState(*st); err != nil {
+		return sent, err
+	}
+	if err := removeFile(seg.path); err != nil {
+		return sent, fmt.Errorf("delete shipped audit segment: %w", err)
 	}
 	return sent, nil
 }
@@ -258,8 +440,8 @@ func (c *Collector) RunPolling(ctx context.Context, interval time.Duration) erro
 		sent, err := c.Run(ctx)
 		if err == nil {
 			if !readyLogged {
-				pending, oldestAge := c.pendingStats()
-				c.logger.Info("audit collector ready", "path", c.jsonlPath, "records_flushed", sent, "pending_records", pending, "oldest_pending_age_seconds", oldestAge)
+				pendingBytes, pendingFiles, oldestAge := c.pendingStats()
+				c.logger.Info("audit collector ready", "path", c.jsonlPath, "records_flushed", sent, "pending_bytes", pendingBytes, "pending_files", pendingFiles, "oldest_pending_age_seconds", oldestAge)
 				readyLogged = true
 			}
 			retryDelay = 0
@@ -274,8 +456,8 @@ func (c *Collector) RunPolling(ctx context.Context, interval time.Duration) erro
 			}
 			jitter := time.Duration(rand.Float64() * float64(retryDelay) / 4)
 			retryIn := retryDelay + jitter
-			pending, oldestAge := c.pendingStats()
-			c.logger.Error("audit collector flush failed; retaining spool and retrying", "path", c.jsonlPath, "retry_in", retryIn, "pending_records", pending, "oldest_pending_age_seconds", oldestAge, "error", err)
+			pendingBytes, pendingFiles, oldestAge := c.pendingStats()
+			c.logger.Error("audit collector flush failed; retaining spool and retrying", "path", c.jsonlPath, "retry_in", retryIn, "pending_bytes", pendingBytes, "pending_files", pendingFiles, "oldest_pending_age_seconds", oldestAge, "error", err)
 			timer := time.NewTimer(retryIn)
 			select {
 			case <-ctx.Done():
@@ -300,104 +482,97 @@ func (c *Collector) RunPolling(ctx context.Context, interval time.Duration) erro
 // These values are emitted as structured fields so a runtime can scrape them
 // as metrics without making the collector's authorization path depend on a
 // metrics server.
-func (c *Collector) pendingStats() (int, int64) {
-	sentCount, err := c.readSentCount()
-	if err != nil {
-		return 0, 0
+//
+// The backlog is measured in bytes and files from directory metadata rather
+// than by counting records, so reporting it never reads the spool. The age
+// comes from the first pending decision in the oldest file, which is the
+// oldest record in append order; only the lines up to it are read.
+func (c *Collector) pendingStats() (pendingBytes int64, pendingFiles int, oldestAgeSeconds int64) {
+	st, _ := readCollectorState(c.statePath)
+	segs, _ := c.spool.segments()
+	for _, seg := range segs {
+		pendingBytes += seg.size
+		pendingFiles++
 	}
-	data, err := os.ReadFile(c.jsonlPath)
-	if err != nil {
-		return 0, 0
-	}
-	lines := splitLines(data)
-	if sentCount >= len(lines) {
-		return 0, 0
+	if size, _ := fileSize(c.jsonlPath); size > 0 {
+		pendingBytes += size
+		pendingFiles++
 	}
 
-	pending := 0
-	var oldest time.Time
-	for _, event := range parseBatch(lines[sentCount:]).decisions {
-		pending++
-		if event.InvokedAt.IsZero() {
-			continue
-		}
-		if oldest.IsZero() || event.InvokedAt.Before(oldest) {
-			oldest = event.InvokedAt
+	oldestPath, skip := c.jsonlPath, 0
+	if len(segs) > 0 {
+		oldestPath = segs[0].path
+		if st.Segment == segs[0].seq {
+			skip = st.LinesSent
 		}
 	}
-	if pending == 0 || oldest.IsZero() {
-		return pending, 0
+	oldest := firstPendingDecisionTime(oldestPath, skip)
+	if oldest.IsZero() {
+		return pendingBytes, pendingFiles, 0
 	}
 	age := time.Since(oldest).Seconds()
 	if age < 0 {
 		age = 0
 	}
-	return pending, int64(age)
+	return pendingBytes, pendingFiles, int64(age)
 }
 
-func (c *Collector) readSentCount() (int, error) {
-	data, err := os.ReadFile(c.statePath)
+// firstPendingDecisionTime returns invoked_at of the first decision after
+// skip lines, reading no further than that record.
+func firstPendingDecisionTime(path string, skip int) time.Time {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer func() { _ = f.Close() }()
+	r := bufio.NewReader(f)
+	for lineNo := 1; ; lineNo++ {
+		line, err := nextSpoolLine(r)
+		if err != nil {
+			return time.Time{}
+		}
+		if lineNo <= skip {
+			continue
+		}
+		if b := parseBatch([]string{string(line)}); len(b.decisions) == 1 && !b.decisions[0].InvokedAt.IsZero() {
+			return b.decisions[0].InvokedAt
+		}
+	}
+}
+
+// readCollectorState loads the collector position. A missing file is the
+// zero state: start at the oldest segment.
+func readCollectorState(path string) (collectorState, error) {
+	var st collectorState
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return st, nil
 		}
-		return 0, fmt.Errorf("read state: %w", err)
+		return st, fmt.Errorf("read state: %w", err)
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0, fmt.Errorf("parse state: %w", err)
+	if err := json.Unmarshal(data, &st); err != nil {
+		return collectorState{}, fmt.Errorf("parse state: %w", err)
 	}
-	return n, nil
+	return st, nil
 }
 
-func (c *Collector) writeSentCount(n int) error {
-	dir := filepath.Dir(c.statePath)
-	tmp, err := os.CreateTemp(dir, filepath.Base(c.statePath)+".tmp-")
+func (c *Collector) writeState(st collectorState) error {
+	data, err := json.Marshal(st)
 	if err != nil {
-		return fmt.Errorf("create state temp file: %w", err)
+		return err
 	}
-	tmpName := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}()
-
-	if err := tmp.Chmod(0o644); err != nil {
-		return fmt.Errorf("chmod state temp file: %w", err)
-	}
-	if _, err := tmp.WriteString(strconv.Itoa(n)); err != nil {
-		return fmt.Errorf("write state temp file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync state temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close state temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, c.statePath); err != nil {
-		return fmt.Errorf("replace state file: %w", err)
-	}
-	// Sync the directory so the rename itself survives a power loss.
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open state directory: %w", err)
-	}
-	defer func() { _ = d.Close() }()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("sync state directory: %w", err)
+	if err := writeFileAtomic(c.statePath, data); err != nil {
+		return fmt.Errorf("write state: %w", err)
 	}
 	return nil
 }
 
-// splitLines splits raw JSONL into non-empty lines.
-func splitLines(data []byte) []string {
-	var lines []string
-	for _, l := range strings.Split(string(data), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			lines = append(lines, l)
-		}
+func removeFile(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	return lines
+	return nil
 }
 
 // Decision and lifecycle records share one spool file and are told apart by

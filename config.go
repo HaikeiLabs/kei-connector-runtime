@@ -20,6 +20,7 @@ type Config struct {
 	OIDCBridgeURL                 string
 	OIDCBridgeSecret              string
 	AuditPath                     string
+	AuditMaxBytes                 int64
 	ABACSecret                    string
 	Env                           string
 }
@@ -40,6 +41,18 @@ func envIntOr(key string, fallback int) int {
 	return fallback
 }
 
+// auditMaxBytesFromEnv reads the local audit spool cap in bytes from
+// KEI_PROXY_AUDIT_MAX_BYTES. Unset, malformed, or non-positive values use the
+// 100 MiB default, so a typo can never remove the cap.
+func auditMaxBytesFromEnv() int64 {
+	if v := strings.TrimSpace(os.Getenv("KEI_PROXY_AUDIT_MAX_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultAuditMaxBytes
+}
+
 func configFromEnv() Config {
 	return Config{
 		ABACURL:                       envOr("ABAC_URL", "http://localhost:8080"),
@@ -53,6 +66,7 @@ func configFromEnv() Config {
 		OIDCBridgeURL:                 envOr("OIDC_BRIDGE_URL", "http://oidc-bridge.kei.svc.cluster.local:8081"),
 		OIDCBridgeSecret:              envOr("OIDC_BRIDGE_SECRET", ""),
 		AuditPath:                     os.Getenv("KEI_PROXY_AUDIT"),
+		AuditMaxBytes:                 auditMaxBytesFromEnv(),
 		ABACSecret:                    strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 		Env:                           os.Getenv("ENV"),
 	}
