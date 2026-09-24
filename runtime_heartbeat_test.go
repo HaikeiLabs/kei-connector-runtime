@@ -640,7 +640,9 @@ func TestRuntimeHeartbeatRejectsUnknownOutput(t *testing.T) {
 func TestRuntimeHeartbeatLegacyTextModeIsUnchanged(t *testing.T) {
 	catalog, server := newFakeCatalog(t)
 	run := startHeartbeat(t, server, nil, supervisedEnv)
-	waitFor(t, "the bootstrap heartbeat", func() bool { return catalog.heartbeats() > 0 })
+	// Wait for the identity line, not just the bootstrap POST: cancelling while
+	// that POST's response is in flight is a graceful exit with no output.
+	waitFor(t, "the identity line", func() bool { return strings.HasSuffix(run.stdout.String(), "\n") })
 	run.cancel()
 	if code := run.exit(t); code != heartbeatExitOK {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, run.stderr.String())
