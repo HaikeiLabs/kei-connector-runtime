@@ -41,7 +41,10 @@ type pedroAuditLine struct {
 // before they leave the runtime.
 func parseAuditLine(line string) (DecisionEvent, bool) {
 	var event DecisionEvent
-	if err := json.Unmarshal([]byte(line), &event); err == nil && event.SpanID != "" && event.ToolName != "" && !event.InvokedAt.IsZero() {
+	// DecisionEvent records predate the event_class discriminator and have
+	// historically allowed optional identity fields. Preserve that contract:
+	// successful decoding is enough to identify a canonical decision row.
+	if err := json.Unmarshal([]byte(line), &event); err == nil {
 		return event, true
 	}
 
