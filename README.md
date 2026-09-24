@@ -292,3 +292,11 @@ a retry cannot clear.
 
 Tag `proxy-v*` to publish via goreleaser to the shared S3 release bucket under
 the `kei-proxy/` prefix. Manual runs require admin permission.
+
+## Audit collector
+
+The collector ships canonical `DecisionEvent` JSONL records in batches. During
+the Pedro audit-spool migration it also accepts the earlier Agentware JSONL
+shape, converts it to the canonical catalog record, and hashes any stored tool
+arguments before upload. Both record shapes can therefore share the runtime's
+single resumable spool without sending raw arguments to the control plane.
