@@ -619,8 +619,8 @@ func parseBatch(lines []string) parsedBatch {
 		}
 		switch class {
 		case eventClassDecision:
-			var e DecisionEvent
-			if err := json.Unmarshal(raw, &e); err != nil {
+			e, ok := parseAuditLine(l)
+			if !ok {
 				out.malformed++
 				continue
 			}
