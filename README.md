@@ -39,6 +39,14 @@ name.
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
 
+## Runtime installation credential
+
+Per ADR-020 and HAI-119, `KEI_RUNTIME_TOKEN` is the only supported runtime installation
+credential input. Set it in the runtime environment alongside
+`KEI_RUNTIME_CONTROL_PLANE_URL`. Runtime CLI commands do not accept credential
+flags. The retired `KEI_HARNESS_TOKEN`, `--key`, and `--harness-key` inputs are
+not supported; a legacy-only environment fails closed.
+
 ## Local audit spool
 
 `authorize` appends one JSON line per decision to `KEI_PROXY_AUDIT`, and

@@ -277,7 +277,6 @@ func runAuthorize(args []string) int {
 	resources := fs.String("resources", envOr("KEI_PROXY_RESOURCES", ""), "comma-separated resources touched (defaults to --resource)")
 
 	userID := fs.String("user-id", "", "user_id to authorize as (alias for --user)")
-	key := fs.String("key", "", "runtime token (overrides KEI_RUNTIME_TOKEN env)")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -286,10 +285,6 @@ func runAuthorize(args []string) int {
 	if *userID != "" && *user == "" {
 		*user = *userID
 	}
-	if *key != "" {
-		os.Setenv("KEI_RUNTIME_TOKEN", *key)
-	}
-
 	cfg := configFromEnv()
 	if *providerUser != "" {
 		cfg.ProviderUserID = *providerUser
@@ -316,7 +311,7 @@ func runAuthorize(args []string) int {
 		return 1
 	}
 	if cfg.RuntimeToken == "" {
-		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required (KEI_HARNESS_TOKEN is no longer supported)")
+		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required")
 		return 1
 	}
 

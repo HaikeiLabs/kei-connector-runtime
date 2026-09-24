@@ -84,6 +84,20 @@ func TestParseConnectorInvokeArgsRequiresToken(t *testing.T) {
 	}
 }
 
+func TestParseConnectorInvokeArgsRejectsKeyAlias(t *testing.T) {
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_token_1234567890")
+	_, err := parseConnectorInvokeArgs([]string{
+		"--connector", "conn-1",
+		"--capability", "lead.read",
+		"--action", "read",
+		"--resource", "leads/42",
+		"--key", "kh_live_alias_token_1234567890",
+	})
+	if err == nil {
+		t.Fatal("--key alias must be rejected")
+	}
+}
+
 func TestParseConnectorInvokeArgsRuntimeRelayUsesControlPlaneURL(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", "https://control.example.test")
