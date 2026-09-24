@@ -111,6 +111,7 @@ Environment:
   KEI_CREDENTIAL_SYNC_PRIVATE_KEY base64 X25519 private key for sync
   KEI_PROXY_REGISTRY        tool->service registry path (default /data/config/tools.yaml)
   KEI_PROXY_AUDIT           audit JSONL file path (authorize appends, collector ships)
+  KEI_PROXY_AUDIT_MAX_BYTES total audit spool cap in bytes (default 104857600, 100 MiB)
   KEI_PROXY_SPAN_ID         span id for the invocation (stable dedupe key)
   KEI_PROXY_INVOKING_SUBJECT invoking subject (defaults to --user)
   KEI_PROXY_PARENT_SPAN     parent span id (delegation chain)

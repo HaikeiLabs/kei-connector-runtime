@@ -41,6 +41,7 @@ type authorizeParams struct {
 	secretStore       SecretStore
 	oidcBridge        OIDCBridgeClient
 	auditPath         string
+	auditMaxBytes     int64
 	registry          *Registry
 
 	// Identity-propagation context supplied by the invoking harness.
@@ -168,7 +169,7 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 		out.Reason = resp.Reason
 	}
 
-	emitDecision(p.auditPath, buildDecisionEvent(p, resp, out, resource))
+	emitDecision(p.auditPath, p.auditMaxBytes, buildDecisionEvent(p, resp, out, resource))
 
 	return out, nil
 }
@@ -384,6 +385,7 @@ func runAuthorize(args []string) int {
 		secretStore:       secretStore,
 		oidcBridge:        oidcBridge,
 		auditPath:         cfg.AuditPath,
+		auditMaxBytes:     cfg.AuditMaxBytes,
 		registry:          reg,
 		spanID:            *spanID,
 		invokingSubject:   *invokingSubject,

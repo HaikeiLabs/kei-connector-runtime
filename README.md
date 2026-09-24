@@ -39,6 +39,31 @@ name.
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
 
+## Local audit spool
+
+`authorize` appends one JSON line per decision to `KEI_PROXY_AUDIT`, and
+`kei-proxy collector` ships those lines to the catalog's audit flush endpoint.
+The spool is bounded (ADR-022):
+
+- **Cap.** The active file plus its sealed segments never exceed
+  `KEI_PROXY_AUDIT_MAX_BYTES` (default 104857600, 100 MiB). The active file is
+  sealed into `<path>.<seq>` segments at a tenth of the cap.
+- **Overwrite oldest unsent.** When a decision would cross the cap, the oldest
+  segments are deleted, sent or not, so the newest records are kept. The loss
+  is counted in `<path>.meta` and the collector logs a warning for it.
+- **Decisions reserved.** Decision and lifecycle records share the file,
+  distinguished by `event_class` (absent means decision). A lifecycle record
+  is refused and counted once the spool would reach 90% of the cap, so it can
+  never cause a decision to be evicted. The collector never flushes a
+  non-decision record as a decision; until the catalog has a lifecycle flush
+  route, lifecycle records are counted and logged as skipped.
+
+Writers, rotation, eviction, and the collector's sealing of the active file
+are serialized by an `flock` on `<path>.lock`. The collector records its
+position as `{segment, lines_sent}` in `<path>.state`, deletes a segment once
+every line in it is acknowledged, and migrates the older `<path>.offset` line
+count on first run. Flushes stay idempotent: the catalog dedupes on `span_id`.
+
 ## Building
 
 The connector contract is a released **public** module
