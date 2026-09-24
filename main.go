@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 )
 
 func main() {
@@ -43,7 +42,6 @@ func main() {
 	} else if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		usage()
 	} else if hasTopLevelFlags(args) {
-		_ = os.Setenv("KEI_RUNTIME_TOKEN", getFlagValue(args, "key"))
 		code = runAuthorize(args)
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n", args[0])
@@ -62,21 +60,11 @@ func runModel(args []string) int {
 
 func hasTopLevelFlags(args []string) bool {
 	for _, arg := range args {
-		if strings.HasPrefix(arg, "--key") || strings.HasPrefix(arg, "--user-id") {
+		if arg == "--user-id" || len(arg) > len("--user-id=") && arg[:len("--user-id=")] == "--user-id=" {
 			return true
 		}
 	}
 	return false
-}
-
-func getFlagValue(args []string, name string) string {
-	prefix := "--" + name + "="
-	for _, arg := range args {
-		if strings.HasPrefix(arg, prefix) {
-			return strings.TrimPrefix(arg, prefix)
-		}
-	}
-	return ""
 }
 
 func usage() {
@@ -126,8 +114,8 @@ Examples:
   kei-proxy init --member --user U1234ABCD --org 9f2c...
   kei-proxy init --agent --org 9f2c... --name researcher --tools search_wiki,search_web --scopes wiki:read
   kei-proxy runtime bootstrap
-  echo '{"request":{...}}' | kei-proxy model invoke --harness-key $HARNESS_KEY
+  echo '{"request":{...}}' | KEI_RUNTIME_TOKEN=$KEI_RUNTIME_TOKEN kei-proxy model invoke
   kei-proxy model profile [--profile-id PROFILE_ID]
-  kei-proxy --key kh_live_xxx --user-id U1234ABCD --tool github.create_pr --action github:write
+  kei-proxy --user-id U1234ABCD --tool github.create_pr --action github:write
 `)
 }

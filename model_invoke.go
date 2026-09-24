@@ -32,11 +32,12 @@ type ModelInvokeResponse struct {
 
 func runModelInvoke(args []string) int {
 	fs := flag.NewFlagSet("model invoke", flag.ExitOnError)
-	harnessKey := fs.String("harness-key", "", "Harness key for authentication")
-	fs.Parse(args)
-
-	if *harnessKey == "" {
-		fmt.Fprintln(os.Stderr, "Error: --harness-key is required")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	cfg := configFromEnv()
+	if cfg.RuntimeToken == "" {
+		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required")
 		return 1
 	}
 
@@ -55,7 +56,7 @@ func runModelInvoke(args []string) int {
 
 	// ABAC authenticates the harness key and chooses the agent override or the
 	// organization default profile. The proxy never trusts caller-supplied IDs.
-	identity, err := resolveOrgAgentFromHarness(*harnessKey)
+	identity, err := resolveOrgAgentFromHarness(cfg.RuntimeToken)
 	if err != nil {
 		sendError("failed to resolve organization: " + err.Error())
 		return 1

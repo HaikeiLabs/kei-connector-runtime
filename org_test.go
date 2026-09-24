@@ -11,11 +11,11 @@ import (
 
 // TestRunOrgListWritesJSONToStdout pins the documented CLI output contract
 // (KEI-108): machine-readable results go to stdout as JSON, stdout is never
-// used for diagnostics, and the harness key is sent only as the
+// used for diagnostics, and the runtime token is sent only as the
 // Authorization header.
 func TestRunOrgListWritesJSONToStdout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer kh_test_key" {
+		if got := r.Header.Get("Authorization"); got != "Bearer kh_live_test_token_1234567890" {
 			t.Errorf("unexpected Authorization header: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -24,7 +24,8 @@ func TestRunOrgListWritesJSONToStdout(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := runOrg([]string{"--org", "org1", "--list", "--key", "kh_test_key", "--abac-url", server.URL}, &stdout, &stderr)
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_test_token_1234567890")
+	code := runOrg([]string{"--org", "org1", "--list", "--abac-url", server.URL}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr: %s", code, stderr.String())
 	}
@@ -48,7 +49,7 @@ func TestRunOrgMissingKeyGoesToStderr(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "--key is required") {
+	if !strings.Contains(stderr.String(), "KEI_RUNTIME_TOKEN is required") {
 		t.Errorf("stderr missing error: %s", stderr.String())
 	}
 	if stdout.Len() != 0 {
@@ -64,7 +65,8 @@ func TestRunOrgNon200GoesToStderr(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := runOrg([]string{"--org", "org1", "--list", "--key", "kh_test_key", "--abac-url", server.URL}, &stdout, &stderr)
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_test_token_1234567890")
+	code := runOrg([]string{"--org", "org1", "--list", "--abac-url", server.URL}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}

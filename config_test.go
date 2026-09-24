@@ -29,12 +29,10 @@ func TestValidateRuntimeTokenFormatRejectsShortToken(t *testing.T) {
 	}
 }
 
-func TestConfigFromEnvIgnoresLegacyHarnessToken(t *testing.T) {
-	t.Setenv("KEI_HARNESS_TOKEN", "kh_live_something")
-	// KEI_RUNTIME_TOKEN is deliberately NOT set.
+func TestConfigFromEnvDoesNotEnableRuntimeWithoutCanonicalToken(t *testing.T) {
 	cfg := configFromEnv()
 	if cfg.RuntimeToken != "" {
-		t.Fatal("RuntimeToken should be empty when only legacy KEI_HARNESS_TOKEN is set")
+		t.Fatal("RuntimeToken should be empty when KEI_RUNTIME_TOKEN is not set")
 	}
 	if cfg.IsRuntime() {
 		t.Fatal("IsRuntime should be false when KEI_RUNTIME_TOKEN is not set")
