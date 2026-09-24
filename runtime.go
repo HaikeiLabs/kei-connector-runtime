@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // runRuntime provides the startup contract used by a Bot Runtime image. The
@@ -26,7 +28,9 @@ func runRuntime(args []string) int {
 	case "bootstrap":
 		return runRuntimeBootstrap(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
 	case "heartbeat":
-		return runRuntimeHeartbeat(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runRuntimeHeartbeat(ctx, args[1:], os.Stdin, os.Stdout, os.Stderr, configFromEnv(), os.Getenv, NewRuntimeClient)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown runtime command %q\n", args[0])
 		return 1
@@ -72,33 +76,213 @@ func runRuntimeBootstrap(args []string, stdout, stderr io.Writer, cfg Config, ne
 	return writeRuntimeBootstrapOutput(stdout, identity, stderr)
 }
 
-func runRuntimeHeartbeat(args []string, stdout, stderr io.Writer, cfg Config, newClient runtimeClientFactory) int {
+// runRuntimeHeartbeat reports runtime -> catalog liveness until cancelled.
+//
+// The default text output is the legacy contract: one identity line on stdout,
+// the v1 heartbeat body, and exit 1 on any failure a retry cannot clear.
+// `--output jsonl` is the supervised contract used by Agentware RuntimeLink:
+// identity, beat, and terminal events on stdout, the v2 heartbeat body, and
+// classified exit codes. `--parent-stdin` exits 0 once stdin reaches EOF, so a
+// child never outlives the harness that started it.
+//
+// In both modes a transient catalog failure is retried once within the tick,
+// reported, and followed by the next tick; it never stops the loop.
+func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, cfg Config, getenv func(string) string, newClient runtimeClientFactory) int {
 	flags := flag.NewFlagSet("runtime heartbeat", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	timeout := flags.Duration("timeout", 15*time.Second, "control-plane request timeout")
 	interval := flags.Duration("interval", time.Minute, "heartbeat interval")
+	output := flags.String("output", "text", "stdout format: text (one identity line) or jsonl (identity, beat, and terminal events)")
+	parentStdin := flags.Bool("parent-stdin", false, "exit when stdin reaches EOF; a supervisor holds stdin open for its lifetime")
 	if err := flags.Parse(args); err != nil {
-		return 2
+		return heartbeatExitContract
 	}
 	if flags.NArg() != 0 || *timeout <= 0 || *interval < time.Second {
 		fmt.Fprintln(stderr, "runtime heartbeat accepts no positional arguments; --timeout must be positive and --interval must be at least one second")
-		return 2
+		return heartbeatExitContract
 	}
-	identity, err := bootstrapRuntimeWithClient(context.Background(), cfg, *timeout, newClient)
+	if *output != "text" && *output != "jsonl" {
+		fmt.Fprintln(stderr, "runtime heartbeat --output must be text or jsonl")
+		return heartbeatExitContract
+	}
+	if *parentStdin {
+		var cancel context.CancelFunc
+		ctx, cancel = watchParentStdin(ctx, stdin)
+		defer cancel()
+	}
+	if *output == "jsonl" {
+		return runRuntimeHeartbeatJSONL(ctx, cfg, getenv, stdout, stderr, *timeout, *interval, *parentStdin, newClient)
+	}
+	identity, err := bootstrapRuntimeWithClient(ctx, cfg, *timeout, newClient)
 	if err != nil {
+		if ctx.Err() != nil {
+			return heartbeatExitOK
+		}
 		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
-		return 1
+		return heartbeatExitTransient
 	}
 	if code := writeRuntimeBootstrapOutput(stdout, identity, stderr); code != 0 {
 		return code
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := maintainRuntimeHeartbeat(ctx, newClient(cfg.RuntimeControlPlaneURL, *timeout), cfg.RuntimeToken, version, *interval); err != nil {
-		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
-		return 1
+	loop := &heartbeatLoop{
+		client:   newClient(cfg.RuntimeControlPlaneURL, *timeout),
+		token:    cfg.RuntimeToken,
+		report:   HeartbeatReport{RuntimeVersion: version},
+		interval: *interval,
+		warn:     stderr,
+		now:      time.Now,
+		jitter:   jitterInterval,
 	}
-	return 0
+	if err := loop.run(ctx, false); err != nil {
+		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
+		return heartbeatExitTransient
+	}
+	return heartbeatExitOK
+}
+
+func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(string) string, stdout, stderr io.Writer, timeout, interval time.Duration, attached bool, newClient runtimeClientFactory) int {
+	started := time.Now()
+	runID, runIDErr := heartbeatRunID(getenv)
+	if runIDErr != nil {
+		runID = uuid.NewString()
+	}
+	events := &heartbeatEmitter{out: stdout, runID: runID}
+	envelope, err := harnessEnvelopeFromEnv(getenv)
+	if err == nil {
+		err = runIDErr
+	}
+	if err == nil && !cfg.IsRuntime() {
+		err = errors.New("KEI_RUNTIME_TOKEN is required for runtime heartbeat")
+	}
+	if err == nil {
+		err = cfg.Validate()
+	}
+	if err != nil {
+		events.terminal(heartbeatReasonConfigInvalid)
+		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
+		return heartbeatExitConfig
+	}
+	if attached {
+		if envelope == nil {
+			envelope = &HarnessEnvelope{}
+		}
+		envelope.Link = "attached"
+	}
+	loop := &heartbeatLoop{
+		client: newClient(cfg.RuntimeControlPlaneURL, timeout),
+		token:  cfg.RuntimeToken,
+		report: HeartbeatReport{
+			RuntimeVersion:   version,
+			SchemaVersion:    2,
+			RunID:            runID,
+			IntervalSeconds:  int(interval / time.Second),
+			RuntimeStartedAt: started.UTC().Format(time.RFC3339),
+			Harness:          envelope,
+		},
+		versioned: true,
+		interval:  interval,
+		events:    events,
+		warn:      stderr,
+		now:       time.Now,
+		jitter:    jitterInterval,
+	}
+	identity, code := loop.resolveIdentity(ctx, cfg)
+	if identity == nil {
+		return code
+	}
+	events.identity(identity)
+	// The first beat is sent at once and stands in for bootstrap's heartbeat.
+	return heartbeatExitFor(loop.run(ctx, true), events)
+}
+
+// resolveIdentity fetches the authoritative installation identity from whoami.
+// The token is the only identity source; nothing declared by the harness is
+// consulted. A transient failure is reported as a beat without a seq and
+// retried each interval, so a catalog outage at startup reads as a catalog
+// problem rather than a crash-looping runtime. It returns a nil identity and
+// the exit code when it gives up or ctx ends.
+func (l *heartbeatLoop) resolveIdentity(ctx context.Context, cfg Config) (*RuntimeIdentity, int) {
+	for {
+		started := l.now()
+		identity, err := l.client.WhoAmI(ctx, l.token)
+		if err != nil && retryableInTick(classifyWhoamiError(err)) {
+			if !sleepContext(ctx, l.retryDelay()) {
+				return nil, heartbeatExitOK
+			}
+			identity, err = l.client.WhoAmI(ctx, l.token)
+		}
+		if ctx.Err() != nil {
+			return nil, heartbeatExitOK
+		}
+		if err == nil {
+			if identity == nil {
+				l.events.terminal(heartbeatReasonContractMismatch)
+				return nil, heartbeatExitContract
+			}
+			if err := registerCredentialSyncKey(ctx, l.client, cfg); err != nil {
+				fmt.Fprintf(l.warn, "runtime heartbeat failed: %v\n", err)
+				return nil, heartbeatExitTransient
+			}
+			return identity, heartbeatExitOK
+		}
+		outcome := classifyWhoamiError(err)
+		switch {
+		case outcome == HeartbeatUnauthorized:
+			l.events.terminal(string(HeartbeatUnauthorized))
+			return nil, heartbeatExitUnauthorized
+		case !outcome.transient():
+			l.events.terminal(heartbeatReasonContractMismatch)
+			return nil, heartbeatExitContract
+		}
+		wait := l.jitter(l.interval)
+		var failure *WhoamiFailure
+		status := 0
+		if errors.As(err, &failure) {
+			status = failure.StatusCode
+		}
+		latency, next := l.now().Sub(started).Milliseconds(), wait.Milliseconds()
+		l.events.emit(heartbeatEvent{Event: "beat", At: started.UTC().Format(time.RFC3339), Outcome: outcome, HTTPStatus: status, LatencyMS: &latency, NextInMS: &next})
+		if !sleepContext(ctx, wait) {
+			return nil, heartbeatExitOK
+		}
+	}
+}
+
+// classifyWhoamiError places a whoami failure on the runtime -> catalog leg. A
+// response that decodes badly or lacks identity fields is a contract failure,
+// reported as catalog_rejected so it is not retried.
+func classifyWhoamiError(err error) HeartbeatOutcome {
+	var failure *WhoamiFailure
+	if !errors.As(err, &failure) {
+		return classifyTransportError(err)
+	}
+	switch failure.Category {
+	case WhoamiFailureHTTPStatus:
+		return classifyHeartbeatStatus(failure.StatusCode)
+	case WhoamiFailureDecode, WhoamiFailureIncomplete:
+		return HeartbeatCatalogRejected
+	default:
+		return classifyTransportError(failure.Wrapped)
+	}
+}
+
+// heartbeatExitFor emits the terminal event for a loop result and maps it to
+// the supervised exit code.
+func heartbeatExitFor(err error, events *heartbeatEmitter) int {
+	if err == nil {
+		return heartbeatExitOK
+	}
+	failure := classifyHeartbeatError(err)
+	switch failure.Outcome {
+	case HeartbeatUnauthorized:
+		events.terminal(string(HeartbeatUnauthorized))
+		return heartbeatExitUnauthorized
+	case HeartbeatCatalogRejected:
+		events.terminal(string(HeartbeatCatalogRejected))
+		return heartbeatExitContract
+	default:
+		return heartbeatExitTransient
+	}
 }
 
 func bootstrapRuntimeWithClient(ctx context.Context, cfg Config, timeout time.Duration, newClient runtimeClientFactory) (*RuntimeIdentity, error) {
@@ -116,36 +300,30 @@ func bootstrapRuntimeWithClient(ctx context.Context, cfg Config, timeout time.Du
 	if identity == nil {
 		return nil, errors.New("runtime identity response is incomplete")
 	}
-	if err := client.Heartbeat(ctx, cfg.RuntimeToken, version); err != nil {
+	if err := client.Heartbeat(ctx, cfg.RuntimeToken, HeartbeatReport{RuntimeVersion: version}); err != nil {
 		return nil, fmt.Errorf("report runtime heartbeat: %w", err)
 	}
-	// Sync identity is optional for runtimes that have not yet been assigned a
-	// credential store. Once configured, bootstrap registers it idempotently.
-	if cfg.CredentialStoreInstallationID != "" && cfg.CredentialSyncKeyID != "" && cfg.CredentialSyncPrivateKey != "" {
-		publicKey, err := credentialSyncPublicKey(cfg.CredentialSyncPrivateKey)
-		if err != nil {
-			return nil, fmt.Errorf("derive credential sync public key: %w", err)
-		}
-		if err := client.RegisterCredentialSyncKey(ctx, cfg.RuntimeToken, cfg.CredentialStoreInstallationID, cfg.CredentialSyncKeyID, publicKey); err != nil {
-			return nil, fmt.Errorf("register credential sync key: %w", err)
-		}
+	if err := registerCredentialSyncKey(ctx, client, cfg); err != nil {
+		return nil, err
 	}
 	return identity, nil
 }
 
-func maintainRuntimeHeartbeat(ctx context.Context, client RuntimeClient, token, version string, interval time.Duration) error {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			if err := client.Heartbeat(ctx, token, version); err != nil {
-				return fmt.Errorf("report runtime heartbeat: %w", err)
-			}
-		}
+// registerCredentialSyncKey registers the runtime's sync public key when a
+// credential store is configured. Runtimes without one skip it; once
+// configured, registration is idempotent.
+func registerCredentialSyncKey(ctx context.Context, client RuntimeClient, cfg Config) error {
+	if cfg.CredentialStoreInstallationID == "" || cfg.CredentialSyncKeyID == "" || cfg.CredentialSyncPrivateKey == "" {
+		return nil
 	}
+	publicKey, err := credentialSyncPublicKey(cfg.CredentialSyncPrivateKey)
+	if err != nil {
+		return fmt.Errorf("derive credential sync public key: %w", err)
+	}
+	if err := client.RegisterCredentialSyncKey(ctx, cfg.RuntimeToken, cfg.CredentialStoreInstallationID, cfg.CredentialSyncKeyID, publicKey); err != nil {
+		return fmt.Errorf("register credential sync key: %w", err)
+	}
+	return nil
 }
 
 func writeRuntimeBootstrapOutput(stdout io.Writer, identity *RuntimeIdentity, stderr io.Writer) int {

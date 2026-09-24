@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +23,7 @@ func (c *recordingRuntimeClient) WhoAmI(context.Context, string) (*RuntimeIdenti
 	return c.identity, c.whoamiErr
 }
 
-func (c *recordingRuntimeClient) Heartbeat(context.Context, string, string) error {
+func (c *recordingRuntimeClient) Heartbeat(context.Context, string, HeartbeatReport) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.heartbeatCalls++
@@ -67,40 +66,6 @@ func TestRuntimeBootstrapFailsWithoutRuntimeConfiguration(t *testing.T) {
 	code := runRuntimeBootstrap(nil, &stdout, &stderr, Config{}, func(string, time.Duration) RuntimeClient { return nil })
 	if code != 1 || !bytes.Contains(stderr.Bytes(), []byte("KEI_RUNTIME_TOKEN")) {
 		t.Fatalf("unexpected bootstrap failure: exit=%d stderr=%q", code, stderr.String())
-	}
-}
-
-func TestMaintainRuntimeHeartbeatStopsOnContextCancellation(t *testing.T) {
-	client := &recordingRuntimeClient{}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- maintainRuntimeHeartbeat(ctx, client, "runtime-token", "test", time.Millisecond) }()
-	deadline := time.After(time.Second)
-	for {
-		client.mu.Lock()
-		calls := client.heartbeatCalls
-		client.mu.Unlock()
-		if calls > 0 {
-			cancel()
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("heartbeat loop did not report a heartbeat")
-		case <-time.After(time.Millisecond):
-		}
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("heartbeat loop returned %v", err)
-	}
-}
-
-func TestMaintainRuntimeHeartbeatFailsClosed(t *testing.T) {
-	client := &recordingRuntimeClient{heartbeatErr: errors.New("control plane unavailable")}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := maintainRuntimeHeartbeat(ctx, client, "runtime-token", "test", time.Millisecond); err == nil {
-		t.Fatal("expected heartbeat loop to fail")
 	}
 }
 
