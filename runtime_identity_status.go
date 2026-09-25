@@ -4,13 +4,29 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
 )
 
 const identityStatusResolvePath = "/api/v1/runtime/chat-identity-statuses:resolve"
+
+// IdentityStatusFailureError contains only safe failure metadata. Its Error
+// method intentionally remains generic; callers may inspect Category and
+// HTTPStatusCode without exposing request or response contents.
+type IdentityStatusFailureError struct {
+	Category       string
+	HTTPStatusCode int
+}
+
+const (
+	IdentityStatusFailurePreTransport = "pre_transport"
+	IdentityStatusFailureTransport    = "transport_error"
+	IdentityStatusFailureHTTP         = "http_response"
+	IdentityStatusFailureResponse     = "response_validation"
+)
+
+func (e *IdentityStatusFailureError) Error() string { return "identity status request failed" }
 
 type IdentityStatusRequest struct {
 	PlatformUserID string `json:"platform_user_id"`
@@ -32,35 +48,35 @@ var identityStatuses = map[string]bool{
 
 func (c *runtimeClient) ResolveIdentityStatus(ctx context.Context, token string, input IdentityStatusRequest) (*IdentityStatusResponse, error) {
 	if strings.TrimSpace(token) == "" || strings.TrimSpace(input.PlatformUserID) == "" {
-		return nil, errors.New("invalid identity status request")
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailurePreTransport}
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
-		return nil, errors.New("encode identity status request failed")
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailurePreTransport}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+identityStatusResolvePath, bytes.NewReader(body))
 	if err != nil {
-		return nil, errors.New("build identity status request failed")
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailurePreTransport}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, errors.New("identity status request failed")
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailureTransport}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("identity status request failed")
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailureHTTP, HTTPStatusCode: resp.StatusCode}
 	}
 	var result IdentityStatusResponse
 	decoder := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 16<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil || !identityStatuses[result.Status] {
-		return nil, errors.New("invalid identity status response")
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailureResponse}
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, errors.New("invalid identity status response")
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailureResponse}
 	}
 	return &result, nil
 }
