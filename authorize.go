@@ -253,6 +253,23 @@ func resolveRuntimeScope(identity *RuntimeIdentity) (orgID, workspaceID string, 
 	return identity.OrgID, *identity.WorkspaceID, nil
 }
 
+// runtimeAuthorizeURL selects the policy catalog endpoint for runtime
+// authorization. Runtime identity and management APIs continue to use the
+// control-plane URL; deployments can route policy checks directly to their
+// in-cluster catalog with KEI_API_URL (or ABAC_URL for compatibility).
+func runtimeAuthorizeURL(cfg Config, flagURL string) string {
+	if u := strings.TrimSpace(flagURL); u != "" {
+		return u
+	}
+	if u := strings.TrimSpace(os.Getenv("KEI_API_URL")); u != "" {
+		return u
+	}
+	if u := strings.TrimSpace(os.Getenv("ABAC_URL")); u != "" {
+		return u
+	}
+	return cfg.RuntimeControlPlaneURL
+}
+
 func runAuthorize(args []string) int {
 	fs := flag.NewFlagSet("authorize", flag.ContinueOnError)
 	user := fs.String("user", "", "user_id to authorize as (or --user-id)")
@@ -331,9 +348,9 @@ func runAuthorize(args []string) int {
 		return 1
 	}
 	if cfg.IsRuntime() {
-		// The public control-plane URL relays the self-authenticating authorize
-		// request. Customer runtimes never receive ABAC_API_SECRET.
-		cfg.ABACURL = cfg.RuntimeControlPlaneURL
+		// Keep runtime lifecycle traffic on the control plane, but send policy
+		// checks directly to the configured policy catalog when one is available.
+		cfg.ABACURL = runtimeAuthorizeURL(cfg, *abacURL)
 		cfg.ABACSecret = ""
 	}
 
