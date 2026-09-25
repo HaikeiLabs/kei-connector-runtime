@@ -39,6 +39,26 @@ name.
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
 
+## Starting a platform identity claim
+
+Harnesses can start a platform-neutral identity claim with the `identity-link`
+CLI command:
+
+```sh
+kei-proxy identity-link begin \
+  --platform discord \
+  --platform-user-id 705967865836339301
+```
+
+Pass `--tenant-id` for providers whose user IDs are only unique within a tenant.
+The command reads `KEI_RUNTIME_TOKEN` and `KEI_RUNTIME_CONTROL_PLANE_URL` from
+the environment, so the installation and workspace come from the authenticated
+runtime credential. It prints JSON containing `claim_url` and `expires_at` to
+stdout. The claim URL is a bearer secret; a harness must deliver it privately
+to the initiating user and must not log or persist it. The default control
+plane timeout is eight seconds to fit within the Python harness's subprocess
+deadline.
+
 ## Runtime installation credential
 
 Per ADR-020 and HAI-119, `KEI_RUNTIME_TOKEN` is the only supported runtime installation
