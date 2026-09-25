@@ -17,14 +17,152 @@ func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
 
 	health := httptest.NewRecorder()
 	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if health.Code != http.StatusOK {
-		t.Fatalf("health status = %d, want %d", health.Code, http.StatusOK)
+	if health.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want %d", health.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(health.Body.String(), "runtime_not_configured") {
+		t.Fatalf("health body = %s, want runtime_not_configured", health.Body.String())
 	}
 
 	ready := httptest.NewRecorder()
 	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if ready.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readiness status = %d, want %d", ready.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestRuntimeHTTPHandlerHealthProbeProviderHealthy(t *testing.T) {
+	var providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		if r.URL.Path != "/models" {
+			t.Errorf("provider path = %s, want /models", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[]}`)
+	}))
+	defer provider.Close()
+
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
+		},
+		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "p1", Endpoint: provider.URL, Status: "active", AuthType: "none"}},
+		client:   &http.Client{Timeout: 5 * time.Second},
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("health status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want 1", providerCalls)
+	}
+}
+
+func TestRuntimeHTTPHandlerHealthProbeProviderUnhealthy(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusServiceUnavailable)
+	}))
+	defer provider.Close()
+
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
+		},
+		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "p1", Endpoint: provider.URL, Status: "active", AuthType: "none"}},
+		client:   &http.Client{Timeout: 5 * time.Second},
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want %d", resp.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(resp.Body.String(), "health_provider_unhealthy") {
+		t.Fatalf("health body = %s, want health_provider_unhealthy", resp.Body.String())
+	}
+}
+
+func TestRuntimeHTTPHandlerHealthProbeProviderUnreachable(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	provider.Close()
+
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
+		},
+		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "p1", Endpoint: provider.URL, Status: "active", AuthType: "none"}},
+		client:   &http.Client{Timeout: 2 * time.Second},
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want %d", resp.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(resp.Body.String(), "health_provider_unreachable") {
+		t.Fatalf("health body = %s, want health_provider_unreachable", resp.Body.String())
+	}
+}
+
+func TestRuntimeHTTPHandlerHealthProbeNoProfile(t *testing.T) {
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
+		},
+		profiles: fakeRuntimeProfiles{assignedErr: errors.New("no profile assigned")},
+		client:   &http.Client{Timeout: 5 * time.Second},
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want %d", resp.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(resp.Body.String(), "health_no_profile") {
+		t.Fatalf("health body = %s, want health_no_profile", resp.Body.String())
+	}
+}
+
+func TestRuntimeHTTPHandlerHealthProbeSendsAuthHeader(t *testing.T) {
+	var receivedAuth string
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[]}`)
+	}))
+	defer provider.Close()
+
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
+		},
+		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
+			ProfileID: "p1", Endpoint: provider.URL, Status: "active",
+			AuthType: "none", SecretRef: "", SecretBackend: "",
+		}},
+		client: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("health status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if receivedAuth != "" {
+		t.Fatalf("auth header = %q, want empty for auth_type=none", receivedAuth)
 	}
 }
 

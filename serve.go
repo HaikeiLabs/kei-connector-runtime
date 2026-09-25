@@ -66,8 +66,7 @@ func newRuntimeHTTPHandler(cfg Config) http.Handler {
 func (h *runtimeHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "ok\n")
+		h.handleHealth(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/readyz":
 		h.handleReady(w)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
@@ -128,6 +127,65 @@ func (h *runtimeHTTPHandler) handleReady(w http.ResponseWriter) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, "ready\n")
+}
+
+// handleHealth probes the resolved model provider with a bounded request to
+// its /models endpoint. It is intentionally separate from runtime identity and
+// heartbeat: the runtime can be alive and authenticated while the provider is
+// unreachable. Only redacted error classes are returned; credential material
+// and provider payloads never appear in the response or logs.
+func (h *runtimeHTTPHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if err := h.runtimeConfigError(); err != nil {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	profile, err := h.resolveAssignedOrDefaultProfile(ctx)
+	if err != nil {
+		slog.Warn("health_probe_no_profile")
+		writeRuntimeError(w, http.StatusServiceUnavailable, "health_no_profile", "no model profile assigned to this runtime")
+		return
+	}
+
+	endpoint := strings.TrimRight(profile.Endpoint, "/") + "/models"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		slog.Warn("health_probe_request_build_failed")
+		writeRuntimeError(w, http.StatusServiceUnavailable, "health_provider_unreachable", "provider health check failed")
+		return
+	}
+
+	if profile.AuthType == "api_key" {
+		apiKey, err := getModelProfileAPIKey(profile)
+		if err != nil {
+			slog.Warn("health_probe_credential_unavailable")
+			writeRuntimeError(w, http.StatusServiceUnavailable, "health_credential_unavailable", "provider credential could not be resolved")
+			return
+		}
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		slog.Warn("health_probe_provider_unreachable")
+		writeRuntimeError(w, http.StatusServiceUnavailable, "health_provider_unreachable", "provider health check failed")
+		return
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("health_probe_provider_unhealthy", "status", resp.StatusCode)
+		writeRuntimeError(w, http.StatusServiceUnavailable, "health_provider_unhealthy", "provider returned non-200 status")
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ok\n")
 }
 
 func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
