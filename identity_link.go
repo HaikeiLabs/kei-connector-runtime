@@ -60,7 +60,7 @@ func runIdentityLink(args []string, stdout, stderr io.Writer, cfg Config, newCli
 		PlatformUserID: *platformUserID,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "identity link failed: %v\n", err)
+		fmt.Fprintln(stderr, "identity link failed: control-plane request error")
 		return 1
 	}
 	if result == nil {
