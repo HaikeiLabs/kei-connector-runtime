@@ -2,6 +2,8 @@
 # because the ignore list named only `kei-proxy` and `proxy-linux`; it is
 # deliberately not carried into this repository.
 kei-proxy
+# The entrypoint package shares the binary name; keep its source tracked.
+!cmd/kei-proxy/
 proxy
 proxy-linux
 kei-connector-runtime

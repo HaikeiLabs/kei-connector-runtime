@@ -20,7 +20,7 @@ COPY . .
 # /tmp/kei-proxy fallback, and it is published under the kei-proxy/ S3 release
 # prefix. ADR-017 treats those as external contracts, not cosmetics: renaming
 # the artifact is gated separately from renaming the service.
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o kei-proxy .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o kei-proxy ./cmd/kei-proxy
 
 FROM alpine:3.19
 
