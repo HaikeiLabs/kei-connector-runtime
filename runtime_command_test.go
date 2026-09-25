@@ -33,6 +33,9 @@ func (c *recordingRuntimeClient) RegisterCredentialSyncKey(context.Context, stri
 	c.registerCalls++
 	return nil
 }
+func (c *recordingRuntimeClient) StartIdentityClaim(context.Context, string, IdentityClaimStartRequest) (*IdentityClaimStartResponse, error) {
+	return nil, nil
+}
 
 func TestRuntimeBootstrapReportsHeartbeatBeforeBotStartup(t *testing.T) {
 	workspaceID := "workspace-1"

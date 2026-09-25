@@ -40,6 +40,10 @@ func (c *scriptedHeartbeatClient) RegisterCredentialSyncKey(context.Context, str
 	return nil
 }
 
+func (c *scriptedHeartbeatClient) StartIdentityClaim(context.Context, string, IdentityClaimStartRequest) (*IdentityClaimStartResponse, error) {
+	return nil, nil
+}
+
 func (c *scriptedHeartbeatClient) calls() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
