@@ -39,13 +39,13 @@ name.
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
 
-## Starting a platform identity claim
+## Linking a platform identity
 
 Harnesses can start a platform-neutral identity claim with the `identity-link`
 CLI command:
 
 ```sh
-kei-proxy identity-link begin \
+kei-proxy identity link \
   --platform discord \
   --platform-user-id 705967865836339301
 ```
