@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -50,11 +51,16 @@ func (c *runtimeClient) ResolveIdentityStatus(ctx context.Context, token string,
 	if strings.TrimSpace(token) == "" || strings.TrimSpace(input.PlatformUserID) == "" {
 		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailurePreTransport}
 	}
+	endpoint := c.baseURL + identityStatusResolvePath
+	parsedURL, err := url.Parse(endpoint)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailurePreTransport}
+	}
 	body, err := json.Marshal(input)
 	if err != nil {
 		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailurePreTransport}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+identityStatusResolvePath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailurePreTransport}
 	}
@@ -62,6 +68,10 @@ func (c *runtimeClient) ResolveIdentityStatus(ctx context.Context, token string,
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
+		if resp != nil {
+			resp.Body.Close()
+			return nil, &IdentityStatusFailureError{Category: IdentityStatusFailureHTTP, HTTPStatusCode: resp.StatusCode}
+		}
 		return nil, &IdentityStatusFailureError{Category: IdentityStatusFailureTransport}
 	}
 	defer resp.Body.Close()

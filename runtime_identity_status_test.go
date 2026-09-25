@@ -89,9 +89,11 @@ func TestResolveIdentityStatusRejectsBadResponsesAndTransport(t *testing.T) {
 	if _, err := client.ResolveIdentityStatus(context.Background(), "", IdentityStatusRequest{PlatformUserID: "u"}); !errors.As(err, &failure) || failure.Category != IdentityStatusFailurePreTransport {
 		t.Fatalf("expected safe pre-transport classification, got %v", err)
 	}
-	badURLClient := NewRuntimeClient(":// invalid", time.Second).(*runtimeClient)
-	if _, err := badURLClient.ResolveIdentityStatus(context.Background(), "token", IdentityStatusRequest{PlatformUserID: "u"}); !errors.As(err, &failure) || failure.Category != IdentityStatusFailurePreTransport {
-		t.Fatalf("expected request construction classification, got %v", err)
+	for _, badURL := range []string{":// invalid", "ftp://catalog.example.test", "https://user:password@catalog.example.test"} {
+		badURLClient := NewRuntimeClient(badURL, time.Second).(*runtimeClient)
+		if _, err := badURLClient.ResolveIdentityStatus(context.Background(), "token", IdentityStatusRequest{PlatformUserID: "u"}); !errors.As(err, &failure) || failure.Category != IdentityStatusFailurePreTransport {
+			t.Fatalf("expected request/config classification for invalid base URL, got %v", err)
+		}
 	}
 }
 
