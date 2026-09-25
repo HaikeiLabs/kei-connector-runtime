@@ -94,6 +94,7 @@ type RuntimeClient interface {
 	WhoAmI(ctx context.Context, token string) (*RuntimeIdentity, error)
 	Heartbeat(ctx context.Context, token string, report HeartbeatReport) error
 	RegisterCredentialSyncKey(ctx context.Context, token, storeID, keyID, publicKey string) error
+	StartIdentityClaim(ctx context.Context, token string, request IdentityClaimStartRequest) (*IdentityClaimStartResponse, error)
 }
 
 type runtimeClient struct {
