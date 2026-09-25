@@ -3,6 +3,7 @@ package connectorruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,13 +42,18 @@ func TestResolveIdentityStatusContract(t *testing.T) {
 }
 
 func TestResolveIdentityStatusRejectsBadResponsesAndTransport(t *testing.T) {
+	catalogHandlerObservedRequest := false
 	for name, handler := range map[string]http.HandlerFunc{
 		"invalid status": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"made_up"}`)) },
 		"malformed":      func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":`)) },
 		"unknown secret field": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"status":"unlinked","claim_url":"secret"}`))
 		},
-		"server error": func(w http.ResponseWriter, _ *http.Request) {
+		"server error": func(w http.ResponseWriter, r *http.Request) {
+			catalogHandlerObservedRequest = true
+			if r.URL.Path != identityStatusResolvePath || r.Method != http.MethodPost {
+				t.Errorf("unexpected request at catalog boundary: %s %s", r.Method, r.URL.Path)
+			}
 			w.WriteHeader(503)
 			_, _ = w.Write([]byte(`sensitive diagnostics`))
 		},
@@ -59,14 +65,35 @@ func TestResolveIdentityStatusRejectsBadResponsesAndTransport(t *testing.T) {
 			if err == nil || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "secret") {
 				t.Fatalf("unsafe or missing error: %v", err)
 			}
+			var failure *IdentityStatusFailureError
+			if !errors.As(err, &failure) {
+				t.Fatalf("error is not categorized: %T", err)
+			}
+			if name == "server error" && (failure.Category != IdentityStatusFailureHTTP || failure.HTTPStatusCode != http.StatusServiceUnavailable) {
+				t.Fatalf("HTTP error category/status = %q/%d", failure.Category, failure.HTTPStatusCode)
+			}
+			if name != "server error" && failure.Category != IdentityStatusFailureResponse {
+				t.Fatalf("response error category = %q", failure.Category)
+			}
 		})
 	}
-	client := NewRuntimeClient("http://127.0.0.1:1", time.Millisecond).(*runtimeClient)
-	if _, err := client.ResolveIdentityStatus(context.Background(), "token", IdentityStatusRequest{PlatformUserID: "u"}); err == nil || strings.Contains(err.Error(), "127.0.0.1") {
-		t.Fatalf("unsafe transport error: %v", err)
+	if !catalogHandlerObservedRequest {
+		t.Fatal("non-200 response test did not reach the catalog handler")
 	}
-	if _, err := client.ResolveIdentityStatus(context.Background(), "token", IdentityStatusRequest{}); err == nil {
-		t.Fatal("expected invalid request")
+	client := NewRuntimeClient("http://127.0.0.1:1", time.Millisecond).(*runtimeClient)
+	_, err := client.ResolveIdentityStatus(context.Background(), "token", IdentityStatusRequest{PlatformUserID: "u"})
+	var failure *IdentityStatusFailureError
+	if !errors.As(err, &failure) || failure.Category != IdentityStatusFailureTransport || failure.HTTPStatusCode != 0 || strings.Contains(err.Error(), "127.0.0.1") {
+		t.Fatalf("unsafe or uncategorized transport error: %v (%+v)", err, failure)
+	}
+	if _, err := client.ResolveIdentityStatus(context.Background(), "", IdentityStatusRequest{PlatformUserID: "u"}); !errors.As(err, &failure) || failure.Category != IdentityStatusFailurePreTransport {
+		t.Fatalf("expected safe pre-transport classification, got %v", err)
+	}
+	for _, badURL := range []string{":// invalid", "ftp://catalog.example.test", "https://user:password@catalog.example.test"} {
+		badURLClient := NewRuntimeClient(badURL, time.Second).(*runtimeClient)
+		if _, err := badURLClient.ResolveIdentityStatus(context.Background(), "token", IdentityStatusRequest{PlatformUserID: "u"}); !errors.As(err, &failure) || failure.Category != IdentityStatusFailurePreTransport {
+			t.Fatalf("expected request/config classification for invalid base URL, got %v", err)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package connectorruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,6 +29,17 @@ func runIdentity(args []string) int {
 	}
 }
 
+func writeIdentityStatusDiagnostic(stderr io.Writer, category string, status int) {
+	switch category {
+	case IdentityStatusFailurePreTransport, IdentityStatusFailureTransport, IdentityStatusFailureResponse:
+		fmt.Fprintf(stderr, "identity status diagnostic category=%s\n", category)
+	case IdentityStatusFailureHTTP:
+		if status >= 100 && status <= 599 {
+			fmt.Fprintf(stderr, "identity status diagnostic category=%s http_status=%d\n", category, status)
+		}
+	}
+}
+
 // runIdentityLink starts a claim using the authenticated runtime's
 // authoritative installation and workspace scope. The claim URL is a bearer
 // secret, so it is written only to stdout for the caller to deliver privately.
@@ -39,10 +51,12 @@ func runIdentityStatus(args []string, stdout, stderr io.Writer, cfg Config, newC
 	timeout := flags.Duration("timeout", 8*time.Second, "control-plane request timeout")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *timeout <= 0 || strings.TrimSpace(*platformUserID) == "" {
 		fmt.Fprintln(stderr, "identity status invocation invalid")
+		writeIdentityStatusDiagnostic(stderr, IdentityStatusFailurePreTransport, 0)
 		return 2
 	}
 	if !cfg.IsRuntime() || cfg.Validate() != nil {
 		fmt.Fprintln(stderr, "identity status configuration unavailable")
+		writeIdentityStatusDiagnostic(stderr, IdentityStatusFailurePreTransport, 0)
 		return 1
 	}
 	client := newClient(cfg.RuntimeControlPlaneURL, *timeout)
@@ -51,11 +65,16 @@ func runIdentityStatus(args []string, stdout, stderr io.Writer, cfg Config, newC
 	})
 	if !ok {
 		fmt.Fprintln(stderr, "identity status request failed")
+		writeIdentityStatusDiagnostic(stderr, IdentityStatusFailurePreTransport, 0)
 		return 1
 	}
 	result, err := statusClient.ResolveIdentityStatus(context.Background(), cfg.RuntimeToken, IdentityStatusRequest{PlatformUserID: *platformUserID, TenantID: *tenantID})
 	if err != nil || result == nil {
 		fmt.Fprintln(stderr, "identity status request failed")
+		var failure *IdentityStatusFailureError
+		if errors.As(err, &failure) {
+			writeIdentityStatusDiagnostic(stderr, failure.Category, failure.HTTPStatusCode)
+		}
 		return 1
 	}
 	if json.NewEncoder(stdout).Encode(result) != nil {
