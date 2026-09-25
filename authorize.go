@@ -257,10 +257,7 @@ func resolveRuntimeScope(identity *RuntimeIdentity) (orgID, workspaceID string, 
 // authorization. Runtime identity and management APIs continue to use the
 // control-plane URL; deployments can route policy checks directly to their
 // in-cluster catalog with KEI_API_URL (or ABAC_URL for compatibility).
-func runtimeAuthorizeURL(cfg Config, flagURL string) string {
-	if u := strings.TrimSpace(flagURL); u != "" {
-		return u
-	}
+func runtimeAuthorizeURL(cfg Config) string {
 	if u := strings.TrimSpace(os.Getenv("KEI_API_URL")); u != "" {
 		return u
 	}
@@ -278,7 +275,7 @@ func runAuthorize(args []string) int {
 	action := fs.String("action", "", "action to authorize (e.g. github:write)")
 	resource := fs.String("resource", "", "resource/data being accessed")
 	registryPath := fs.String("registry", "", "tool->service registry path (default $KEI_PROXY_REGISTRY)")
-	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
+	abacURL := fs.String("abac-url", "", "ABAC Engine URL for legacy mode (runtime mode uses KEI_API_URL or ABAC_URL)")
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
 	auditPath := fs.String("audit", envOr("KEI_PROXY_AUDIT", ""), "audit JSONL file path (default $KEI_PROXY_AUDIT)")
 
@@ -350,7 +347,7 @@ func runAuthorize(args []string) int {
 	if cfg.IsRuntime() {
 		// Keep runtime lifecycle traffic on the control plane, but send policy
 		// checks directly to the configured policy catalog when one is available.
-		cfg.ABACURL = runtimeAuthorizeURL(cfg, *abacURL)
+		cfg.ABACURL = runtimeAuthorizeURL(cfg)
 		cfg.ABACSecret = ""
 	}
 

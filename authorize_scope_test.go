@@ -101,6 +101,7 @@ func TestRunAuthorizeHappyPathDerivesWorkspaceFromKey(t *testing.T) {
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 
 	code := runAuthorize([]string{
+		"--abac-url", controlPlane.URL, // Runtime policy routing is environment-only.
 		"--tool", "github.create_pr",
 		"--action", "github:write",
 		"--resource", "acme/widgets",
