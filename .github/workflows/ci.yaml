@@ -52,7 +52,7 @@ jobs:
         # kei-proxy/ S3 prefix. Renaming the binary breaks those consumers, so
         # the name is asserted rather than left to a later edit.
         run: |
-          go build -o kei-proxy .
+          go build -o kei-proxy ./cmd/kei-proxy
           test -x ./kei-proxy || { echo "kei-proxy binary was not produced"; exit 1; }
           ./kei-proxy version
           rm -f kei-proxy

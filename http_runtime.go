@@ -1,4 +1,4 @@
-package main
+package connectorruntime
 
 // This file is the runtime-side implementation of the frozen HTTP API
 // connector contract (docs/http-api-connector-contract.md). It deliberately

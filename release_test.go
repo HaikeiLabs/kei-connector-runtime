@@ -1,4 +1,4 @@
-package main
+package connectorruntime
 
 import (
 	"os"
@@ -12,7 +12,8 @@ func TestRuntimeDaemonReleaseConfigStaticValidation(t *testing.T) {
 	root := "."
 	config := readReleaseFile(t, filepath.Join(root, ".goreleaser.yaml"))
 	for _, want := range []string{
-		"project_name: kei-proxy", "dir: .", "main.version={{.Version}}",
+		"project_name: kei-proxy", "id: kei-proxy", "dir: .", "main: ./cmd/kei-proxy", "binary: kei-proxy",
+		"main.version={{.Version}}",
 		"- -X main.commit={{.Commit}}", "- -X main.date={{.Date}}", "- darwin", "- linux",
 		"- amd64", "- arm64", "formats: [tar.gz]", "algorithm: sha256", "detach-sign",
 		"directory: \"kei-proxy/{{ .Version }}\"", "disable: true",

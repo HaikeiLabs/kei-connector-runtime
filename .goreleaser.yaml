@@ -13,7 +13,7 @@ before:
 builds:
   - id: kei-proxy
     dir: .
-    main: .
+    main: ./cmd/kei-proxy
     binary: kei-proxy
     ldflags:
       - -s -w

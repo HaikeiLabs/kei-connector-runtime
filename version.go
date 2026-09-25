@@ -1,15 +1,13 @@
-package main
+package connectorruntime
 
 import (
 	"fmt"
 	"io"
 )
 
-// These values are set at build time by the release configuration with
-// -ldflags "-X main.version=... -X main.commit=... -X main.date=...".
+// version is the running release version. Main sets it from the build
+// metadata injected into cmd/kei-proxy; "dev" covers tests and direct calls.
 var version = "dev"
-var commit = "unknown"
-var date = "unknown"
 
 func printVersion(w io.Writer) {
 	fmt.Fprintf(w, "kei-proxy %s\n", version)

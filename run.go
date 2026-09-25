@@ -1,24 +1,23 @@
-package main
+package connectorruntime
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 )
 
-func main() {
-	// Diagnostics are structured JSON on stderr (KEI-108): stdout is the
-	// machine-readable protocol channel for the harness.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+// Main runs the kei-proxy command line with args (os.Args[1:]) and returns
+// the process exit code. buildVersion is the release version injected into
+// the cmd/kei-proxy entrypoint; it is reported by the version command and in
+// runtime heartbeats.
+func Main(buildVersion string, args []string) int {
+	version = buildVersion
 
-	if len(os.Args) < 2 {
+	if len(args) < 1 {
 		usage()
-		os.Exit(1)
+		return 1
 	}
 
 	var code int
-	args := os.Args[1:]
-
 	if args[0] == "authorize" {
 		code = runAuthorize(args[1:])
 	} else if args[0] == "connector" {
@@ -35,8 +34,6 @@ func main() {
 		code = runInit(args[1:], os.Stdout, os.Stderr)
 	} else if args[0] == "runtime" {
 		code = runRuntime(args[1:])
-	} else if args[0] == "identity" {
-		code = runIdentity(args[1:])
 	} else if args[0] == "serve" {
 		code = runServe(args[1:])
 	} else if args[0] == "version" || args[0] == "-v" || args[0] == "--version" {
@@ -50,7 +47,7 @@ func main() {
 		usage()
 		code = 1
 	}
-	os.Exit(code)
+	return code
 }
 
 func runModel(args []string) int {
