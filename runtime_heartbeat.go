@@ -301,6 +301,10 @@ type heartbeatLoop struct {
 	failedSinceOK int
 	lastAt        time.Time
 	lastLatency   time.Duration
+
+	// appendLifecycle writes a lifecycle audit record to the local spool after
+	// each tick, when set. nil in tests and when no audit path is configured.
+	appendLifecycle func(LifecycleEvent) error
 }
 
 func (l *heartbeatLoop) retryDelay() time.Duration {
@@ -387,11 +391,27 @@ func (l *heartbeatLoop) record(failure *HeartbeatFailure, next time.Duration) {
 			LatencyMS:  &latency,
 			NextInMS:   &nextMS,
 		})
-		return
-	}
-	if failure != nil && l.warn != nil && failure.Outcome.transient() {
+	} else if failure != nil && l.warn != nil && failure.Outcome.transient() {
 		fmt.Fprintf(l.warn, "runtime heartbeat: %s; retrying in %s\n", failure.Outcome, next.Round(time.Second))
 	}
+	l.emitLifecycleRecord(outcome)
+}
+
+// emitLifecycleRecord writes one lifecycle audit record for the latest tick.
+func (l *heartbeatLoop) emitLifecycleRecord(outcome HeartbeatOutcome) {
+	if l.appendLifecycle == nil {
+		return
+	}
+	_ = l.appendLifecycle(LifecycleEvent{
+		EventClass:     eventClassLifecycle,
+		SchemaVersion:  1,
+		EventType:      "heartbeat",
+		Outcome:        outcome,
+		ObservedAt:     l.lastAt.UTC(),
+		RuntimeVersion: l.report.RuntimeVersion,
+		RunID:          l.report.RunID,
+		Seq:            l.seq,
+	})
 }
 
 // jitterInterval spreads ticks across interval ±10% so a fleet restarted

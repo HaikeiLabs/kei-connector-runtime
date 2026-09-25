@@ -124,6 +124,7 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	if code := writeRuntimeBootstrapOutput(stdout, identity, stderr); code != 0 {
 		return code
 	}
+	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
 	loop := &heartbeatLoop{
 		client:   newClient(cfg.RuntimeControlPlaneURL, *timeout),
 		token:    cfg.RuntimeToken,
@@ -132,6 +133,9 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 		warn:     stderr,
 		now:      time.Now,
 		jitter:   jitterInterval,
+		appendLifecycle: func(e LifecycleEvent) error {
+			return appendLifecycleEvent(auditPath, auditMax, e)
+		},
 	}
 	if err := loop.run(ctx, false); err != nil {
 		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
@@ -168,6 +172,7 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 		}
 		envelope.Link = "attached"
 	}
+	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
 	loop := &heartbeatLoop{
 		client: newClient(cfg.RuntimeControlPlaneURL, timeout),
 		token:  cfg.RuntimeToken,
@@ -185,6 +190,9 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 		warn:      stderr,
 		now:       time.Now,
 		jitter:    jitterInterval,
+		appendLifecycle: func(e LifecycleEvent) error {
+			return appendLifecycleEvent(auditPath, auditMax, e)
+		},
 	}
 	identity, code := loop.resolveIdentity(ctx, cfg)
 	if identity == nil {

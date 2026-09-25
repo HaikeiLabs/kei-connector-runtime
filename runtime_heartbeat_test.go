@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -703,5 +705,144 @@ func TestJitterIntervalStaysWithinTenPercent(t *testing.T) {
 		if got := jitterInterval(time.Minute); got < 54*time.Second || got > 66*time.Second {
 			t.Fatalf("jitterInterval(1m) = %s, outside ±10%%", got)
 		}
+	}
+}
+
+// fakeLifecycleRecorder captures lifecycle records written by the heartbeat loop.
+type fakeLifecycleRecorder struct {
+	mu      sync.Mutex
+	records []LifecycleEvent
+}
+
+func (r *fakeLifecycleRecorder) append(e LifecycleEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, e)
+	return nil
+}
+
+func (r *fakeLifecycleRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.records)
+}
+
+func TestHeartbeatLoopWritesLifecycleRecordOnEachTick(t *testing.T) {
+	client := &scriptedHeartbeatClient{results: []error{nil}}
+	rec := &fakeLifecycleRecorder{}
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	loop := testLoop(client, &out)
+	loop.appendLifecycle = rec.append
+	go func() { done <- loop.run(ctx, true) }()
+	waitFor(t, "two lifecycle records", func() bool { return rec.count() >= 2 })
+	cancel()
+	<-done
+
+	if n := rec.count(); n < 2 {
+		t.Fatalf("got %d lifecycle records, want at least 2", n)
+	}
+	rec.mu.Lock()
+	first := rec.records[0]
+	rec.mu.Unlock()
+
+	if first.EventClass != "lifecycle" {
+		t.Errorf("event_class = %q, want lifecycle", first.EventClass)
+	}
+	if first.SchemaVersion != 1 {
+		t.Errorf("schema_version = %d, want 1", first.SchemaVersion)
+	}
+	if first.EventType != "heartbeat" {
+		t.Errorf("event_type = %q, want heartbeat", first.EventType)
+	}
+	if first.Outcome != HeartbeatOK {
+		t.Errorf("outcome = %q, want ok", first.Outcome)
+	}
+	if first.RuntimeVersion != "test" {
+		t.Errorf("runtime_version = %q, want test", first.RuntimeVersion)
+	}
+	if first.Seq != 1 {
+		t.Errorf("seq = %d, want 1", first.Seq)
+	}
+	if first.ObservedAt.IsZero() {
+		t.Error("observed_at is zero")
+	}
+}
+
+func TestHeartbeatLoopWritesLifecycleRecordWithFailureOutcome(t *testing.T) {
+	client := &scriptedHeartbeatClient{results: []error{statusFailure(http.StatusBadGateway)}}
+	rec := &fakeLifecycleRecorder{}
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	loop := testLoop(client, &out)
+	loop.appendLifecycle = rec.append
+	go func() { done <- loop.run(ctx, true) }()
+	waitFor(t, "one lifecycle record", func() bool { return rec.count() >= 1 })
+	cancel()
+	<-done
+
+	rec.mu.Lock()
+	e := rec.records[0]
+	rec.mu.Unlock()
+
+	if e.Outcome != HeartbeatCatalogError {
+		t.Errorf("outcome = %q, want catalog_error", e.Outcome)
+	}
+	if e.Seq != 1 {
+		t.Errorf("seq = %d, want 1", e.Seq)
+	}
+}
+
+func TestHeartbeatLoopDoesNotWriteLifecycleRecordWhenNil(t *testing.T) {
+	client := &scriptedHeartbeatClient{results: []error{nil}}
+	var out syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	loop := testLoop(client, &out)
+	loop.appendLifecycle = nil
+	go func() { done <- loop.run(ctx, true) }()
+	waitFor(t, "one beat event", func() bool {
+		return len(eventsOf(heartbeatEvents(t, out.String()), "beat")) > 0
+	})
+	cancel()
+	<-done
+	// No crash, no record — the nil guard in emitLifecycleRecord prevents it.
+}
+
+func TestHeartbeatLoopAppendsLifecycleRecordsToSpool(t *testing.T) {
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.jsonl")
+
+	client := &scriptedHeartbeatClient{results: []error{nil}}
+	cfg := Config{AuditPath: auditPath, AuditMaxBytes: 1 << 20}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	loop := testLoop(client, io.Discard)
+	loop.appendLifecycle = func(e LifecycleEvent) error {
+		return appendLifecycleEvent(cfg.AuditPath, cfg.AuditMaxBytes, e)
+	}
+	go func() { done <- loop.run(ctx, true) }()
+	waitFor(t, "one lifecycle record in spool", func() bool {
+		data, _ := os.ReadFile(auditPath)
+		return len(data) > 0
+	})
+	cancel()
+	<-done
+
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read spool: %v", err)
+	}
+	var parsed LifecycleEvent
+	if err := json.Unmarshal(bytes.TrimSpace(data), &parsed); err != nil {
+		t.Fatalf("unmarshal lifecycle record: %v", err)
+	}
+	if parsed.EventClass != "lifecycle" {
+		t.Errorf("event_class = %q, want lifecycle", parsed.EventClass)
+	}
+	if parsed.Outcome != HeartbeatOK {
+		t.Errorf("outcome = %q, want ok", parsed.Outcome)
 	}
 }

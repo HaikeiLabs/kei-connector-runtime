@@ -118,6 +118,66 @@ type LifecycleFlushClient interface {
 	FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error)
 }
 
+type lifecycleFlushClient struct {
+	baseURL string
+	path    string
+	headers map[string]string
+	client  *http.Client
+}
+
+// NewLifecycleFlushClientFromConfig builds a client that POSTs lifecycle
+// records to <KEI_RUNTIME_CONTROL_PLANE_URL>/api/v1/runtime/audit/lifecycle:flush
+// with the installation token as an Authorization bearer. It returns nil when no
+// runtime token is configured (legacy harness mode), so the collector skips
+// lifecycle records without erroring.
+func NewLifecycleFlushClientFromConfig(cfg Config, timeout time.Duration) LifecycleFlushClient {
+	if cfg.RuntimeToken == "" {
+		return nil
+	}
+	base := cfg.RuntimeControlPlaneURL
+	if base == "" {
+		base = cfg.ABACURL
+	}
+	return &lifecycleFlushClient{
+		baseURL: base,
+		path:    "/api/v1/runtime/audit/lifecycle:flush",
+		headers: map[string]string{"Authorization": "Bearer " + cfg.RuntimeToken},
+		client:  &http.Client{Timeout: timeout},
+	}
+}
+
+func (c *lifecycleFlushClient) FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error) {
+	body, err := json.Marshal(map[string][]json.RawMessage{"records": records})
+	if err != nil {
+		return 0, fmt.Errorf("marshal lifecycle flush: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.path, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("build lifecycle flush request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("lifecycle flush request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("lifecycle flush returned status %d", resp.StatusCode)
+	}
+	var out struct {
+		Upserted int `json:"upserted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, fmt.Errorf("decode lifecycle flush response: %w", err)
+	}
+	return out.Upserted, nil
+}
+
 // Collector ships pending JSONL decision events to ABAC. Each run seals the
 // active spool file into a segment under the spool lock, then streams sealed
 // segments oldest first, so it never rereads data it has already shipped. Its
@@ -669,7 +729,9 @@ func runCollector(args []string) int {
 	}
 
 	client := NewABACFlushClientFromConfig(cfg, time.Duration(*timeout)*time.Second)
+	lifecycleClient := NewLifecycleFlushClientFromConfig(cfg, time.Duration(*timeout)*time.Second)
 	collector := NewCollector(*jsonlPath, client, *batchSize)
+	collector.lifecycle = lifecycleClient
 	if *poll {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
