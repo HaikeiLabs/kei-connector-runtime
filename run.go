@@ -32,6 +32,8 @@ func Main(buildVersion string, args []string) int {
 		code = runOrg(args[1:], os.Stdout, os.Stderr)
 	} else if args[0] == "init" {
 		code = runInit(args[1:], os.Stdout, os.Stderr)
+	} else if args[0] == "identity" {
+		code = runIdentity(args[1:])
 	} else if args[0] == "runtime" {
 		code = runRuntime(args[1:])
 	} else if args[0] == "serve" {
@@ -87,6 +89,7 @@ Commands:
   init         provision a member and/or agent via canonical ABAC initialization
   runtime      report and maintain a customer runtime installation heartbeat
 	  identity link        start a platform identity claim for the current runtime
+  identity status      resolve chat identity status for the current runtime
   serve        start the local OpenAI-compatible HTTP listener
   help         show this help
 
@@ -115,6 +118,7 @@ Examples:
   kei-proxy init --agent --org 9f2c... --name researcher --tools search_wiki,search_web --scopes wiki:read
   kei-proxy runtime bootstrap
 	  kei-proxy identity link --platform discord --platform-user-id 123456789
+  kei-proxy identity status --platform-user-id 123456789 --tenant-id guild-id
   echo '{"request":{...}}' | KEI_RUNTIME_TOKEN=$KEI_RUNTIME_TOKEN kei-proxy model invoke
   kei-proxy model profile [--profile-id PROFILE_ID]
   kei-proxy --user-id U1234ABCD --tool github.create_pr --action github:write
