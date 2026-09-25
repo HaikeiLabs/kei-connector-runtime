@@ -24,6 +24,10 @@ type scriptedHeartbeatClient struct {
 	reports []HeartbeatReport
 }
 
+func (c *scriptedHeartbeatClient) ResolveIdentityStatus(context.Context, string, IdentityStatusRequest) (*IdentityStatusResponse, error) {
+	return nil, nil
+}
+
 func (c *scriptedHeartbeatClient) WhoAmI(context.Context, string) (*RuntimeIdentity, error) {
 	return nil, errors.New("not used")
 }

@@ -16,6 +16,10 @@ type identityClaimTestClient struct {
 	err   error
 }
 
+func (c *identityClaimTestClient) ResolveIdentityStatus(context.Context, string, IdentityStatusRequest) (*IdentityStatusResponse, error) {
+	return nil, nil
+}
+
 func (c *identityClaimTestClient) WhoAmI(context.Context, string) (*RuntimeIdentity, error) {
 	return nil, nil
 }

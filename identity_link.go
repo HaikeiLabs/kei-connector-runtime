@@ -20,6 +20,8 @@ func runIdentity(args []string) int {
 	switch args[0] {
 	case "link":
 		return runIdentityLink(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
+	case "status":
+		return runIdentityStatus(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown identity command %q\n", args[0])
 		return 2
@@ -29,6 +31,40 @@ func runIdentity(args []string) int {
 // runIdentityLink starts a claim using the authenticated runtime's
 // authoritative installation and workspace scope. The claim URL is a bearer
 // secret, so it is written only to stdout for the caller to deliver privately.
+func runIdentityStatus(args []string, stdout, stderr io.Writer, cfg Config, newClient runtimeClientFactory) int {
+	flags := flag.NewFlagSet("identity status", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	platformUserID := flags.String("platform-user-id", "", "stable user ID from the current platform interaction")
+	tenantID := flags.String("tenant-id", "", "platform tenant ID when the user ID is tenant-scoped")
+	timeout := flags.Duration("timeout", 8*time.Second, "control-plane request timeout")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *timeout <= 0 || strings.TrimSpace(*platformUserID) == "" {
+		fmt.Fprintln(stderr, "identity status invocation invalid")
+		return 2
+	}
+	if !cfg.IsRuntime() || cfg.Validate() != nil {
+		fmt.Fprintln(stderr, "identity status configuration unavailable")
+		return 1
+	}
+	client := newClient(cfg.RuntimeControlPlaneURL, *timeout)
+	statusClient, ok := client.(interface {
+		ResolveIdentityStatus(context.Context, string, IdentityStatusRequest) (*IdentityStatusResponse, error)
+	})
+	if !ok {
+		fmt.Fprintln(stderr, "identity status request failed")
+		return 1
+	}
+	result, err := statusClient.ResolveIdentityStatus(context.Background(), cfg.RuntimeToken, IdentityStatusRequest{PlatformUserID: *platformUserID, TenantID: *tenantID})
+	if err != nil || result == nil {
+		fmt.Fprintln(stderr, "identity status request failed")
+		return 1
+	}
+	if json.NewEncoder(stdout).Encode(result) != nil {
+		fmt.Fprintln(stderr, "identity status output failed")
+		return 1
+	}
+	return 0
+}
+
 func runIdentityLink(args []string, stdout, stderr io.Writer, cfg Config, newClient runtimeClientFactory) int {
 	flags := flag.NewFlagSet("identity link", flag.ContinueOnError)
 	flags.SetOutput(stderr)

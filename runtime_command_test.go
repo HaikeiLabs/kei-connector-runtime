@@ -19,6 +19,10 @@ type recordingRuntimeClient struct {
 	mu             sync.Mutex
 }
 
+func (c *recordingRuntimeClient) ResolveIdentityStatus(context.Context, string, IdentityStatusRequest) (*IdentityStatusResponse, error) {
+	return nil, nil
+}
+
 func (c *recordingRuntimeClient) WhoAmI(context.Context, string) (*RuntimeIdentity, error) {
 	return c.identity, c.whoamiErr
 }
