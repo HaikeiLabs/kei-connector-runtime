@@ -35,7 +35,7 @@ func TestIdentityLinkBeginWritesOnlyClaimJSONAndUsesRuntimeConfiguration(t *test
 	client := &identityClaimTestClient{resp: &IdentityClaimStartResponse{ClaimURL: "https://kei.example/claim#claim=secret", ExpiresAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)}}
 	cfg := Config{RuntimeToken: token, RuntimeControlPlaneURL: "https://control.example", CredentialStoreInstallationID: "not-an-override"}
 	var stdout, stderr bytes.Buffer
-	code := runIdentityLinkBegin([]string{"--platform", "discord", "--platform-user-id", "u-123", "--timeout", "3s"}, &stdout, &stderr, cfg,
+	code := runIdentityLink([]string{"--platform", "discord", "--platform-user-id", "u-123", "--timeout", "3s"}, &stdout, &stderr, cfg,
 		func(base string, timeout time.Duration) RuntimeClient {
 			if base != cfg.RuntimeControlPlaneURL || timeout != 3*time.Second {
 				t.Fatalf("factory args = %q, %v", base, timeout)
@@ -56,7 +56,7 @@ func TestIdentityLinkBeginWritesOnlyClaimJSONAndUsesRuntimeConfiguration(t *test
 func TestIdentityLinkBeginAcceptsTenantAndRejectsScopeOverrides(t *testing.T) {
 	client := &identityClaimTestClient{resp: &IdentityClaimStartResponse{ClaimURL: "https://kei.example/claim#claim=x", ExpiresAt: time.Now()}}
 	var stdout, stderr bytes.Buffer
-	code := runIdentityLinkBegin([]string{"--platform", "slack", "--platform-user-id", "u", "--tenant-id", "team"}, &stdout, &stderr,
+	code := runIdentityLink([]string{"--platform", "slack", "--platform-user-id", "u", "--tenant-id", "team"}, &stdout, &stderr,
 		Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://control.example"},
 		func(string, time.Duration) RuntimeClient { return client })
 	if code != 0 || client.input.TenantID != "team" {
@@ -65,7 +65,7 @@ func TestIdentityLinkBeginAcceptsTenantAndRejectsScopeOverrides(t *testing.T) {
 	for _, flag := range []string{"--installation-id", "--workspace-id"} {
 		stdout.Reset()
 		stderr.Reset()
-		code = runIdentityLinkBegin([]string{"--platform", "discord", "--platform-user-id", "u", flag, "override"}, &stdout, &stderr, Config{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
+		code = runIdentityLink([]string{"--platform", "discord", "--platform-user-id", "u", flag, "override"}, &stdout, &stderr, Config{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
 		if code != 2 || stdout.Len() != 0 {
 			t.Fatalf("override %s: exit=%d stdout=%q", flag, code, stdout.String())
 		}
@@ -88,7 +88,7 @@ func TestIdentityLinkBeginErrorsAreSecretSafe(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &identityClaimTestClient{resp: tc.response, err: tc.err}
 			var stdout, stderr bytes.Buffer
-			code := runIdentityLinkBegin([]string{"--platform", "discord", "--platform-user-id", "u"}, &stdout, &stderr, tc.cfg, func(string, time.Duration) RuntimeClient { return client })
+			code := runIdentityLink([]string{"--platform", "discord", "--platform-user-id", "u"}, &stdout, &stderr, tc.cfg, func(string, time.Duration) RuntimeClient { return client })
 			if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), tc.want) || strings.Contains(stderr.String(), "secret") {
 				t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
@@ -99,7 +99,7 @@ func TestIdentityLinkBeginErrorsAreSecretSafe(t *testing.T) {
 func TestIdentityLinkBeginRequiresIdentityArguments(t *testing.T) {
 	for _, args := range [][]string{{"--platform", "discord"}, {"--platform-user-id", "u"}, {"--platform", "discord", "--platform-user-id", "u", "unexpected"}, {"--platform", "discord", "--platform-user-id", "u", "--timeout", "0"}} {
 		var stdout, stderr bytes.Buffer
-		code := runIdentityLinkBegin(args, &stdout, &stderr, Config{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
+		code := runIdentityLink(args, &stdout, &stderr, Config{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
 		if code != 2 || stdout.Len() == 0 && stderr.Len() == 0 {
 			t.Fatalf("args=%v exit=%d", args, code)
 		}
