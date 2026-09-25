@@ -275,7 +275,6 @@ func runAuthorize(args []string) int {
 	action := fs.String("action", "", "action to authorize (e.g. github:write)")
 	resource := fs.String("resource", "", "resource/data being accessed")
 	registryPath := fs.String("registry", "", "tool->service registry path (default $KEI_PROXY_REGISTRY)")
-	abacURL := fs.String("abac-url", "", "ABAC Engine URL for legacy mode (runtime mode uses KEI_API_URL or ABAC_URL)")
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
 	auditPath := fs.String("audit", envOr("KEI_PROXY_AUDIT", ""), "audit JSONL file path (default $KEI_PROXY_AUDIT)")
 
@@ -308,9 +307,6 @@ func runAuthorize(args []string) int {
 	}
 	if *registryPath != "" {
 		cfg.RegistryPath = *registryPath
-	}
-	if *abacURL != "" {
-		cfg.ABACURL = *abacURL
 	}
 	if *auditPath != "" {
 		cfg.AuditPath = *auditPath
