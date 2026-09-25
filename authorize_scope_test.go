@@ -65,7 +65,7 @@ func TestRunAuthorizeHappyPathDerivesWorkspaceFromKey(t *testing.T) {
 	var mu sync.Mutex
 	var authorizeBody map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
 			json.NewEncoder(w).Encode(RuntimeIdentity{
@@ -74,6 +74,14 @@ func TestRunAuthorizeHappyPathDerivesWorkspaceFromKey(t *testing.T) {
 			})
 		case "/api/v1/runtime/heartbeat":
 			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer controlPlane.Close()
+
+	policyCatalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
 		case "/api/v1/authorize":
 			mu.Lock()
 			defer mu.Unlock()
@@ -84,10 +92,12 @@ func TestRunAuthorizeHappyPathDerivesWorkspaceFromKey(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	defer server.Close()
+	defer policyCatalog.Close()
 
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
-	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", server.URL)
+	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", controlPlane.URL)
+	t.Setenv("KEI_API_URL", policyCatalog.URL)
+	t.Setenv("ABAC_URL", "")
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 
 	code := runAuthorize([]string{
