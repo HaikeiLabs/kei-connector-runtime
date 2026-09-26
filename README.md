@@ -326,8 +326,104 @@ a retry cannot clear.
 
 ## Releases
 
-Tag `proxy-v*` to publish via goreleaser to the shared S3 release bucket under
-the `kei-proxy/` prefix. Manual runs require admin permission.
+`kei-proxy` is released by `.github/workflows/release.yaml` to the shared
+`kei-cli-releases` S3 bucket, under the `kei-proxy/` prefix. For the
+step-by-step runbook (prerequisites, watching a run, and what to do when a run
+is skipped or fails), see [docs/release.md](docs/release.md).
+
+### How a release runs
+
+1. **Authorize manual release.** Runs only for `workflow_dispatch`. It fails
+   unless the person dispatching has `admin` on the repository (a repository
+   or organization owner). It is skipped on tag pushes.
+2. **Validate tag.** Requires `proxy-vMAJOR.MINOR.PATCH[-prerelease]`. It
+   sets the channel: `prerelease` for `-rc.`, `-alpha.`, or `-beta.`, and
+   `stable` otherwise. On a dispatch it also fails if the calculated tag
+   already exists.
+3. **Release.** Runs only when Validate tag succeeded. On a dispatch it first
+   creates and pushes the calculated tag. It then creates a local `vX.Y.Z`
+   tag for GoReleaser, which only parses `v`-prefixed semver; that tag is
+   never pushed. Next it imports the GPG key, checks the runner's AWS
+   identity and bucket access, and runs GoReleaser to build, sign, and
+   upload. Finally it uploads `install.sh`, checks the published checksums
+   and installer for leaked credentials, and, for stable releases only,
+   writes `latest.txt`.
+
+Validate tag and Release run on the self-hosted `kei-cli-release` runner,
+the same one kei-cli uses. The runner Pod gets AWS access from its IRSA role,
+so no AWS credentials are stored in the repository or the workflow. The
+Release job runs in the `release` environment, which holds the
+`GORELEASER_SIGNING_KEY` secret (the GPG key for
+`kei-cli-releases@haikeilabs.com`). The environment has no required reviewers
+or branch policy; the owner check lives in the workflow. The optional
+repository variables `AWS_REGION` (default `us-east-1`) and
+`AWS_S3_RELEASES_BUCKET` (default `kei-cli-releases`) are not set today.
+
+### Cutting a release
+
+**Tag push:**
+
+```sh
+git fetch origin
+git tag proxy-vX.Y.Z origin/main
+git push origin proxy-vX.Y.Z
+```
+
+Before #35, tag pushes silently skipped the Release job. Since #35, a tag
+push releases.
+
+**Manual dispatch** (repository or organization owners only). The workflow
+bumps the highest stable `proxy-vX.Y.Z` tag, then creates and pushes the new
+tag itself:
+
+```sh
+gh workflow run release.yaml -R HaikeiLabs/kei-connector-runtime -f bump=patch   # or minor, major
+```
+
+### What gets published
+
+Artifacts land at `s3://kei-cli-releases/kei-proxy/<version>/`, where
+`<version>` is the tag without `proxy-v`. The public base URL is
+`https://kei-cli-releases.s3.us-east-1.amazonaws.com/kei-proxy/`.
+
+```
+kei-proxy/
+  install.sh                              standalone installer; overwritten every release, no-cache
+  latest.txt                              latest stable version, e.g. 0.1.11; stable releases only
+  <version>/
+    kei-proxy_<version>_macOS_arm64.tar.gz
+    kei-proxy_<version>_macOS_x86_64.tar.gz
+    kei-proxy_<version>_Linux_arm64.tar.gz
+    kei-proxy_<version>_Linux_x86_64.tar.gz
+    kei-proxy_<version>_checksums.txt     SHA-256 of every archive
+    kei-proxy_<version>_checksums.txt.sig armored GPG signature of the checksums
+```
+
+kei-cli bundles one of these archives into each CLI release. The version it
+bundles is pinned by kei-cli's `KEI_PROXY_VERSION` variable, so publishing a
+proxy release does not change what `kei` installs until that pin is raised.
+
+### Verifying a release
+
+```sh
+BASE=https://kei-cli-releases.s3.us-east-1.amazonaws.com/kei-proxy
+curl -fsSL "$BASE/latest.txt"; echo              # stable releases: prints the new version
+V=0.1.11
+A="kei-proxy_${V}_Linux_x86_64.tar.gz"
+curl -fsSLO "$BASE/$V/$A"
+curl -fsSLO "$BASE/$V/kei-proxy_${V}_checksums.txt"
+shasum -a 256 -c --ignore-missing "kei-proxy_${V}_checksums.txt"   # Linux: sha256sum -c --ignore-missing
+```
+
+To install the standalone binary:
+
+```sh
+curl -fsSL "https://kei-cli-releases.s3.us-east-1.amazonaws.com/kei-proxy/install.sh" \
+  | AWS_S3_RELEASES_URL_BASE=https://kei-cli-releases.s3.us-east-1.amazonaws.com bash -s -- -v "$V" -d "$HOME/.local/bin"
+```
+
+The installer has no default endpoint, so `AWS_S3_RELEASES_URL_BASE` is
+required. Without `-d` it installs to `/usr/local/bin`.
 
 ## Audit collector
 
