@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 
+	_ "golang.org/x/crypto/x509roots/fallback"
+
 	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
 )
 
