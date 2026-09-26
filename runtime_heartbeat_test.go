@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -845,4 +846,101 @@ func TestHeartbeatLoopAppendsLifecycleRecordsToSpool(t *testing.T) {
 	if parsed.Outcome != HeartbeatOK {
 		t.Errorf("outcome = %q, want ok", parsed.Outcome)
 	}
+}
+
+func TestRuntimeHeartbeatIdentityCarriesAssignedAgents(t *testing.T) {
+	catalog, server := newFakeCatalog(t)
+	catalog.whoami = func(w http.ResponseWriter) {
+		json.NewEncoder(w).Encode(RuntimeIdentity{ID: "installation-1", OrgID: "org-1", AgentID: "agent-default", Platform: "cli", Status: "active", BindingStatus: "verified", Agents: []RuntimeAgent{
+			{InstallationID: "installation-1", AgentID: "agent-default", IsDefault: true},
+			{InstallationID: "installation-1", AgentID: "agent-2"},
+		}})
+	}
+	run := startHeartbeat(t, server, nil, supervisedEnv, "--output", "jsonl")
+	waitFor(t, "the first beat event", func() bool { return len(eventsOf(heartbeatEvents(t, run.stdout.String()), "beat")) > 0 })
+	run.cancel()
+	run.exit(t)
+
+	identity := eventsOf(heartbeatEvents(t, run.stdout.String()), "identity")[0]
+	if identity["agent_id"] != "agent-default" {
+		t.Fatalf("agent_id = %v, want the whoami default", identity["agent_id"])
+	}
+	want := []any{
+		map[string]any{"agent_id": "agent-default", "is_default": true},
+		map[string]any{"agent_id": "agent-2", "is_default": false},
+	}
+	if !reflect.DeepEqual(identity["agents"], want) {
+		t.Fatalf("agents = %v, want %v", identity["agents"], want)
+	}
+	if _, ok := identity["agents_truncated"]; ok {
+		t.Fatalf("agents_truncated must be omitted for a list that fits: %v", identity)
+	}
+}
+
+func TestHeartbeatIdentityAgentFields(t *testing.T) {
+	emitted := func(identity *RuntimeIdentity) map[string]any {
+		t.Helper()
+		var out bytes.Buffer
+		(&heartbeatEmitter{out: &out, runID: "run-1"}).identity(identity)
+		events := heartbeatEvents(t, out.String())
+		if len(events) != 1 {
+			t.Fatalf("events = %v, want one identity event", events)
+		}
+		return events[0]
+	}
+
+	t.Run("omitted when whoami has no agents", func(t *testing.T) {
+		event := emitted(&RuntimeIdentity{ID: "installation-1", OrgID: "org-1"})
+		for _, key := range []string{"agent_id", "agents", "agents_truncated"} {
+			if _, ok := event[key]; ok {
+				t.Fatalf("%s must be omitted: %v", key, event)
+			}
+		}
+	})
+
+	t.Run("default taken from agents when agent_id is empty", func(t *testing.T) {
+		event := emitted(&RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{AgentID: "agent-1"}, {AgentID: "agent-2", IsDefault: true}}})
+		if event["agent_id"] != "agent-2" {
+			t.Fatalf("agent_id = %v, want the is_default entry", event["agent_id"])
+		}
+	})
+
+	t.Run("no default leaves agent_id empty", func(t *testing.T) {
+		event := emitted(&RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{AgentID: "agent-1"}}})
+		if _, ok := event["agent_id"]; ok {
+			t.Fatalf("agent_id must be omitted without a default: %v", event)
+		}
+		if agents := event["agents"].([]any); len(agents) != 1 {
+			t.Fatalf("agents = %v", agents)
+		}
+	})
+
+	t.Run("huge list is truncated and keeps the default", func(t *testing.T) {
+		identity := &RuntimeIdentity{ID: "installation-1", OrgID: "org-1"}
+		for i := 0; i < 500; i++ {
+			identity.Agents = append(identity.Agents, RuntimeAgent{AgentID: fmt.Sprintf("agent-%04d-%s", i, strings.Repeat("x", 24))})
+		}
+		const defaultID = "agent-the-default"
+		identity.Agents = append(identity.Agents, RuntimeAgent{AgentID: defaultID, IsDefault: true})
+
+		var out bytes.Buffer
+		(&heartbeatEmitter{out: &out, runID: "run-1"}).identity(identity)
+		if line := strings.TrimSuffix(out.String(), "\n"); len(line) == 0 || len(line) >= maxHeartbeatEventBytes {
+			t.Fatalf("identity line is %d bytes, want 0 < n < %d", len(line), maxHeartbeatEventBytes)
+		}
+		event := heartbeatEvents(t, out.String())[0]
+		if event["agent_id"] != defaultID || event["agents_truncated"] != true {
+			t.Fatalf("event = %v, want the default kept and agents_truncated", event)
+		}
+		agents := event["agents"].([]any)
+		if len(agents) < 2 || len(agents) >= len(identity.Agents) {
+			t.Fatalf("kept %d agents, want a truncated but non-trivial list", len(agents))
+		}
+		if first := agents[0].(map[string]any); first["agent_id"] != "agent-0000-"+strings.Repeat("x", 24) {
+			t.Fatalf("truncation must keep whoami order, first = %v", first)
+		}
+		if last := agents[len(agents)-1].(map[string]any); last["agent_id"] != defaultID || last["is_default"] != true {
+			t.Fatalf("default entry must survive truncation, last = %v", last)
+		}
+	})
 }
