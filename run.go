@@ -107,7 +107,8 @@ Environment:
   KEI_PROXY_INVOKING_SUBJECT invoking subject (defaults to --user)
   KEI_PROXY_PARENT_SPAN     parent span id (delegation chain)
   KEI_PROXY_DELEGATION_DEPTH delegation depth (0 = direct)
-  KEI_PROXY_AGENT_ID        agent id making the call
+  KEI_PROXY_AGENT_ID        optional per-call agent id override; harnesses get their
+                            assigned agent from whoami (heartbeat identity event)
   KEI_PROXY_AGENT_VERSION   agent version
   KEI_PROXY_FRAMEWORK       agent framework (e.g. claude, codex)
 

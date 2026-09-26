@@ -219,8 +219,10 @@ source .runtime.env
 
 The combined target uses `kei bot init --platform cli` and then
 `kei bot credential`. Pass
-`KEI_AGENT_ID=AGENT_ID` when an agent-specific model
-profile is desired, or `KEI_INSTALLATION_ID=...` to reuse an existing
+`KEI_AGENT_ID=AGENT_ID` to assign an agent to the new installation when an
+agent-specific model profile is desired (this is an admin-side assignment for
+`kei bot init`; the runtime and harness learn it from `whoami`, not from an
+environment variable), or `KEI_INSTALLATION_ID=...` to reuse an existing
 installation instead of creating another one. Set `KEI_SUBJECT` if the local
 policy configuration requires a fixed development subject.
 
@@ -278,6 +280,11 @@ this dependency.
 
 ## Runtime heartbeat (liveness)
 
+A harness needs only `KEI_RUNTIME_TOKEN` (plus the control-plane URL).
+Installation, org, workspace, and assigned agents all come from `whoami`; do
+not add an agent-ID environment variable to a harness. A supervised harness
+reads its agent from the heartbeat `identity` event below.
+
 `kei-proxy runtime heartbeat` reports that this runtime installation is
 connected to kei-policy-catalog (`POST /api/v1/runtime/heartbeat`). It is the
 runtime-to-catalog **liveness** leg; a harness-local `/healthz` or `whoami` is
@@ -301,6 +308,15 @@ Agentware `RuntimeLink`:
   `KEI_HARNESS_VERSION`, `KEI_DEPLOYMENT_ENV`, `KEI_AGENTWARE_SDK_LANG`,
   `KEI_AGENTWARE_SDK_VERSION`, and `KEI_HEARTBEAT_RUN_ID`. A malformed value
   exits `4` without echoing it.
+- The `identity` event carries only what `whoami` returned for the token:
+  `installation_id`, `org_id`, `workspace_id`, `platform`, `status`,
+  `binding_status`, `runtime_version`, and the installation's assigned agents.
+  `agent_id` is the default assignment (the `is_default` entry when whoami
+  leaves `agent_id` empty) and `agents` is `[{"agent_id", "is_default"}]`.
+  Both are omitted when whoami has none. If the list would push the line past
+  4 KiB, `agents` is cut to fit, the default entry is always kept, and
+  `"agents_truncated": true` is set. These fields are additive to the v1 event
+  contract; supervisors that predate them ignore them.
 - `--parent-stdin` exits `0` as soon as stdin reaches EOF, so a heartbeat child
   never outlives the harness that started it.
 

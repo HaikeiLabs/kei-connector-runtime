@@ -227,13 +227,24 @@ type heartbeatEvent struct {
 	Status         string           `json:"status,omitempty"`
 	BindingStatus  string           `json:"binding_status,omitempty"`
 	RuntimeVersion string           `json:"runtime_version,omitempty"`
-	Seq            *uint64          `json:"seq,omitempty"`
-	At             string           `json:"at,omitempty"`
-	Outcome        HeartbeatOutcome `json:"outcome,omitempty"`
-	HTTPStatus     int              `json:"http_status,omitempty"`
-	LatencyMS      *int64           `json:"latency_ms,omitempty"`
-	NextInMS       *int64           `json:"next_in_ms,omitempty"`
-	Reason         string           `json:"reason,omitempty"`
+	AgentID        string           `json:"agent_id,omitempty"`
+	Agents         []heartbeatAgent `json:"agents,omitempty"`
+	// AgentsTruncated reports that Agents was cut to fit one stdout line. The
+	// default assignment is always kept.
+	AgentsTruncated bool             `json:"agents_truncated,omitempty"`
+	Seq             *uint64          `json:"seq,omitempty"`
+	At              string           `json:"at,omitempty"`
+	Outcome         HeartbeatOutcome `json:"outcome,omitempty"`
+	HTTPStatus      int              `json:"http_status,omitempty"`
+	LatencyMS       *int64           `json:"latency_ms,omitempty"`
+	NextInMS        *int64           `json:"next_in_ms,omitempty"`
+	Reason          string           `json:"reason,omitempty"`
+}
+
+// heartbeatAgent is one whoami agent assignment on the identity event.
+type heartbeatAgent struct {
+	AgentID   string `json:"agent_id"`
+	IsDefault bool   `json:"is_default"`
 }
 
 // Terminal reasons, beyond the outcomes unauthorized and catalog_rejected.
@@ -267,7 +278,7 @@ func (e *heartbeatEmitter) emit(event heartbeatEvent) {
 }
 
 func (e *heartbeatEmitter) identity(identity *RuntimeIdentity) {
-	e.emit(heartbeatEvent{
+	event := heartbeatEvent{
 		Event:          "identity",
 		InstallationID: identity.ID,
 		OrgID:          identity.OrgID,
@@ -276,7 +287,78 @@ func (e *heartbeatEmitter) identity(identity *RuntimeIdentity) {
 		Status:         identity.Status,
 		BindingStatus:  identity.BindingStatus,
 		RuntimeVersion: version,
-	})
+		AgentID:        identity.AgentID,
+	}
+	for _, agent := range identity.Agents {
+		if agent.AgentID == "" {
+			continue
+		}
+		event.Agents = append(event.Agents, heartbeatAgent{AgentID: agent.AgentID, IsDefault: agent.IsDefault})
+		if event.AgentID == "" && agent.IsDefault {
+			event.AgentID = agent.AgentID
+		}
+	}
+	if e != nil {
+		event.Agents, event.AgentsTruncated = e.fitIdentityAgents(event)
+	}
+	e.emit(event)
+}
+
+// fitIdentityAgents keeps the identity event under maxHeartbeatEventBytes. When
+// the full agent list does not fit, it keeps the default assignment and then
+// as many others as fit, in whoami order, and marks the list truncated.
+func (e *heartbeatEmitter) fitIdentityAgents(event heartbeatEvent) ([]heartbeatAgent, bool) {
+	agents := event.Agents
+	event.V, event.RunID = 1, e.runID
+	if size, err := encodedLen(event); err != nil || size < maxHeartbeatEventBytes {
+		return agents, false
+	}
+	keep := make([]bool, len(agents))
+	event.AgentsTruncated = true
+	event.Agents = nil
+	for i, agent := range agents {
+		if agent.IsDefault || agent.AgentID == event.AgentID {
+			keep[i] = true
+			event.Agents = append(event.Agents, agent)
+		}
+	}
+	size, err := encodedLen(event)
+	if err != nil || size >= maxHeartbeatEventBytes {
+		return nil, true
+	}
+	for i, agent := range agents {
+		if keep[i] {
+			continue
+		}
+		entry, err := encodedLen(agent)
+		if err != nil {
+			continue
+		}
+		// One separating comma, or "[]" becoming the first entry's brackets
+		// when no default was kept.
+		grow := entry + 1
+		if len(event.Agents) == 0 {
+			grow = len(`"agents":[],`) + entry
+		}
+		if size+grow >= maxHeartbeatEventBytes {
+			break
+		}
+		size += grow
+		keep[i] = true
+		event.Agents = append(event.Agents, agent)
+	}
+	kept := make([]heartbeatAgent, 0, len(event.Agents))
+	for i, agent := range agents {
+		if keep[i] {
+			kept = append(kept, agent)
+		}
+	}
+	return kept, true
+}
+
+func encodedLen(v any) (int, error) {
+	line, err := json.Marshal(v)
+	return len(line), err
 }
 
 func (e *heartbeatEmitter) terminal(reason string) {
