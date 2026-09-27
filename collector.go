@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -120,14 +121,17 @@ type LifecycleFlushClient interface {
 }
 
 type lifecycleFlushClient struct {
-	baseURL string
-	path    string
-	headers map[string]string
-	client  *http.Client
+	baseURL     string
+	path        string
+	headers     map[string]string
+	client      *http.Client
+	requestMu   sync.Mutex
+	nextRequest time.Time
 }
 
 type lifecycleFlushHTTPError struct {
 	statusCode     int
+	retryAfter     time.Duration
 	contentType    string
 	server         string
 	upstreamStatus string
@@ -137,6 +141,23 @@ type lifecycleFlushHTTPError struct {
 
 func (e *lifecycleFlushHTTPError) Error() string {
 	return fmt.Sprintf("lifecycle flush returned status %d", e.statusCode)
+}
+
+func lifecycleRetryDelay(err error) (time.Duration, bool) {
+	var flushErr *lifecycleFlushHTTPError
+	if !errors.As(err, &flushErr) || flushErr.statusCode != http.StatusTooManyRequests {
+		return 0, false
+	}
+	// Retry-After is advisory and bounded so a malformed/misconfigured upstream
+	// cannot suspend delivery indefinitely. Missing/invalid hints retry promptly.
+	delay := flushErr.retryAfter
+	if delay <= 0 {
+		delay = time.Second
+	}
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	return delay, true
 }
 
 // lifecycleFlushLogAttrs returns only explicitly allowlisted, bounded response
@@ -167,6 +188,9 @@ func lifecycleFlushLogAttrs(err error) []any {
 
 func lifecycleFlushResponseError(resp *http.Response) error {
 	e := &lifecycleFlushHTTPError{statusCode: resp.StatusCode}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		e.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
 	if values := resp.Header.Values("Content-Type"); len(values) == 1 && len(values[0]) <= 256 {
 		if mediaType, _, err := mime.ParseMediaType(values[0]); err == nil {
 			e.contentType = mediaType
@@ -278,7 +302,19 @@ func (c *lifecycleFlushClient) FlushLifecycle(ctx context.Context, records []jso
 		req.Header.Set(k, v)
 	}
 
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+	if wait := time.Until(c.nextRequest); wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
 	resp, err := c.client.Do(req)
+	c.nextRequest = time.Now().Add(100 * time.Millisecond)
 	if err != nil {
 		return 0, fmt.Errorf("lifecycle flush request failed: %w", err)
 	}
@@ -624,6 +660,22 @@ func (c *Collector) RunPolling(ctx context.Context, interval time.Duration) erro
 			}
 			retryDelay = 0
 		} else {
+			if delay, throttled := lifecycleRetryDelay(err); throttled {
+				pendingBytes, pendingFiles, oldestAge := c.pendingStats()
+				attrs := []any{"path", c.jsonlPath, "retry_in", delay, "pending_bytes", pendingBytes, "pending_files", pendingFiles, "oldest_pending_age_seconds", oldestAge, "error", err}
+				attrs = append(attrs, lifecycleFlushLogAttrs(err)...)
+				c.logger.Error("audit collector throttled; retaining spool and retrying", attrs...)
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					return ctx.Err()
+				case <-timer.C:
+				}
+				continue
+			}
 			if retryDelay == 0 {
 				retryDelay = initialRetry
 			} else if retryDelay < maxRetry {

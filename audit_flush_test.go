@@ -13,6 +13,54 @@ import (
 
 // TestEnvConfigLoadsAuditPath verifies the documented KEI_PROXY_AUDIT env var
 // populates the audit path for both the authorize subcommand and the collector.
+func TestLifecycleFlushPacesRequestsAndCapturesRetryAfter(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"upserted":1}`))
+			return
+		}
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	client := &lifecycleFlushClient{baseURL: server.URL, path: "/flush", client: server.Client()}
+	records := []json.RawMessage{json.RawMessage(`{"event_type":"runtime.started"}`)}
+	if _, err := client.FlushLifecycle(context.Background(), records); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err := client.FlushLifecycle(context.Background(), records)
+	if err == nil {
+		t.Fatal("second flush succeeded, want 429")
+	}
+	if elapsed := time.Since(started); elapsed < 90*time.Millisecond {
+		t.Fatalf("request spacing = %s, want at least 100ms", elapsed)
+	}
+	delay, ok := lifecycleRetryDelay(err)
+	if !ok || delay != 3*time.Second {
+		t.Fatalf("retry delay = %s, throttled=%v; want 3s", delay, ok)
+	}
+}
+
+func TestLifecycleRetryDelayFallbackAndCap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hint time.Duration
+		want time.Duration
+	}{
+		{"missing", 0, time.Second}, {"bounded", 10 * time.Minute, 5 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			delay, ok := lifecycleRetryDelay(&lifecycleFlushHTTPError{statusCode: http.StatusTooManyRequests, retryAfter: tc.hint})
+			if !ok || delay != tc.want {
+				t.Fatalf("delay=%s throttled=%v; want %s", delay, ok, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnvConfigLoadsAuditPath(t *testing.T) {
 	t.Setenv("KEI_PROXY_AUDIT", "/var/lib/kei/audit.jsonl")
 	cfg := configFromEnv()

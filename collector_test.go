@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -366,6 +367,60 @@ type fakeLifecycleClient struct {
 func (f *fakeLifecycleClient) FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error) {
 	f.records = append(f.records, records...)
 	return len(records), nil
+}
+
+type mixedLifecycleClient struct {
+	calls    []string
+	statuses []int
+}
+
+func (f *mixedLifecycleClient) FlushLifecycle(_ context.Context, records []json.RawMessage) (int, error) {
+	value := string(records[0])
+	f.calls = append(f.calls, value)
+	status := http.StatusOK
+	if len(f.statuses) > 0 {
+		status, f.statuses = f.statuses[0], f.statuses[1:]
+	}
+	if status == http.StatusTooManyRequests {
+		return 0, &lifecycleFlushHTTPError{statusCode: status, retryAfter: time.Second}
+	}
+	return len(records), nil
+}
+
+func TestCollectorRetainsFailedLifecycleBatchAndResumesAfterAcceptedBatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	first := `{"event_class":"lifecycle","event_type":"runtime.started"}`
+	second := `{"event_class":"lifecycle","event_type":"runtime.degraded"}`
+	if err := os.WriteFile(path, []byte(first+"\n"+second+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &mixedLifecycleClient{statuses: []int{http.StatusOK, http.StatusTooManyRequests, http.StatusOK}}
+	collector := NewCollector(path, &retryFlushClient{}, 1)
+	collector.lifecycle = fake
+	if _, err := collector.Run(context.Background()); err == nil {
+		t.Fatal("first run succeeded; want synthetic 429")
+	}
+	state, err := readCollectorState(collector.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LinesSent != 1 {
+		t.Fatalf("acknowledged cursor=%d, want 1", state.LinesSent)
+	}
+	segments, err := collector.spool.segments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("pending segments=%d, want failed batch retained", len(segments))
+	}
+	if _, err := collector.Run(context.Background()); err != nil {
+		t.Fatalf("retry run: %v", err)
+	}
+	if len(fake.calls) != 3 || fake.calls[0] != first || fake.calls[1] != second || fake.calls[2] != second {
+		t.Fatalf("flush calls=%q; expected accepted first once and failed second retried", fake.calls)
+	}
 }
 
 // TestParseBatchSplitsByEventClass pins the same-file contract: legacy lines
