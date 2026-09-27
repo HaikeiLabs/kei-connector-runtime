@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
@@ -125,6 +126,123 @@ type lifecycleFlushClient struct {
 	client  *http.Client
 }
 
+type lifecycleFlushHTTPError struct {
+	statusCode    int
+	contentType   string
+	server        string
+	upstreamStatus string
+	responseFlags string
+	upstreamTime  string
+}
+
+func (e *lifecycleFlushHTTPError) Error() string {
+	return fmt.Sprintf("lifecycle flush returned status %d", e.statusCode)
+}
+
+// lifecycleFlushLogAttrs returns only explicitly allowlisted, bounded response
+// metadata. Never inspect or log the response body or arbitrary headers.
+func lifecycleFlushLogAttrs(err error) []any {
+	var flushErr *lifecycleFlushHTTPError
+	if !errors.As(err, &flushErr) {
+		return nil
+	}
+	attrs := []any{"lifecycle_flush_status", flushErr.statusCode}
+	if flushErr.contentType != "" {
+		attrs = append(attrs, "lifecycle_flush_content_type", flushErr.contentType)
+	}
+	if flushErr.server != "" {
+		attrs = append(attrs, "lifecycle_flush_server", flushErr.server)
+	}
+	if flushErr.upstreamStatus != "" {
+		attrs = append(attrs, "lifecycle_flush_upstream_status", flushErr.upstreamStatus)
+	}
+	if flushErr.responseFlags != "" {
+		attrs = append(attrs, "lifecycle_flush_proxy_response_flags", flushErr.responseFlags)
+	}
+	if flushErr.upstreamTime != "" {
+		attrs = append(attrs, "lifecycle_flush_upstream_service_time_ms", flushErr.upstreamTime)
+	}
+	return attrs
+}
+
+func lifecycleFlushResponseError(resp *http.Response) error {
+	e := &lifecycleFlushHTTPError{statusCode: resp.StatusCode}
+	if values := resp.Header.Values("Content-Type"); len(values) == 1 && len(values[0]) <= 256 {
+		if mediaType, _, err := mime.ParseMediaType(values[0]); err == nil {
+			e.contentType = mediaType
+		}
+	}
+	if values := resp.Header.Values("Server"); len(values) == 1 && safeServerHeader(values[0]) {
+		e.server = values[0]
+	}
+	if values := resp.Header.Values("X-Proxy-Upstream-Status"); len(values) == 1 && validHTTPStatusHeader(values[0]) {
+		e.upstreamStatus = values[0]
+	}
+	if values := resp.Header.Values("X-Envoy-Response-Flags"); len(values) == 1 && safeEnvoyFlags(values[0]) {
+		e.responseFlags = values[0]
+	}
+	if values := resp.Header.Values("X-Envoy-Upstream-Service-Time"); len(values) == 1 && boundedDigits(values[0], 8) {
+		e.upstreamTime = values[0]
+	}
+	return e
+}
+
+func safeServerHeader(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	product, version, hasVersion := strings.Cut(value, "/")
+	switch strings.ToLower(product) {
+	case "envoy", "nginx", "awselb", "cloudflare", "caddy", "apache", "openresty", "traefik":
+	default:
+		return false
+	}
+	if !hasVersion {
+		return true
+	}
+	if version == "" || len(version) > 24 {
+		return false
+	}
+	for _, r := range version {
+		if !(r >= '0' && r <= '9' || r == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func validHTTPStatusHeader(value string) bool {
+	if len(value) != 3 || !boundedDigits(value, 3) {
+		return false
+	}
+	status, _ := strconv.Atoi(value)
+	return status >= 100 && status <= 599
+}
+
+func safeEnvoyFlags(value string) bool {
+	if len(value) == 0 || len(value) > 32 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'A' && r <= 'Z' || r == ',') {
+			return false
+		}
+	}
+	return true
+}
+
+func boundedDigits(value string, maxLen int) bool {
+	if len(value) == 0 || len(value) > maxLen {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // NewLifecycleFlushClientFromConfig builds a client that POSTs lifecycle
 // records to <KEI_RUNTIME_CONTROL_PLANE_URL>/api/v1/runtime/audit/lifecycle:flush
 // with the installation token as an Authorization bearer. It returns nil when no
@@ -167,7 +285,7 @@ func (c *lifecycleFlushClient) FlushLifecycle(ctx context.Context, records []jso
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("lifecycle flush returned status %d", resp.StatusCode)
+		return 0, lifecycleFlushResponseError(resp)
 	}
 	var out struct {
 		Upserted int `json:"upserted"`
@@ -517,7 +635,9 @@ func (c *Collector) RunPolling(ctx context.Context, interval time.Duration) erro
 			jitter := time.Duration(rand.Float64() * float64(retryDelay) / 4)
 			retryIn := retryDelay + jitter
 			pendingBytes, pendingFiles, oldestAge := c.pendingStats()
-			c.logger.Error("audit collector flush failed; retaining spool and retrying", "path", c.jsonlPath, "retry_in", retryIn, "pending_bytes", pendingBytes, "pending_files", pendingFiles, "oldest_pending_age_seconds", oldestAge, "error", err)
+			attrs := []any{"path", c.jsonlPath, "retry_in", retryIn, "pending_bytes", pendingBytes, "pending_files", pendingFiles, "oldest_pending_age_seconds", oldestAge, "error", err}
+			attrs = append(attrs, lifecycleFlushLogAttrs(err)...)
+			c.logger.Error("audit collector flush failed; retaining spool and retrying", attrs...)
 			timer := time.NewTimer(retryIn)
 			select {
 			case <-ctx.Done():
