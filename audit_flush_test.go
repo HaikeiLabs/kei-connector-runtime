@@ -2,6 +2,8 @@ package connectorruntime
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,5 +148,86 @@ func TestFlushClientRejectsNonOK(t *testing.T) {
 	_, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-3"}})
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("expected 401 error, got %v", err)
+	}
+}
+
+func TestLifecycleFlushFailureLogsAllowlistedMetadataOnly(t *testing.T) {
+	const (
+		tokenSentinel   = "synthetic-token-must-not-log"
+		requestSentinel = "synthetic-audit-payload-must-not-log"
+		bodySentinel    = "synthetic-response-body-must-not-log"
+		viaSentinel     = "private-hop-name-must-not-log"
+		requestID       = "sensitive-request-id-must-not-log"
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
+		w.Header().Set("Server", "envoy")
+		w.Header().Set("X-Proxy-Upstream-Status", "409")
+		w.Header().Set("X-Envoy-Response-Flags", "NR")
+		w.Header().Set("X-Envoy-Upstream-Service-Time", "17")
+		w.Header().Set("Via", "1.1 "+viaSentinel)
+		w.Header().Set("X-Request-ID", requestID)
+		w.Header().Set("Set-Cookie", "session="+tokenSentinel)
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(bodySentinel))
+	}))
+	defer srv.Close()
+
+	client := NewLifecycleFlushClientFromConfig(Config{
+		RuntimeControlPlaneURL: srv.URL,
+		RuntimeToken:           tokenSentinel,
+	}, 5*time.Second)
+	err := func() error {
+		_, err := client.FlushLifecycle(context.Background(), []json.RawMessage{json.RawMessage(`{"event_type":"` + requestSentinel + `"}`)})
+		return err
+	}()
+	if err == nil || err.Error() != "lifecycle flush returned status 409" {
+		t.Fatalf("FlushLifecycle error = %v, want sanitized 409 status", err)
+	}
+
+	var logged strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logged, nil))
+	logger.Error("audit collector flush failed", lifecycleFlushLogAttrs(err)...)
+	line := logged.String()
+	for _, want := range []string{
+		`"lifecycle_flush_status":409`,
+		`"lifecycle_flush_content_type":"application/problem+json"`,
+		`"lifecycle_flush_server":"envoy"`,
+		`"lifecycle_flush_upstream_status":"409"`,
+		`"lifecycle_flush_proxy_response_flags":"NR"`,
+		`"lifecycle_flush_upstream_service_time_ms":"17"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("failure log missing %s: %s", want, line)
+		}
+	}
+	for _, forbidden := range []string{tokenSentinel, requestSentinel, bodySentinel, viaSentinel, requestID, "Set-Cookie", "Via"} {
+		if strings.Contains(line, forbidden) {
+			t.Errorf("failure log contains unapproved data %q: %s", forbidden, line)
+		}
+	}
+}
+
+func TestLifecycleFlushFailureRejectsUnboundedOrUntrustedMetadata(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusConflict, Header: make(http.Header)}
+	resp.Header.Set("Content-Type", "text/plain; secret=must-not-log")
+	resp.Header.Set("Server", "internal-gateway.local")
+	resp.Header.Set("X-Proxy-Upstream-Status", "409, 500")
+	resp.Header.Set("X-Envoy-Response-Flags", "NR:private")
+	resp.Header.Set("X-Envoy-Upstream-Service-Time", "17ms")
+
+	err := lifecycleFlushResponseError(resp)
+	attrs := lifecycleFlushLogAttrs(err)
+	var logged strings.Builder
+	slog.New(slog.NewJSONHandler(&logged, nil)).Error("flush failed", attrs...)
+	line := logged.String()
+	if !strings.Contains(line, `"lifecycle_flush_status":409`) || !strings.Contains(line, `"lifecycle_flush_content_type":"text/plain"`) {
+		t.Fatalf("safe status/media type missing from log: %s", line)
+	}
+	for _, forbidden := range []string{"secret", "internal-gateway", "409, 500", "NR:private", "17ms"} {
+		if strings.Contains(line, forbidden) {
+			t.Errorf("untrusted metadata %q was logged: %s", forbidden, line)
+		}
 	}
 }
