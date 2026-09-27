@@ -127,12 +127,12 @@ type lifecycleFlushClient struct {
 }
 
 type lifecycleFlushHTTPError struct {
-	statusCode    int
-	contentType   string
-	server        string
+	statusCode     int
+	contentType    string
+	server         string
 	upstreamStatus string
-	responseFlags string
-	upstreamTime  string
+	responseFlags  string
+	upstreamTime   string
 }
 
 func (e *lifecycleFlushHTTPError) Error() string {
