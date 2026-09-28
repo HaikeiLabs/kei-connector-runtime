@@ -71,10 +71,9 @@ jobs:
 
   docker-runtime:
     name: Same-container runtime smoke test
-    # kei-eks-deploy runners reach a Docker-in-Docker daemon (kei-console and
-    # kei-chat-harness build images there); kei-cli-release has no daemon, so
-    # job containers and service containers cannot start on it.
-    runs-on: kei-eks-deploy
+    # kei-docker-ci is a dedicated no-AWS rootless-DinD runner (kei PR #650).
+    # It has no EKS or AWS access — the smoke must not need cluster creds.
+    runs-on: kei-docker-ci
     env:
       # The daemon is shared across jobs, so every resource is run-unique.
       SMOKE_IMAGE: kei-connector-runtime:ci-${{ github.run_id }}-${{ github.run_attempt }}
