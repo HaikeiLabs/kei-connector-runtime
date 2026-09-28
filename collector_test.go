@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -99,6 +100,33 @@ func TestCollectorFlushesAllPending(t *testing.T) {
 	}
 	if len(fake.batches) != 1 || len(fake.batches[0]) != 3 {
 		t.Errorf("batches = %d, want 1 batch of 3", len(fake.batches))
+	}
+}
+
+func TestCollectorSuccessfulFlushLogsCountsAndPayloadBytes(t *testing.T) {
+	var logs bytes.Buffer
+	c := NewCollector(filepath.Join(t.TempDir(), "audit.jsonl"), &fakeFlushClient{}, 100)
+	c.lifecycle = &fakeLifecycleClient{}
+	c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	decision := ev("decision-1")
+	lifecycle := json.RawMessage(`{"event_class":"lifecycle","event_type":"heartbeat"}`)
+	batch := parsedBatch{decisions: []DecisionEvent{decision}, lifecycle: []json.RawMessage{lifecycle}}
+	if _, err := c.flushBatch(context.Background(), batch, &skippedRecords{}); err != nil {
+		t.Fatalf("flushBatch: %v", err)
+	}
+	decisionPayload, _ := json.Marshal(map[string][]DecisionEvent{"records": {decision}})
+	lifecyclePayload, _ := json.Marshal(map[string][]json.RawMessage{"records": {lifecycle}})
+	for _, want := range [][]byte{
+		[]byte(`"event_class":"decision"`),
+		[]byte(`"records_sent":1`),
+		[]byte(`"payload_bytes":` + strconv.Itoa(len(decisionPayload))),
+		[]byte(`"event_class":"lifecycle"`),
+		[]byte(`"events_sent":1`),
+		[]byte(`"payload_bytes":` + strconv.Itoa(len(lifecyclePayload))),
+	} {
+		if !bytes.Contains(logs.Bytes(), want) {
+			t.Errorf("successful flush logs missing %s: %s", want, logs.String())
+		}
 	}
 }
 

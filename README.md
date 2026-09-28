@@ -263,6 +263,31 @@ assigned to the runtime. Chat requests authenticate with the runtime token,
 obtain a `model.invoke` decision from policy-catalog, and only then resolve
 provider credentials and call the model endpoint. The runtime remains
 independently usable without OpenWebUI.
+
+### Local daemon socket
+
+`kei-proxy serve` is a long-running local daemon. Harnesses on the same host
+connect to its existing HTTP/1.1 API through a Unix domain socket. Local IPC
+keeps communication fast, avoids managing a local TCP port for harnesses, and
+uses the operating system's socket permissions to limit access to the runtime's
+OS user. The runtime and harness should run as the same OS user. HTTP bearer
+authentication and model authorization still apply to requests made through
+the socket.
+
+The default socket is `/run/kei-proxy/runtime.sock`; set
+`KEI_RUNTIME_SOCKET_PATH` to use another path. The runtime creates the socket
+with mode `0600` and removes it on graceful shutdown. The parent directory must
+be writable by the runtime user; on service installations, provision
+`/run/kei-proxy` for that user. The existing TCP listener remains available
+through `KEI_PROXY_LISTEN_ADDR` (default `:8085`) for the current Docker
+same-container OpenWebUI setup. See [docs/unix-socket.md](docs/unix-socket.md)
+for why the runtime uses a Unix socket and how to share it with a sidecar
+harness.
+
+When `KEI_PROXY_AUDIT` is set, `serve` also owns the polling audit collector.
+It ships the existing bounded JSONL decision and lifecycle spool while running
+and makes one five-second bounded flush attempt during graceful shutdown.
+Failed records remain in the spool for the next start.
 The health endpoint only confirms that the listener is running. Readiness is
 `503` until both `KEI_RUNTIME_TOKEN` and `KEI_RUNTIME_CONTROL_PLANE_URL` are
 configured; after provisioning, verify with:
