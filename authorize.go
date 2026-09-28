@@ -25,6 +25,7 @@ type AuthorizeOutput struct {
 	Reason     string              `json:"reason,omitempty"`
 	Service    string              `json:"service,omitempty"`
 	Credential *CredentialResponse `json:"credential,omitempty"`
+	Enrollment *json.RawMessage    `json:"enrollment,omitempty"`
 }
 
 type authorizeParams struct {
@@ -164,6 +165,10 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 			break
 		}
 		out.Credential = &CredentialResponse{Value: *cred}
+	case "enrollment_required":
+		out.Decision = "deny"
+		out.Reason = resp.Reason
+		out.Enrollment = resp.Enrollment
 	default:
 		out.Decision = "deny"
 		out.Reason = resp.Reason

@@ -30,12 +30,13 @@ type AuthorizeRequest struct {
 }
 
 type AuthorizeResponse struct {
-	Decision    string  `json:"decision"`
-	Reason      string  `json:"reason,omitempty"`
-	OrgID       *string `json:"org_id,omitempty"`
-	UserID      *string `json:"user_id,omitempty"`
-	PolicyID    string  `json:"policy_id,omitempty"`
-	WorkspaceID *string `json:"workspace_id,omitempty"`
+	Decision    string           `json:"decision"`
+	Reason      string           `json:"reason,omitempty"`
+	OrgID       *string          `json:"org_id,omitempty"`
+	UserID      *string          `json:"user_id,omitempty"`
+	PolicyID    string           `json:"policy_id,omitempty"`
+	WorkspaceID *string          `json:"workspace_id,omitempty"`
+	Enrollment  *json.RawMessage `json:"enrollment,omitempty"`
 }
 
 type ABACClient interface {
