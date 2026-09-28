@@ -68,3 +68,79 @@ jobs:
             exit 1
           fi
           echo "OK: no oversized tracked files"
+
+  docker-runtime:
+    name: Same-container runtime smoke test
+    # kei-eks-deploy runners reach a Docker-in-Docker daemon (kei-console and
+    # kei-chat-harness build images there); kei-cli-release has no daemon, so
+    # job containers and service containers cannot start on it.
+    runs-on: kei-eks-deploy
+    env:
+      # The daemon is shared across jobs, so every resource is run-unique.
+      SMOKE_IMAGE: kei-connector-runtime:ci-${{ github.run_id }}-${{ github.run_attempt }}
+      SMOKE_CONTAINER: kei-proxy-runtime-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      SMOKE_NETWORK: kei-proxy-runtime-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      SMOKE_VOLUME: kei-proxy-runtime-socket-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for Docker daemon
+        run: |
+          attempt=0
+          while [ "$attempt" -lt 30 ]; do
+            if docker info >/dev/null 2>&1; then exit 0; fi
+            attempt=$((attempt + 1))
+            sleep 2
+          done
+          echo "Docker daemon did not become ready"
+          exit 1
+
+      - name: Build and run packaged daemon
+        run: |
+          docker build -t "$SMOKE_IMAGE" .
+          docker network create "$SMOKE_NETWORK"
+          docker volume create "$SMOKE_VOLUME"
+          docker run -d --name "$SMOKE_CONTAINER" \
+            --network "$SMOKE_NETWORK" \
+            -v "$SMOKE_VOLUME:/run/kei-proxy" \
+            -e KEI_RUNTIME_TOKEN=kh_live_ci_smoke_token_12345678901234567890 \
+            -e KEI_RUNTIME_CONTROL_PLANE_URL=http://127.0.0.1:1 \
+            --entrypoint /bin/sh \
+            "$SMOKE_IMAGE" -c './kei-proxy serve & echo $! >/tmp/kei-proxy.pid; wait $!; sleep 60'
+          attempt=0
+          while [ "$attempt" -lt 30 ]; do
+            if docker exec "$SMOKE_CONTAINER" wget -qO- http://127.0.0.1:8085/readyz >/dev/null 2>&1; then
+              break
+            fi
+            attempt=$((attempt + 1))
+            sleep 1
+          done
+          docker exec "$SMOKE_CONTAINER" wget -qO- http://127.0.0.1:8085/readyz
+          docker exec "$SMOKE_CONTAINER" sh -c 'test -S /run/kei-proxy/runtime.sock && test "$(stat -c %a /run/kei-proxy/runtime.sock)" = 600'
+          # A sidecar harness shares only the socket volume: no network at all.
+          docker run --rm --network none --user 0 -v "$SMOKE_VOLUME:/run/kei-proxy" \
+            curlimages/curl:8.10.1 -fsS --unix-socket /run/kei-proxy/runtime.sock http://localhost/readyz
+          # The socket is owner-only, so a harness running as another UID is refused.
+          if docker run --rm --network none --user 100 -v "$SMOKE_VOLUME:/run/kei-proxy" \
+            curlimages/curl:8.10.1 -fsS --unix-socket /run/kei-proxy/runtime.sock http://localhost/readyz; then
+            echo "socket accepted a connection from a different UID"
+            exit 1
+          fi
+          docker exec "$SMOKE_CONTAINER" sh -c 'kill -TERM "$(cat /tmp/kei-proxy.pid)"'
+          attempt=0
+          while [ "$attempt" -lt 15 ]; do
+            if ! docker exec "$SMOKE_CONTAINER" test -S /run/kei-proxy/runtime.sock; then exit 0; fi
+            attempt=$((attempt + 1))
+            sleep 1
+          done
+          echo "runtime did not remove socket after SIGTERM"
+          exit 1
+
+      - name: Cleanup Docker resources
+        if: always()
+        run: |
+          docker exec "$SMOKE_CONTAINER" sh -c 'rm -f /run/kei-proxy/runtime.sock' >/dev/null 2>&1 || true
+          docker rm -f "$SMOKE_CONTAINER" >/dev/null 2>&1 || true
+          docker volume rm "$SMOKE_VOLUME" >/dev/null 2>&1 || true
+          docker network rm "$SMOKE_NETWORK" >/dev/null 2>&1 || true
+          docker image rm "$SMOKE_IMAGE" >/dev/null 2>&1 || true

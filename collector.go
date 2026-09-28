@@ -582,14 +582,18 @@ func (s skippedRecords) log(logger *slog.Logger, path string) {
 // part way is safe to resend whole.
 func (c *Collector) flushBatch(ctx context.Context, b parsedBatch, skipped *skippedRecords) (int, error) {
 	if len(b.decisions) > 0 {
+		payload, _ := json.Marshal(map[string][]DecisionEvent{"records": b.decisions})
 		if _, err := c.abac.Flush(ctx, b.decisions); err != nil {
 			return 0, err
 		}
+		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", eventClassDecision, "records_sent", len(b.decisions), "payload_bytes", len(payload))
 	}
 	if len(b.lifecycle) > 0 && c.lifecycle != nil {
+		payload, _ := json.Marshal(map[string][]json.RawMessage{"records": b.lifecycle})
 		if _, err := c.lifecycle.FlushLifecycle(ctx, b.lifecycle); err != nil {
 			return len(b.decisions), err
 		}
+		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", eventClassLifecycle, "events_sent", len(b.lifecycle), "payload_bytes", len(payload))
 	}
 	skipped.add(b, c.lifecycle != nil)
 	return len(b.decisions), nil

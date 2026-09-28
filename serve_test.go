@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 )
 
 func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
@@ -28,6 +34,161 @@ func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
 	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if ready.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readiness status = %d, want %d", ready.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
+	tempDir := shortSocketTempDir(t)
+	socketPath := filepath.Join(tempDir, "runtime.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	finished := make(chan struct{})
+	cfg := Config{RuntimeToken: "kh_live_12345678901234567890", RuntimeControlPlaneURL: "http://127.0.0.1:1"}
+	go func() {
+		defer close(finished)
+		done <- runServeContext(ctx, cfg, socketPath, "127.0.0.1:0")
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(3 * time.Second):
+		}
+		_ = os.Remove(socketPath)
+		_ = os.RemoveAll(tempDir)
+	})
+
+	var info os.FileInfo
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		info, err = os.Stat(socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if info == nil {
+		t.Fatal("runtime did not create Unix socket")
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("socket path mode = %v, want socket", info.Mode())
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("socket permissions = %04o, want 0600", got)
+	}
+
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	}}
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+	resp, err := client.Get("http://localhost/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz over Unix socket: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /readyz status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	resp, err = client.Get("http://localhost/v1/models")
+	if err != nil {
+		t.Fatalf("unauthenticated GET /v1/models over Unix socket: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET /v1/models status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	transport.CloseIdleConnections()
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("runServeContext exit = %d, want 0", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runtime did not stop")
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("socket after shutdown: stat err = %v, want not-exist", err)
+	}
+}
+
+func shortSocketTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "h201-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func TestRuntimeSocketPathDefaultAndOverride(t *testing.T) {
+	t.Setenv("KEI_RUNTIME_SOCKET_PATH", "")
+	if got := runtimeSocketPathFromEnv(); got != "/run/kei-proxy/runtime.sock" {
+		t.Fatalf("default socket path = %q", got)
+	}
+	t.Setenv("KEI_RUNTIME_SOCKET_PATH", "/tmp/test-runtime.sock")
+	if got := runtimeSocketPathFromEnv(); got != "/tmp/test-runtime.sock" {
+		t.Fatalf("configured socket path = %q", got)
+	}
+}
+
+type contextBlockingFlushClient struct {
+	calls   atomic.Int32
+	started chan struct{}
+}
+
+func (f *contextBlockingFlushClient) Flush(ctx context.Context, _ []DecisionEvent) (int, error) {
+	f.calls.Add(1)
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func TestCollectorServiceFinalFlushIsBoundedAndRetainsSpool(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeJSONL(t, path, []DecisionEvent{ev("shutdown-1")})
+	fake := &contextBlockingFlushClient{started: make(chan struct{}, 2)}
+	audit := NewCollector(path, fake, 100)
+	stop := collector.Service{
+		Flusher:           audit,
+		Path:              path,
+		PollInterval:      time.Hour,
+		FinalFlushTimeout: 50 * time.Millisecond,
+	}.Start(context.Background())
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("collector did not start its polling flush")
+	}
+	started := time.Now()
+	done := make(chan struct{})
+	go func() {
+		stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("collector service exceeded bounded final flush")
+	}
+	if elapsed := time.Since(started); elapsed < 40*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("shutdown final flush duration = %s, want approximately 50ms and under 1s", elapsed)
+	}
+	if got := fake.calls.Load(); got != 2 {
+		t.Fatalf("flush calls = %d, want polling attempt plus one final attempt", got)
+	}
+	segments, err := audit.spool.segments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("pending segments after failed final flush = %d, want 1", len(segments))
 	}
 }
 

@@ -8,15 +8,24 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 )
 
 const (
-	defaultListenAddr = ":8085"
-	maxModelRequest   = 4 << 20
+	defaultListenAddr        = ":8085"
+	defaultRuntimeSocketPath = "/run/kei-proxy/runtime.sock"
+	maxModelRequest          = 4 << 20
+	shutdownFlushTimeout     = 5 * time.Second
+	collectorPollInterval    = time.Minute
 )
 
 // runServe starts the runtime-owned HTTP adapter. The adapter is deliberately
@@ -28,10 +37,34 @@ func runServe(args []string) int {
 		return 1
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	cfg := configFromEnv()
-	addr := envOr("KEI_PROXY_LISTEN_ADDR", defaultListenAddr)
+	return runServeContext(ctx, cfg, runtimeSocketPathFromEnv(), envOr("KEI_PROXY_LISTEN_ADDR", defaultListenAddr))
+}
+
+func runtimeSocketPathFromEnv() string {
+	return envOr("KEI_RUNTIME_SOCKET_PATH", defaultRuntimeSocketPath)
+}
+
+func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) int {
+	unixListener, err := socket.Listen(socketPath)
+	if err != nil {
+		slog.Error("runtime_unix_listener_failed", "path", socketPath, "error", err)
+		return 1
+	}
+	defer func() {
+		_ = unixListener.Close()
+		_ = os.Remove(socketPath)
+	}()
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		_ = unixListener.Close()
+		_ = os.Remove(socketPath)
+		slog.Error("runtime_http_listener_failed", "addr", addr, "error", err)
+		return 1
+	}
 	server := &http.Server{
-		Addr:              addr,
 		Handler:           newRuntimeHTTPHandler(cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -40,11 +73,39 @@ func runServe(args []string) int {
 	}
 
 	slog.Info("runtime_http_listener_started", "addr", addr)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("runtime_http_listener_failed", "error", err)
-		return 1
+	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")
+	serveErrors := make(chan error, 2)
+	go func() { serveErrors <- server.Serve(tcpListener) }()
+	go func() { serveErrors <- server.Serve(unixListener) }()
+	stopCollector := func() {}
+	if cfg.AuditPath != "" {
+		audit := NewCollector(cfg.AuditPath, NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
+		audit.lifecycle = NewLifecycleFlushClientFromConfig(cfg, shutdownFlushTimeout)
+		stopCollector = collector.Service{
+			Flusher:           audit,
+			Path:              cfg.AuditPath,
+			PollInterval:      collectorPollInterval,
+			FinalFlushTimeout: shutdownFlushTimeout,
+		}.Start(ctx)
 	}
-	return 0
+
+	exitCode := 0
+	select {
+	case <-ctx.Done():
+	case err := <-serveErrors:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("runtime_http_listener_failed", "error", err)
+			exitCode = 1
+		}
+	}
+	stopCollector()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("runtime_http_shutdown_incomplete", "error", err)
+		_ = server.Close()
+	}
+	return exitCode
 }
 
 type runtimeHTTPHandler struct {
