@@ -41,7 +41,6 @@ type AuthorizeResponse struct {
 
 type ABACClient interface {
 	Authorize(ctx context.Context, req AuthorizeRequest) (*AuthorizeResponse, error)
-	InvokeConnector(ctx context.Context, req ConnectorInvokeRequest) (*ConnectorInvokeResponse, error)
 }
 
 type abacClient struct {

@@ -1,10 +1,11 @@
-package connectorruntime
+package invoke
 
 import (
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func TestParseConnectorInvokeArgsPropagatesContext(t *testing.T) {
 		"--idempotency-key", "idem-1",
 		"--approval-id", "approval-1",
 		"--user-id", "u-1",
-	})
+	}, testEnv())
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestParseConnectorInvokeArgsMintsTraceAndRequiresFields(t *testing.T) {
 		"--capability", "lead.read",
 		"--action", "read",
 		"--resource", "leads/42",
-	})
+	}, testEnv())
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -64,10 +65,10 @@ func TestParseConnectorInvokeArgsMintsTraceAndRequiresFields(t *testing.T) {
 		t.Fatal("expected a minted trace id when none is supplied")
 	}
 
-	if _, err := parseConnectorInvokeArgs([]string{"--capability", "lead.read", "--action", "read", "--resource", "leads/42"}); err == nil {
+	if _, err := parseConnectorInvokeArgs([]string{"--capability", "lead.read", "--action", "read", "--resource", "leads/42"}, testEnv()); err == nil {
 		t.Fatal("missing --connector must fail")
 	}
-	if _, err := parseConnectorInvokeArgs([]string{"--connector", "conn-1", "--capability", "lead.read", "--action", "read"}); err == nil {
+	if _, err := parseConnectorInvokeArgs([]string{"--connector", "conn-1", "--capability", "lead.read", "--action", "read"}, testEnv()); err == nil {
 		t.Fatal("missing --resource must fail")
 	}
 }
@@ -79,7 +80,7 @@ func TestParseConnectorInvokeArgsRequiresToken(t *testing.T) {
 		"--capability", "lead.read",
 		"--action", "read",
 		"--resource", "leads/42",
-	}); err == nil {
+	}, testEnv()); err == nil {
 		t.Fatal("missing runtime token must fail")
 	}
 }
@@ -92,7 +93,7 @@ func TestParseConnectorInvokeArgsRejectsKeyAlias(t *testing.T) {
 		"--action", "read",
 		"--resource", "leads/42",
 		"--key", "kh_live_alias_token_1234567890",
-	})
+	}, testEnv())
 	if err == nil {
 		t.Fatal("--key alias must be rejected")
 	}
@@ -108,7 +109,7 @@ func TestParseConnectorInvokeArgsRuntimeRelayUsesControlPlaneURL(t *testing.T) {
 		"--action", "read",
 		"--resource", "leads/42",
 		"--abac-url", "http://override:9000",
-	})
+	}, testEnv())
 	if err != nil {
 		t.Fatalf("runtime parse: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestInvokeConnectorPropagatesRequestAndCredential(t *testing.T) {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		gotKey = r.Header.Get("X-KEI-API-Key")
-		var req ConnectorInvokeRequest
+		var req Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
@@ -146,8 +147,8 @@ func TestInvokeConnectorPropagatesRequestAndCredential(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewABACClient(server.URL, "proxy-secret", 5*time.Second)
-	resp, err := client.InvokeConnector(context.Background(), ConnectorInvokeRequest{
+	client := NewClient(server.URL, "proxy-secret", 5*time.Second)
+	resp, err := client.Invoke(context.Background(), Request{
 		HarnessToken:   "kh_live_harness_token_1234567890",
 		ConnectorID:    "conn-1",
 		Capability:     "lead.read",
@@ -177,8 +178,8 @@ func TestInvokeConnectorSurfacesStructuredDeny(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewABACClient(server.URL, "proxy-secret", 5*time.Second)
-	resp, err := client.InvokeConnector(context.Background(), ConnectorInvokeRequest{
+	client := NewClient(server.URL, "proxy-secret", 5*time.Second)
+	resp, err := client.Invoke(context.Background(), Request{
 		ConnectorID: "conn-1",
 		Capability:  "lead.read",
 		Action:      "read",
@@ -207,8 +208,8 @@ func TestInvokeConnectorFailsClosedOnRejectedCredentials(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewABACClient(server.URL, "wrong-secret", 5*time.Second)
-			resp, err := client.InvokeConnector(context.Background(), ConnectorInvokeRequest{ConnectorID: "conn-1"})
+			client := NewClient(server.URL, "wrong-secret", 5*time.Second)
+			resp, err := client.Invoke(context.Background(), Request{ConnectorID: "conn-1"})
 			if err == nil {
 				t.Fatalf("expected error on %d, got %+v", status, resp)
 			}
@@ -230,12 +231,23 @@ func TestInvokeConnectorFailsClosedOnServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewABACClient(server.URL, "secret", 5*time.Second)
-	resp, err := client.InvokeConnector(context.Background(), ConnectorInvokeRequest{ConnectorID: "conn-1"})
+	client := NewClient(server.URL, "secret", 5*time.Second)
+	resp, err := client.Invoke(context.Background(), Request{ConnectorID: "conn-1"})
 	if err == nil {
 		t.Fatalf("expected error on 500, got %+v", resp)
 	}
 	if !strings.Contains(err.Error(), "status 500") {
 		t.Errorf("error = %v, want it to name the status", err)
+	}
+}
+
+// testEnv mirrors how the root package builds Env from its Config, so these
+// tests keep driving configuration through the environment.
+func testEnv() Env {
+	return Env{
+		RuntimeToken:           os.Getenv("KEI_RUNTIME_TOKEN"),
+		RuntimeControlPlaneURL: os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
+		ABACURL:                envOr("ABAC_URL", "http://localhost:8080"),
+		ABACSecret:             strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 	}
 }
