@@ -104,3 +104,49 @@ func TestRuntimeClientRejectsInvalidIdentityClaimInput(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeClientStartsWhatsAppIdentityClaim(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input IdentityClaimStartRequest
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Platform != "whatsapp" || input.TenantID != "" || input.PlatformUserID != "+15555550100" {
+			t.Fatalf("request identity = %#v", input)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"claim_url":"https://kei.example/claim#claim=opaque","expires_at":"2030-01-01T00:00:00Z"}`)
+	}))
+	defer server.Close()
+	_, err := NewRuntimeClient(server.URL, time.Second).(*runtimeClient).StartIdentityClaim(context.Background(), "runtime-token", IdentityClaimStartRequest{
+		Platform: "whatsapp", PlatformUserID: "+15555550100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeClientRejectsWhatsAppWithTenant(t *testing.T) {
+	_, err := NewRuntimeClient("http://127.0.0.1:1", time.Second).(*runtimeClient).StartIdentityClaim(context.Background(), "token", IdentityClaimStartRequest{
+		Platform: "whatsapp", TenantID: "twilio-account", PlatformUserID: "+15555550100",
+	})
+	if err == nil || !strings.Contains(err.Error(), "empty tenant") {
+		t.Fatalf("expected tenant rejection, got %v", err)
+	}
+}
+
+func TestRuntimeClientRejectsInvalidWhatsAppIdentity(t *testing.T) {
+	for _, req := range []IdentityClaimStartRequest{
+		{Platform: "whatsapp", PlatformUserID: "15555550100"},
+		{Platform: "whatsapp", PlatformUserID: "+05555550100"},
+		{Platform: "whatsapp", PlatformUserID: "+123456"},
+		{Platform: "whatsapp", PlatformUserID: "+1234567890123456"},
+		{Platform: "whatsapp", PlatformUserID: "whatsapp:+15555550100"},
+		{Platform: "whatsapp", PlatformUserID: "+1 555-555-0100"},
+		{Platform: "whatsapp", PlatformUserID: "+1555ABC0100"},
+	} {
+		if _, err := NewRuntimeClient("http://127.0.0.1:1", time.Second).(*runtimeClient).StartIdentityClaim(context.Background(), "token", req); err == nil || !strings.Contains(err.Error(), "E.164") {
+			t.Fatalf("expected E.164 rejection for %#v, got %v", req, err)
+		}
+	}
+}
