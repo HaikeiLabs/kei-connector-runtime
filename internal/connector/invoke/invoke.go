@@ -1,6 +1,8 @@
 // Package invoke is `kei-proxy connector invoke`: it parses the command,
-// asks the control plane's governed connector endpoint for a decision, and
-// prints it. The root package supplies the runtime configuration (Env).
+// validates the input, asks the control plane's governed connector endpoint
+// for a decision, executes an allowed read through the provider's connector
+// package, and prints one JSON result or deny. The root package supplies the
+// runtime configuration and seams (Env).
 package invoke
 
 import (
@@ -10,10 +12,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/envelope"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/credentials"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/google/uuid"
 )
@@ -43,27 +50,20 @@ type Request struct {
 	InputDigest string `json:"input_digest,omitempty"`
 }
 
-// Response mirrors the ABAC invoke response. On an allow the
-// envelope carries the full propagation chain as minted by the control plane;
-// a deny carries a reason.
+// Response mirrors the ABAC invoke response. On an allow the envelope
+// carries the propagation chain minted by the control plane, the connector
+// descriptor, and, for an OAuth connector, the token proxied for this call
+// (D2). A deny carries a reason and, where known, a reason code.
 type Response struct {
-	Decision string `json:"decision"`
-	Reason   string `json:"reason,omitempty"`
-	Envelope *struct {
-		Version    string `json:"version"`
-		MintedBy   string `json:"minted_by"`
-		Invocation struct {
-			TenantID       string `json:"tenant_id"`
-			WorkspaceID    string `json:"workspace_id"`
-			Subject        string `json:"subject"`
-			AgentID        string `json:"agent_id"`
-			ConnectorID    string `json:"connector_id"`
-			Capability     string `json:"capability"`
-			Resource       string `json:"resource"`
-			TraceID        string `json:"trace_id"`
-			IdempotencyKey string `json:"idempotency_key"`
-		} `json:"invocation"`
-	} `json:"envelope,omitempty"`
+	Decision          string                  `json:"decision"`
+	Reason            string                  `json:"reason,omitempty"`
+	ReasonCode        string                  `json:"reason_code,omitempty"`
+	Envelope          *envelope.Envelope      `json:"envelope,omitempty"`
+	Connector         *Descriptor             `json:"connector,omitempty"`
+	CredentialSubject string                  `json:"credential_subject,omitempty"`
+	OAuth             *credentials.OAuthToken `json:"oauth,omitempty"`
+	Enrollment        *json.RawMessage        `json:"enrollment,omitempty"`
+	Connect           *json.RawMessage        `json:"connect,omitempty"`
 }
 
 // Env is the runtime configuration the command needs, taken from the root
@@ -77,6 +77,20 @@ type Env struct {
 	ProviderUserID string
 	// Stdin is read for --input -.
 	Stdin io.Reader
+
+	// Store and BackendUnavailable resolve opaque_ref credentials and the CRM
+	// assertion key; AssertionKey names that key.
+	Store              credentials.Store
+	BackendUnavailable func(error) bool
+	AssertionKey       crm.KeyConfig
+	// Audit appends one audit record (a JSON line) to the local spool.
+	Audit func(record []byte) error
+
+	// Test seams: nil means the real network, DNS, and clock.
+	CatalogTransport  http.RoundTripper
+	ProviderTransport http.RoundTripper
+	LookupIP          func(context.Context, string) ([]net.IP, error)
+	Now               func() time.Time
 }
 
 // isRuntime reports customer-runtime mode, which the runtime token decides.
@@ -93,6 +107,13 @@ type Client struct {
 // set; customer runtimes never have one.
 func NewClient(baseURL, secret string, timeout time.Duration) *Client {
 	return &Client{baseURL: baseURL, secret: secret, client: &http.Client{Timeout: timeout}}
+}
+
+func (c *Client) withTransport(t http.RoundTripper) *Client {
+	if t != nil {
+		c.client.Transport = t
+	}
+	return c
 }
 
 // Invoke calls the governed connector invocation endpoint. The proxy
@@ -247,46 +268,107 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	}, nil
 }
 
-// Run executes `connector invoke` with args (after "invoke"). It prints the
-// decision JSON to stdout and exits non-zero on anything but an allow.
+// output is the one JSON object written to stdout.
+type output struct {
+	Decision    string             `json:"decision"`
+	ReasonCode  string             `json:"reason_code,omitempty"`
+	Reason      string             `json:"reason,omitempty"`
+	TraceID     string             `json:"trace_id,omitempty"`
+	ConnectorID string             `json:"connector_id,omitempty"`
+	Provider    string             `json:"provider,omitempty"`
+	Capability  string             `json:"capability,omitempty"`
+	Result      json.RawMessage    `json:"result,omitempty"`
+	Audit       *outputAudit       `json:"audit,omitempty"`
+	Enrollment  *json.RawMessage   `json:"enrollment,omitempty"`
+	Connect     *json.RawMessage   `json:"connect,omitempty"`
+	Envelope    *envelope.Envelope `json:"envelope,omitempty"`
+}
+
+type outputAudit struct {
+	InputDigest  string `json:"input_digest,omitempty"`
+	ResultDigest string `json:"result_digest,omitempty"`
+	ResultBytes  int    `json:"result_bytes"`
+}
+
+// Run executes `connector invoke` with args (after "invoke"): validate the
+// input locally, ask the control plane, execute on allow, and write exactly
+// one JSON object. Exit 0 only for an executed allow; every other outcome is
+// a deny.
 func Run(args []string, env Env, stdout, stderr io.Writer) int {
 	plan, err := parseConnectorInvokeArgs(args, env)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
+	defer cancel()
+
+	out := output{TraceID: plan.req.TraceID, ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability}
+	var exec *execution
+	finish := func(d *denial) int {
+		code := 0
+		if d != nil {
+			out.Decision, out.ReasonCode, out.Reason, out.Result, out.Audit = "deny", d.code, d.reason, nil, nil
+			code = 1
+		}
+		env.emitAudit(plan, exec, out, time.Since(started))
+		if err := writeJSON(stdout, out); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return code
+	}
 
 	// The input is shape-checked here, before the control plane is asked
 	// anything; only its digest leaves the runtime.
 	raw, err := input.Read(plan.input, env.Stdin)
+	var canonical json.RawMessage
 	if err == nil {
-		_, plan.req.InputDigest, err = input.Canonicalize(raw)
+		canonical, plan.req.InputDigest, err = input.Canonicalize(raw)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "Error: --input must be one JSON object of at most 16 KiB")
-		return 1
+		return finish(deny("input_invalid", "input must be one JSON object of at most 16 KiB"))
 	}
+	out.Audit = &outputAudit{InputDigest: plan.req.InputDigest}
 
-	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
-	defer cancel()
-
-	client := NewClient(plan.abacURL, plan.abacSecret, plan.timeout)
-	resp, err := client.Invoke(ctx, plan.req)
+	catalogCtx, cancelCatalog := context.WithTimeout(ctx, catalogTimeout)
+	resp, err := NewClient(plan.abacURL, plan.abacSecret, plan.timeout).withTransport(env.CatalogTransport).Invoke(catalogCtx, plan.req)
+	cancelCatalog()
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
-		return 1
+		fmt.Fprintln(stderr, "Error: connector decision unavailable (fail closed)")
+		return finish(deny("catalog_unavailable", "the control plane did not return a decision"))
 	}
-
-	if err := writeJSON(stdout, resp); err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
-		return 1
-	}
-
-	// Fail closed: anything other than an explicit allow is a failure.
+	out.Enrollment, out.Connect, out.Envelope = resp.Enrollment, resp.Connect, resp.Envelope
 	if resp.Decision != "allow" {
-		return 1
+		return finish(deny(catalogReasonCode(resp), resp.Reason))
 	}
-	return 0
+
+	exec, d := env.execute(ctx, plan.req, canonical, resp, plan.abacURL)
+	out.Provider = string(exec.provider)
+	if d != nil {
+		return finish(d)
+	}
+	out.Decision, out.Result = "allow", exec.result
+	out.Audit.ResultDigest, out.Audit.ResultBytes = sha256Digest(exec.result), len(exec.result)
+	return finish(nil)
+}
+
+var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
+
+// catalogReasonCode classifies a catalog deny: its own reason code when it
+// sent a well-formed one, otherwise enrollment, approval, or policy.
+func catalogReasonCode(resp *Response) string {
+	switch {
+	case reasonCodePattern.MatchString(resp.ReasonCode):
+		return resp.ReasonCode
+	case resp.Enrollment != nil:
+		return "enrollment_required"
+	case resp.Reason == "approval required":
+		return "approval_required"
+	}
+	return "policy_deny"
 }
 
 // envOr and writeJSON mirror the root package's helpers of the same names.

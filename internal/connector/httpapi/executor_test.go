@@ -1,4 +1,4 @@
-package connectorruntime
+package httpapi
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-contracts"
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 )
 
 // fakeHTTPCredentials is a CredentialResolver that returns a canned value. It
@@ -51,48 +51,48 @@ func (f *fakeSecretStore) Validate(_ context.Context, _, _ string) error {
 // httpRuntimeFixture returns valid HTTP API connector metadata pointing at a
 // public-looking registered host. The hostname never resolves to a real
 // network target in tests; LookupIP is stubbed to a public address.
-func httpRuntimeFixture(base string) connectors.Metadata {
-	return connectors.Metadata{
+func httpRuntimeFixture(base string) contract.Metadata {
+	return contract.Metadata{
 		ID:            "connector-1",
 		TenantID:      "tenant-1",
 		WorkspaceID:   "workspace-1",
 		Name:          "contacts",
-		Provider:      connectors.ProviderHTTPAPI,
-		Status:        connectors.StatusActive,
+		Provider:      contract.ProviderHTTPAPI,
+		Status:        contract.StatusActive,
 		CredentialRef: "opaque/ref-1",
 		Scopes:        []string{"contacts:read"},
 		Resources:     []string{"contacts/*"},
-		Policy:        connectors.PolicyAttributes{AllowedActions: []connectors.Action{connectors.ActionRead}, AllowedResources: []string{"contacts"}},
-		Capabilities:  connectors.CapabilitiesFor(connectors.ProviderHTTPAPI),
+		Policy:        contract.PolicyAttributes{AllowedActions: []contract.Action{contract.ActionRead}, AllowedResources: []string{"contacts"}},
+		Capabilities:  contract.CapabilitiesFor(contract.ProviderHTTPAPI),
 		CreatedBy:     "subject-1",
-		HTTPAPI: &connectors.HTTPAPI{
+		HTTPAPI: &contract.HTTPAPI{
 			RegisteredBaseURL:   base + "/v1",
 			RegisteredHostname:  "api.example.test",
-			AllowedMethods:      []connectors.HTTPMethod{connectors.HTTPMethodGet, connectors.HTTPMethodHead},
+			AllowedMethods:      []contract.HTTPMethod{contract.HTTPMethodGet, contract.HTTPMethodHead},
 			AllowedPathPatterns: []string{"/contacts/*"},
 			QueryAllowlist:      []string{"limit"},
 			RequestMaxBytes:     1024,
 			ResponseMaxBytes:    1024,
 			TimeoutMS:           100,
-			CredentialInjection: connectors.CredentialInjection{Location: connectors.CredentialInjectionHeader, Name: "X-API-Key"},
-			Redaction:           connectors.RedactionRules{Headers: []string{"X-API-Key"}, ResponseFields: []string{"access_token"}},
+			CredentialInjection: contract.CredentialInjection{Location: contract.CredentialInjectionHeader, Name: "X-API-Key"},
+			Redaction:           contract.RedactionRules{Headers: []string{"X-API-Key"}, ResponseFields: []string{"access_token"}},
 		},
 	}
 }
 
-func runtimeInvocation() connectors.Invocation {
-	return connectors.Invocation{
+func runtimeInvocation() contract.Invocation {
+	return contract.Invocation{
 		TenantID:    "tenant-1",
 		WorkspaceID: "workspace-1",
 		Subject:     "subject-1",
 		AgentID:     "agent-1",
 		ConnectorID: "connector-1",
 		Capability:  "http.get",
-		Action:      connectors.ActionRead,
+		Action:      contract.ActionRead,
 		Resource:    "contacts/42",
 		TraceID:     "trace-1",
 		ApprovalID:  "approval-1",
-		HTTP:        &connectors.HTTPInvocation{Method: connectors.HTTPMethodGet, Path: "/contacts/42", Query: map[string][]string{"limit": {"10"}}},
+		HTTP:        &contract.HTTPInvocation{Method: contract.HTTPMethodGet, Path: "/contacts/42", Query: map[string][]string{"limit": {"10"}}},
 	}
 }
 
@@ -170,7 +170,7 @@ func TestExecuteHTTPAuditLineagePreservesFullContext(t *testing.T) {
 		t.Fatalf("ExecuteHTTP: %v", err)
 	}
 	a := result.Audit
-	if a.Subject != "subject-1" || a.OrgID != "tenant-1" || a.WorkspaceID != "workspace-1" || a.AgentID != "agent-1" || a.ConnectorID != "connector-1" || a.Capability != "http.get" || a.Action != connectors.ActionRead || a.Resource != "contacts/42" || a.TraceID != "trace-1" || a.ApprovalID != "approval-1" {
+	if a.Subject != "subject-1" || a.OrgID != "tenant-1" || a.WorkspaceID != "workspace-1" || a.AgentID != "agent-1" || a.ConnectorID != "connector-1" || a.Capability != "http.get" || a.Action != contract.ActionRead || a.Resource != "contacts/42" || a.TraceID != "trace-1" || a.ApprovalID != "approval-1" {
 		t.Fatalf("audit lineage not preserved: %+v", a)
 	}
 }
@@ -182,30 +182,30 @@ func TestExecuteHTTPEnforcesMethodPathQuery(t *testing.T) {
 	executor := HTTPExecutor{Credentials: &fakeHTTPCredentials{value: "secret"}, Client: mappedClient(server), LookupIP: publicLookup}
 
 	cases := map[string]struct {
-		in  connectors.Invocation
+		in  contract.Invocation
 		key string
 	}{
-		"disallowed method": {func() connectors.Invocation {
+		"disallowed method": {func() contract.Invocation {
 			in := runtimeInvocation()
 			in.HTTP.Method = "POST"
 			return in
 		}(), "HTTP method is not allowed"},
-		"path outside allowlist": {func() connectors.Invocation {
+		"path outside allowlist": {func() contract.Invocation {
 			in := runtimeInvocation()
 			in.HTTP.Path = "/users/1"
 			return in
 		}(), "HTTP path is not allowed"},
-		"absolute attacker path": {func() connectors.Invocation {
+		"absolute attacker path": {func() contract.Invocation {
 			in := runtimeInvocation()
 			in.HTTP.Path = "https://evil.example/x"
 			return in
 		}(), "HTTP path must be relative"},
-		"path traversal": {func() connectors.Invocation {
+		"path traversal": {func() contract.Invocation {
 			in := runtimeInvocation()
 			in.HTTP.Path = "/contacts/../admin"
 			return in
 		}(), "HTTP path traversal is not allowed"},
-		"query outside allowlist": {func() connectors.Invocation {
+		"query outside allowlist": {func() contract.Invocation {
 			in := runtimeInvocation()
 			in.HTTP.Query = map[string][]string{"api_key": {"hunter2"}}
 			return in
@@ -225,11 +225,11 @@ func TestExecuteHTTPFailsClosedBeforeRequest(t *testing.T) {
 	defer server.Close()
 	base := httpRuntimeFixture("https://api.example.test")
 
-	for name, mutate := range map[string]func(*connectors.Metadata){
-		"invalid credential ref": func(m *connectors.Metadata) { m.CredentialRef = "https://secret.invalid" },
-		"disabled":               func(m *connectors.Metadata) { m.Status = connectors.StatusSuspended },
-		"missing capability":     func(m *connectors.Metadata) { m.Capabilities = nil },
-		"cross-tenant":           func(m *connectors.Metadata) { m.TenantID = "other-tenant" },
+	for name, mutate := range map[string]func(*contract.Metadata){
+		"invalid credential ref": func(m *contract.Metadata) { m.CredentialRef = "https://secret.invalid" },
+		"disabled":               func(m *contract.Metadata) { m.Status = contract.StatusSuspended },
+		"missing capability":     func(m *contract.Metadata) { m.Capabilities = nil },
+		"cross-tenant":           func(m *contract.Metadata) { m.TenantID = "other-tenant" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := base
@@ -385,7 +385,7 @@ func TestSecretStoreCredentialResolverBoundary(t *testing.T) {
 		}
 	})
 	t.Run("backend failure is generic", func(t *testing.T) {
-		r := SecretStoreCredentialResolver{Store: &fakeSecretStore{err: errSecretStore}, Backend: "vault"}
+		r := SecretStoreCredentialResolver{Store: &fakeSecretStore{err: errors.New("secret store unavailable")}, Backend: "vault"}
 		if _, err := r.Resolve(ctx, "opaque/ref-1"); err == nil || strings.Contains(err.Error(), "opaque/ref-1") {
 			t.Fatalf("error = %v", err)
 		}

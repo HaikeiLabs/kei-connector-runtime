@@ -18,7 +18,7 @@ import (
 	"net/url"
 	"time"
 
-	connectors "github.com/HaikeiLabs/kei-connector-contracts"
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 )
 
 // Source is the connector's typed credential source.
@@ -118,7 +118,7 @@ func (r Resolver) sharedSecret(ctx context.Context, req Request) (string, error)
 	if r.Store == nil || req.Backend == "" {
 		return "", deny("credential_backend_unavailable", "credential backend is not available")
 	}
-	if connectors.ValidateCredentialRef(req.Ref) != nil {
+	if contract.ValidateCredentialRef(req.Ref) != nil {
 		return "", deny("credential_unavailable", "credential reference is invalid")
 	}
 	timeout := r.Timeout
