@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -33,10 +34,20 @@ type IdentityClaimStartResponse struct {
 // StartIdentityClaim starts a platform-neutral claim through the console's
 // server-side proxy. The runtime credential is forwarded as Bearer auth; this
 // client never knows or sends the console-only X-KEI-API-Key.
+var whatsappE164Pattern = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
+
 func (c *runtimeClient) StartIdentityClaim(ctx context.Context, token string, input IdentityClaimStartRequest) (*IdentityClaimStartResponse, error) {
 	input.Platform = strings.ToLower(strings.TrimSpace(input.Platform))
 	if !supportedClaimPlatform(input.Platform) || strings.TrimSpace(token) == "" || strings.TrimSpace(input.PlatformUserID) == "" {
 		return nil, errors.New("invalid identity claim request")
+	}
+	if input.Platform == "whatsapp" {
+		if input.TenantID != "" {
+			return nil, errors.New("whatsapp identity claim requires empty tenant")
+		}
+		if !whatsappE164Pattern.MatchString(input.PlatformUserID) {
+			return nil, errors.New("whatsapp identity claim requires valid E.164 phone number")
+		}
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -69,7 +80,7 @@ func (c *runtimeClient) StartIdentityClaim(ctx context.Context, token string, in
 
 func supportedClaimPlatform(platform string) bool {
 	switch platform {
-	case "discord", "slack", "teams":
+	case "discord", "slack", "teams", "whatsapp":
 		return true
 	default:
 		return false
