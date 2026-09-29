@@ -12,6 +12,7 @@ type Config struct {
 	ABACURL                       string
 	RuntimeControlPlaneURL        string
 	RuntimeToken                  string
+	RuntimeStateDir               string
 	CredentialSyncKeyID           string
 	CredentialSyncPrivateKey      string
 	CredentialStoreInstallationID string
@@ -53,11 +54,17 @@ func auditMaxBytesFromEnv() int64 {
 	return defaultAuditMaxBytes
 }
 
+// DefaultRuntimeStateDir is the default directory for persisted policy bundle
+// and runtime state. Per ADR-026 §5 the directory must be created with mode
+// 0700 and its files with mode 0600.
+const DefaultRuntimeStateDir = "/var/lib/kei-proxy"
+
 func configFromEnv() Config {
 	return Config{
 		ABACURL:                       envOr("ABAC_URL", "http://localhost:8080"),
 		RuntimeControlPlaneURL:        os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
 		RuntimeToken:                  os.Getenv("KEI_RUNTIME_TOKEN"),
+		RuntimeStateDir:               envOr("KEI_RUNTIME_STATE_DIR", DefaultRuntimeStateDir),
 		CredentialSyncKeyID:           os.Getenv("KEI_CREDENTIAL_SYNC_KEY_ID"),
 		CredentialSyncPrivateKey:      os.Getenv("KEI_CREDENTIAL_SYNC_PRIVATE_KEY"),
 		CredentialStoreInstallationID: os.Getenv("KEI_CREDENTIAL_STORE_INSTALLATION_ID"),
@@ -104,9 +111,13 @@ func ValidateRuntimeTokenFormat(token string) error {
 }
 
 // Validate fails closed when required service-to-service authentication is
-// absent in an environment that requires it.
+// absent in an environment that requires it, and rejects legacy environment
+// variables that have been removed per ADR-020 / ADR-026.
 func (c Config) Validate() error {
 	if c.IsRuntime() {
+		if os.Getenv("KEI_HARNESS_TOKEN") != "" {
+			return errors.New("KEI_HARNESS_TOKEN is set but no longer accepted; use KEI_RUNTIME_TOKEN instead")
+		}
 		if err := ValidateRuntimeTokenFormat(c.RuntimeToken); err != nil {
 			return err
 		}
