@@ -1,4 +1,4 @@
-package connectorruntime
+package httpapi
 
 // This file is the runtime-side implementation of the frozen HTTP API
 // connector contract (docs/http-api-connector-contract.md). It deliberately
@@ -20,12 +20,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-contracts"
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/credentials"
 )
 
 var (
 	errHTTPResponseTooLarge = errors.New("HTTP response exceeds configured limit")
 	errHTTPReservedTarget   = errors.New("HTTP target is reserved")
+	errHTTPInvocationDenied = errors.New("HTTP invocation denied")
 )
 
 // CredentialResolver resolves an opaque connector credential reference. An
@@ -39,7 +41,7 @@ type CredentialResolver interface {
 // boundary. The backend is deployment configuration; ref remains opaque
 // metadata and is the only credential identifier accepted by this path.
 type SecretStoreCredentialResolver struct {
-	Store   SecretStore
+	Store   credentials.Store
 	Backend string
 }
 
@@ -47,7 +49,7 @@ type SecretStoreCredentialResolver struct {
 // secret-store boundary before any backend I/O. A malformed reference or a
 // backend failure yields a generic error that never echoes the reference.
 func (r SecretStoreCredentialResolver) Resolve(ctx context.Context, ref string) (string, error) {
-	if r.Store == nil || r.Backend == "" || connectors.ValidateCredentialRef(ref) != nil {
+	if r.Store == nil || r.Backend == "" || contract.ValidateCredentialRef(ref) != nil {
 		return "", errors.New("invalid credential reference")
 	}
 	value, err := r.Store.Get(ctx, r.Backend, ref)
@@ -62,16 +64,16 @@ func (r SecretStoreCredentialResolver) Resolve(ctx context.Context, ref string) 
 // workspace, agent, connector, capability, action, resource, trace id, and
 // approval reference — and never carries credential material.
 type HTTPExecutionAudit struct {
-	Subject     string            `json:"subject"`
-	OrgID       string            `json:"org_id"`
-	WorkspaceID string            `json:"workspace_id"`
-	AgentID     string            `json:"agent_id"`
-	ConnectorID string            `json:"connector_id"`
-	Capability  string            `json:"capability"`
-	Action      connectors.Action `json:"action"`
-	Resource    string            `json:"resource"`
-	TraceID     string            `json:"trace_id"`
-	ApprovalID  string            `json:"approval_id,omitempty"`
+	Subject     string          `json:"subject"`
+	OrgID       string          `json:"org_id"`
+	WorkspaceID string          `json:"workspace_id"`
+	AgentID     string          `json:"agent_id"`
+	ConnectorID string          `json:"connector_id"`
+	Capability  string          `json:"capability"`
+	Action      contract.Action `json:"action"`
+	Resource    string          `json:"resource"`
+	TraceID     string          `json:"trace_id"`
+	ApprovalID  string          `json:"approval_id,omitempty"`
 }
 
 // HTTPExecutionResult is the governed result of one invocation. Headers and
@@ -84,7 +86,7 @@ type HTTPExecutionResult struct {
 }
 
 // HTTPExecutor is the governed runtime for provider-neutral HTTP API
-// connectors. Credentials is the only mandatory field; Client and LookupIP
+// contract. Credentials is the only mandatory field; Client and LookupIP
 // are injectable seams for tests.
 type HTTPExecutor struct {
 	Credentials CredentialResolver
@@ -92,7 +94,7 @@ type HTTPExecutor struct {
 	LookupIP    func(context.Context, string) ([]net.IP, error)
 }
 
-func executeHTTPInvocation(ctx context.Context, metadata connectors.Metadata, in connectors.Invocation, resolver CredentialResolver, client *http.Client) (*HTTPExecutionResult, error) {
+func executeHTTPInvocation(ctx context.Context, metadata contract.Metadata, in contract.Invocation, resolver CredentialResolver, client *http.Client) (*HTTPExecutionResult, error) {
 	return (HTTPExecutor{Credentials: resolver, Client: client}).ExecuteHTTP(ctx, metadata, in)
 }
 
@@ -100,17 +102,17 @@ func executeHTTPInvocation(ctx context.Context, metadata connectors.Metadata, in
 // (method/path/query), credential-reference resolution, registered-host URL
 // construction, SSRF target rejection, redirect policy, timeout and
 // response-size limits, and output redaction. It fails closed at every step.
-func (e HTTPExecutor) ExecuteHTTP(ctx context.Context, metadata connectors.Metadata, in connectors.Invocation) (*HTTPExecutionResult, error) {
+func (e HTTPExecutor) ExecuteHTTP(ctx context.Context, metadata contract.Metadata, in contract.Invocation) (*HTTPExecutionResult, error) {
 	if e.Credentials == nil {
 		return nil, errors.New("credential resolver is required")
 	}
 	// ValidateCall enforces the connector metadata, tenant/workspace scope,
 	// active status, declared capability, action, and the HTTP invocation
 	// boundary (method, relative path, query allowlist).
-	if err := connectors.ValidateCall(metadata, in); err != nil {
-		return nil, fmt.Errorf("HTTP invocation denied: %w", err)
+	if err := contract.ValidateCall(metadata, in); err != nil {
+		return nil, fmt.Errorf("%w: %w", errHTTPInvocationDenied, err)
 	}
-	if err := connectors.ValidateCredentialRef(metadata.CredentialRef); err != nil {
+	if err := contract.ValidateCredentialRef(metadata.CredentialRef); err != nil {
 		return nil, errors.New("invalid credential reference")
 	}
 	secret, err := e.Credentials.Resolve(ctx, metadata.CredentialRef)
@@ -335,4 +337,10 @@ func redactJSON(value any, fields []string) {
 			redactJSON(child, fields)
 		}
 	}
+}
+
+// CheckHost applies the SSRF boundary to host: it fails when the name does
+// not resolve or any resolved address is reserved. lookup nil means DNS.
+func CheckHost(ctx context.Context, lookup func(context.Context, string) ([]net.IP, error), host string) error {
+	return HTTPExecutor{LookupIP: lookup}.checkHost(ctx, host)
 }

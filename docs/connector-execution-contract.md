@@ -73,7 +73,12 @@ Rules:
 
 - The input never leaves the runtime. The catalog gets only `input_digest`, so
   it can bind the decision (and an approval) to the exact input without seeing
-  the query.
+  the query. Validation runs in two phases, both before any credential or
+  provider call. Before the catalog call, the input must be one JSON object of
+  at most 16 KiB. After the descriptor names the provider, a strict
+  per-capability decode rejects unknown fields and out-of-range values. The
+  digest is `sha256` of the canonical encoding (sorted keys, numbers as
+  written).
 - Every step fails closed. Any failure after step 3 returns a deny with a
   `reason_code` (section 7) and **no partial data**.
 - The decision stays online in this contract. When ADR-026 bundles land, the
@@ -382,7 +387,7 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | gmail | `message.get` | `gmail/messages/<id>` | `{message_id?}` (must equal the resource id if set) | `GmailMessage` |
 | google_drive | `drive.search` | `drive/<drive_id>` | `{query: string 1..512}` | `{files: [{id, drive_id, name, mime_type, modified_at}]}` |
 | google_drive | `drive.metadata.read` | `drive/<drive_id>/files/<file_id>` | `{}` | `{id, drive_id, name, mime_type, modified_at}` |
-| google_drive | `docs.read` | `drive/<drive_id>/files/<file_id>` | `{}` | `{id, name, mime_type, text}`, with `text` capped at 256 KiB (a larger document is `result_too_large`) |
+| google_drive | `docs.read` | `drive/<drive_id>/files/<file_id>` | `{}` | `{file_id, text}`, with `text` capped at 256 KiB (a larger document is `result_too_large`) |
 | linear | `issue.read` | `linear/issue/<id>` | `{}` | `{id, identifier, team_key, project_id?, title, state}` |
 | linear | `team.read` / `project.read` / `cycle.read` | `linear/team/<key>` / `linear/project/<id>` / `linear/cycle/<id>` | `{}` | the provider's typed struct |
 | github | `repository.read`, `issue.read`, `pull_request.read`, `check.read`, `workflow.read` | existing contract resources | `{}` | the provider's typed struct |
@@ -515,6 +520,17 @@ The catalog uses only metadata validation (`Metadata.Validate`,
 `ValidateCall`, `Decide`). A catalog test asserts that no non-test catalog
 package imports `.../providers`.
 
+### Runtime layout
+
+In `kei-connector-runtime`, connector code lives under `internal/connector`:
+`invoke` (the command, the catalog call, execution dispatch, and audit),
+`input` (input parsing and per-capability validation), `credentials` (the two
+credential paths), and one package per connector: `gmail`, `googledrive`,
+`linear`, `github`, `tito`, `crm` (the MarketingSite Worker client and the D3
+assertion signing), and `httpapi` (the governed HTTP executor). Each connector
+package wraps its `kei-connector-contracts/providers` client and applies that
+connector's redaction.
+
 ## 7. Errors and fail-closed rules
 
 Every row denies (exit 1) and returns no result data.
@@ -543,6 +559,8 @@ Every row denies (exit 1) and returns no result data.
 | `provider_error` | Other provider failure; only the status class is recorded |
 | `provider_timeout` | Provider deadline exceeded |
 | `result_too_large` | Raw provider response over 4 MiB, or redacted result over 1 MiB |
+| `capability_not_supported` | The capability's action is not `read`. Writes are a later layer (section 10). |
+| `account_model_not_supported` | `domain_delegation`: the account model is defined but not executed yet (follow-up) |
 
 Timeouts, all inside the `--timeout` budget (default 30s): catalog 10s,
 credential resolution 5s, provider 15s. Reads are not retried in layer 2, and
@@ -557,8 +575,13 @@ Two records per call, both metadata only (ADR-011):
 
 1. **Decision:** the catalog writes it at step 3 (`audit_records`, as today).
    It gains `input_digest`.
-2. **Execution:** the runtime appends it to the `KEI_PROXY_AUDIT` JSONL, and
-   `collector` ships it as event type `connector_execution`. It carries
+2. **Execution:** the runtime appends it to the `KEI_PROXY_AUDIT` JSONL. Until
+   the catalog accepts a `connector_execution` record (follow-up), it is
+   written as a decision-class line that the existing `collector` flush ships:
+   `span_id` is a new id, `parent_span` is the call's `trace_id`, `tool_name`
+   is `connector:<provider>:<capability>`, `tool_args_digest` is
+   `input_digest`, and `policy_reason` is the `reason_code` (or `executed`).
+   The execution fields below stay in the local spool until then. It carries
    `span_id` (= `trace_id`), `invoked_at`, `org_id`, `workspace_id`,
    `agent_id`, `invoking_subject`, `connector_id`, `provider`, `capability`,
    `action`, `resource`, `credential_source`, `account_model`,
@@ -675,6 +698,12 @@ credential reference", which is not true for a tenant runtime.
   }
 }
 ```
+
+The `connector` descriptor is the connector's full non-secret metadata (the
+`kei-connector-contracts` `contract.Metadata` shape, including `name`,
+`scopes`, `capabilities`, `policy`, `config`, and `created_by`) plus
+`credential_backend`, because the provider clients re-run `ValidateCall` over
+it. The runtime validates it with `setup.ValidateMetadata`.
 
 A deny response gains `reason_code` (section 7) and never carries `oauth`.
 The invoke handler sets `Cache-Control: no-store` and never logs the
