@@ -142,3 +142,39 @@ func TestDecodeCRMInvestorList(t *testing.T) {
 		t.Fatalf("empty investor.list = %#v, %v", got, err)
 	}
 }
+
+func TestDecodeNotion(t *testing.T) {
+	if got, err := Decode("notion", "search", []byte(`{"query":"roadmap","page_size":5}`)); err != nil || got != (NotionSearch{Query: "roadmap", PageSize: 5}) {
+		t.Fatalf("notion search = %#v, %v", got, err)
+	}
+	// An empty query lists what the integration can see, like Notion's own search.
+	if got, err := Decode("notion", "search", []byte(`{}`)); err != nil || got != (NotionSearch{}) {
+		t.Fatalf("empty notion search = %#v, %v", got, err)
+	}
+	if got, err := Decode("notion", "database.query", []byte(`{"page_size":25}`)); err != nil || got != (NotionDatabaseQuery{PageSize: 25}) {
+		t.Fatalf("notion database.query = %#v, %v", got, err)
+	}
+	if got, err := Decode("notion", "page.read", []byte(`{}`)); err != nil || got != (Empty{}) {
+		t.Fatalf("notion page.read = %#v, %v", got, err)
+	}
+}
+
+func TestDecodeRejectsInvalidNotionInput(t *testing.T) {
+	cases := []struct{ capability, input string }{
+		{"search", `{"query":"` + strings.Repeat("q", 513) + `"}`},
+		{"search", `{"page_size":26}`},
+		{"search", `{"page_size":-1}`},
+		{"search", `{"query":1}`},
+		{"search", `{"filter":{"property":"object","value":"page"}}`},
+		{"database.query", `{"page_size":26}`},
+		{"database.query", `{"filter":{"property":"Status"}}`},
+		{"database.query", `{"sorts":[]}`},
+		{"page.read", `{"page_id":"p-1"}`},
+		{"page.write", `{}`},
+	}
+	for _, tc := range cases {
+		if _, err := Decode("notion", tc.capability, []byte(tc.input)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Decode(notion, %s, %s) err = %v", tc.capability, tc.input, err)
+		}
+	}
+}

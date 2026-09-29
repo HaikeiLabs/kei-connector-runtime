@@ -34,6 +34,7 @@ import (
 const (
 	execToken      = "fake-oauth-access-token-0001"
 	execTitoToken  = "fake-tito-api-token-000000001"
+	execNotionTok  = "fake-notion-integration-token-01"
 	execCRMKey     = "fake-crm-connector-key-0000000000000001"
 	execTenant     = "11111111-1111-1111-1111-111111111111"
 	execWorkspace  = "22222222-2222-2222-2222-222222222222"
@@ -191,7 +192,7 @@ func (h *execHarness) run(args ...string) (map[string]any, int) {
 	}
 	// Invariants for every outcome: no credential or reference leaks into
 	// stdout, stderr, or the audit record.
-	for _, secret := range []string{execToken, execTitoToken, execCRMKey, "BEGIN PRIVATE KEY", execSecretRef} {
+	for _, secret := range []string{execToken, execTitoToken, execNotionTok, execCRMKey, "BEGIN PRIVATE KEY", execSecretRef} {
 		for name, text := range map[string]string{"stdout": h.lastStdout, "stderr": h.lastStderr, "audit": strings.Join(h.lastAuditLines, "\n")} {
 			if strings.Contains(text, secret) {
 				h.t.Fatalf("%s leaked credential material %q", name, secret)
@@ -413,6 +414,50 @@ func TestConnectorInvokeDriveSearch(t *testing.T) {
 
 // Every credential and catalog failure denies with a reason code and makes no
 // provider call.
+const notionCaps = `[{"name":"search","action":"read"},{"name":"page.read","action":"read"},{"name":"database.query","action":"read"}]`
+
+// Notion resolves its integration token from the tenant secret store (path
+// 1). The query stays in the input: the catalog sees only its digest.
+func TestConnectorInvokeNotionSearchUsesSharedSecret(t *testing.T) {
+	h := newExecHarness(t)
+	h.store.values[execBackend+"|"+execSecretRef] = execNotionTok
+	h.catalogBody = allowJSON(envelopeJSON("search", "read", "search", execUser), descriptorJSON("notion", "opaque_ref", "", "", notionCaps, ""), "")
+	h.transport.routes["api.notion.com"] = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+execNotionTok {
+			t.Errorf("notion authorization = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"results":[{"object":"page","id":"1a2b3c4d5e6f47a8b9c0d1e2f3a4b5c6","url":"https://www.notion.so/p","parent":{"type":"workspace","workspace":true},"properties":{"Name":{"type":"title","title":[{"plain_text":"Roadmap"}]},"Notes":{"type":"rich_text","rich_text":[{"plain_text":"secret notes"}]}}}],"has_more":false}`)
+	}
+	out, code := h.run("--capability", "search", "--action", "read", "--resource", "search", "--user", execUser, "--input", `{"query":"roadmap"}`)
+	if code != 0 {
+		t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
+	}
+	results := out["result"].(map[string]any)["results"].([]any)
+	if len(results) != 1 || results[0].(map[string]any)["title"] != "Roadmap" || strings.Contains(h.lastStdout, "secret notes") {
+		t.Fatalf("result = %v", out["result"])
+	}
+	catalogSent, _ := json.Marshal(h.catalogReqs)
+	if strings.Contains(string(catalogSent), "roadmap") || strings.Contains(strings.Join(h.lastAuditLines, "\n"), "roadmap") {
+		t.Fatalf("the query left the runtime: catalog %s audit %v", catalogSent, h.lastAuditLines)
+	}
+	if rec := h.auditRecord(); rec["credential_subject"] != "connector:"+execConnector || rec["credential_source"] != "opaque_ref" {
+		t.Fatalf("audit = %v", rec)
+	}
+}
+
+// pde-harness sends notion_search as --resource notion/workspace. That is not
+// a contract resource, so the runtime denies it without calling Notion.
+func TestConnectorInvokeNotionRejectsPDEWorkspaceResource(t *testing.T) {
+	h := newExecHarness(t)
+	h.store.values[execBackend+"|"+execSecretRef] = execNotionTok
+	h.catalogBody = allowJSON(envelopeJSON("search", "read", "notion/workspace", execUser), descriptorJSON("notion", "opaque_ref", "", "", notionCaps, ""), "")
+	out, code := h.run("--capability", "search", "--action", "read", "--resource", "notion/workspace", "--user", execUser)
+	h.assertDeny(out, code, "input_invalid")
+	if n := h.transport.callCount(); n != 0 {
+		t.Fatalf("provider calls = %d", n)
+	}
+}
+
 func TestConnectorInvokeFailsClosedWithoutCallingTheProvider(t *testing.T) {
 	titoCaps := `[{"name":"event.list","action":"read"}]`
 	titoAllow := allowJSON(envelopeJSON("event.list", "read", "tito/acme/events", execUser),
@@ -479,6 +524,15 @@ func TestConnectorInvokeFailsClosedWithoutCallingTheProvider(t *testing.T) {
 			[]string{"--capability", "message.search", "--action", "read", "--resource", "gmail/messages", "--input", `{"query":"x","body":true}`}, "input_invalid"},
 		{"page size too large", func(h *execHarness) { h.catalogBody = allowJSON(gmailEnv, gmailDesc, oauthJSON(now.Add(time.Minute))) },
 			[]string{"--capability", "message.search", "--action", "read", "--resource", "gmail/messages", "--input", `{"page_size":500}`}, "input_invalid"},
+		// Notion runs on a shared integration token only; there is no Notion
+		// OAuth in the bridge, so an oauth descriptor is refused.
+		{"notion oauth", func(h *execHarness) {
+			h.catalogBody = allowJSON(envelopeJSON("search", "read", "search", execUser), descriptorJSON("notion", "oauth", "", execUser, notionCaps, ""), oauthJSON(now.Add(time.Minute)))
+		}, []string{"--capability", "search", "--action", "read", "--resource", "search"}, "descriptor_invalid"},
+		{"notion query in resource", func(h *execHarness) {
+			h.store.values[execBackend+"|"+execSecretRef] = execNotionTok
+			h.catalogBody = allowJSON(envelopeJSON("search", "read", "search/roadmap", execUser), descriptorJSON("notion", "opaque_ref", "", "", notionCaps, ""), "")
+		}, []string{"--capability", "search", "--action", "read", "--resource", "search/roadmap"}, "input_invalid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
