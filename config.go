@@ -111,13 +111,9 @@ func ValidateRuntimeTokenFormat(token string) error {
 }
 
 // Validate fails closed when required service-to-service authentication is
-// absent in an environment that requires it, and rejects legacy environment
-// variables that have been removed per ADR-020 / ADR-026.
+// absent in an environment that requires it.
 func (c Config) Validate() error {
 	if c.IsRuntime() {
-		if os.Getenv("KEI_HARNESS_TOKEN") != "" {
-			return errors.New("KEI_HARNESS_TOKEN is set but no longer accepted; use KEI_RUNTIME_TOKEN instead")
-		}
 		if err := ValidateRuntimeTokenFormat(c.RuntimeToken); err != nil {
 			return err
 		}

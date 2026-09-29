@@ -64,8 +64,7 @@ deadline.
 Per ADR-020 and HAI-119, `KEI_RUNTIME_TOKEN` is the only supported runtime installation
 credential input. Set it in the runtime environment alongside
 `KEI_RUNTIME_CONTROL_PLANE_URL`. Runtime CLI commands do not accept credential
-flags. The retired `KEI_HARNESS_TOKEN`, `--key`, and `--harness-key` inputs are
-not supported; a legacy-only environment fails closed.
+flags. The retired `--key` and `--harness-key` inputs are not supported.
 
 ## Local audit spool
 

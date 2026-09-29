@@ -1,7 +1,6 @@
 package connectorruntime
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -40,26 +39,13 @@ func TestConfigFromEnvDoesNotEnableRuntimeWithoutCanonicalToken(t *testing.T) {
 	}
 }
 
-func TestRuntimeValidateRejectsHarnessTokenWhenSet(t *testing.T) {
-	t.Setenv("KEI_HARNESS_TOKEN", "kh_live_any_value_will_do_1234567890abcde")
-	cfg := Config{
-		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
-		RuntimeControlPlaneURL: "https://control-plane.example.test",
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when KEI_HARNESS_TOKEN is set")
-	} else if !strings.Contains(err.Error(), "KEI_HARNESS_TOKEN") || !strings.Contains(err.Error(), "KEI_RUNTIME_TOKEN") {
-		t.Fatalf("error must name both variables, got: %v", err)
-	}
-}
-
-func TestRuntimeValidateAcceptsNoHarnessToken(t *testing.T) {
+func TestRuntimeValidateAcceptsValidToken(t *testing.T) {
 	cfg := Config{
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 		RuntimeControlPlaneURL: "https://control-plane.example.test",
 	}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected no error when KEI_HARNESS_TOKEN is not set: %v", err)
+		t.Fatalf("expected no error: %v", err)
 	}
 }
 
