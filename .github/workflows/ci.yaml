@@ -69,6 +69,20 @@ jobs:
           fi
           echo "OK: no oversized tracked files"
 
+      - name: Static guard – no policy/group write routes or default permit
+        # ADR-026 Stack B1: the runtime must never contain a code path that
+        # writes policies or groups or returns a default permit. Keep this guard
+        # even after later stacks add bundle loading so the boundary stays
+        # explicit between the runtime and the policy catalog.
+        run: |
+          matches=$(grep -rlE --include='*.go' --exclude='*_test.go' "(POST|PUT|PATCH|DELETE).*(policies|groups)|[\"']permit[\"']" . || true)
+          if [ -n "$matches" ]; then
+            echo "ADR-026 B1 violation: found policy/group write routes or default permit in production code"
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK: no ADR-026 B1 violations"
+
   docker-runtime:
     name: Same-container runtime smoke test
     # kei-docker-ci is a dedicated no-AWS rootless-DinD runner (kei PR #650).
