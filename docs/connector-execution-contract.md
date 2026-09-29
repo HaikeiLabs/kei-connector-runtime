@@ -169,6 +169,14 @@ through the same store, but it belongs to the installation, not to a connector
 - The runtime resolves it with the same `SecretStore` registry as the
   model-profile path (`model_invoke.go`, `secret_store.go`), using workload
   identity: `SecretStore.Get(credential_backend, credential_ref)`.
+- When the secret was delivered by Kei (HAI-262, section 9), `credential_ref`
+  is its stored name, and the descriptor also carries
+  `credential_secret_ref`, the backend-qualified location the runtime wrote
+  (`aws-secrets-manager://<region>/<name>`,
+  `https://<vault>/secrets/<name>`, or `projects/<project>/secrets/<name>`).
+  The runtime reads `SecretStore.Get(credential_backend,
+  credential_secret_ref)` instead, and only when that location ends in
+  `"/" + credential_ref`; any other value is `descriptor_invalid`.
 - The runtime has no GCP backend yet (HAI-137 is catalog-only), so a
   `gcp-secret-manager` connector denies `credential_backend_unavailable` until
   that runtime slice lands.
@@ -707,14 +715,23 @@ How the values flow:
 - **Non-secret fields** are stored in a new `config` JSONB on
   `abac.data_connectors`, validated server-side against the same schema, and
   returned in the invoke descriptor.
-- **Secret fields never reach the catalog in plaintext.** The CLI or browser
-  seals the value to each target runtime installation's credential-sync key
-  (the same sealed-delivery path model profiles use). The catalog stores only
-  ciphertext and generates
-  `credential_ref = <store prefix>-connector-<connector_id>`. The runtime's
-  `kei-proxy credential sync` decrypts the value, `Put`s it into the secret
-  manager, and acks. The connector stays `pending` until the ack, then becomes
-  `active`.
+- **Secret fields never reach the catalog in plaintext** (HAI-262). The CLI
+  or console seals the value to each eligible runtime's credential-sync key
+  (`GET /api/v1/organizations/{id}/credential-store/recipients?workspace_id=`)
+  with the same KMP1 envelope model profiles use, and calls
+  `POST /api/v1/data-connectors/{id}:setSecret` with
+  `{field, credential_store_installation_id, recipients}`. The catalog keeps
+  the ciphertext only until a runtime acks, records a connector credential
+  generation (each call is a rotation), and names the stored secret
+  `<prefix>/connectors/<connector_id>/<field>` (AWS),
+  `<prefix>-connectors-<connector_id>-<field, _ as ->` (Azure), or
+  `<prefix>-connectors-<connector_id>-<field>` (GCP); that name becomes
+  `credential_ref`. `kei-proxy credential sync` claims the
+  `operation_kind: "connector_secret"` delivery, refuses a `secret_ref` that
+  does not name that connector field, decrypts, `Put`s, validates, and acks.
+  The connector stays `pending` until the ack, then becomes `active`.
+  `GET /api/v1/data-connectors/{id}/secrets` shows only
+  `{field, set, generation, delivered_at}`.
 - **Bring your own reference:** instead of a value, an operator may enter an
   existing reference (for example `kei/prod/crm/connector-api-key`, as
   provisioned by MarketingSite's `provision-crm-connector-key.sh`). It must
@@ -769,7 +786,8 @@ and `envelope.Envelope` types.
     "credential_source": "oauth",
     "account_model": "per_user",               // omitted when unset
     "subject": "…",                            // omitted when empty
-    "credential_backend": "aws-secrets-manager" // opaque_ref only
+    "credential_backend": "aws-secrets-manager", // opaque_ref only
+    "credential_secret_ref": "aws-secrets-manager://us-west-2/…" // delivered secrets only (HAI-262)
   },
   "credential_subject": "<kei user id> | connector:<id> | <declared subject>",
   "oauth": {                        // credential_source=oauth only
@@ -788,6 +806,8 @@ and `envelope.Envelope` types.
 - `credential_backend` is the org's **active** credential store backend, sent
   for `opaque_ref` connectors only. It is absent when the org has no active
   store, and the runtime then denies `credential_backend_unavailable`.
+- `credential_secret_ref` is sent only when `credential_ref` is the stored
+  name of a secret Kei delivered (section 3, path 1).
 - `credential_subject` is `contract.CredentialSubject(meta, invocation)`.
 - An allow for an `opaque_ref` connector carries no `oauth`, and the bridge
   is never called.

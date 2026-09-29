@@ -47,6 +47,9 @@ const (
 type Descriptor struct {
 	contract.Metadata
 	CredentialBackend string `json:"credential_backend,omitempty"`
+	// CredentialSecretRef is where the control plane's connector secret
+	// delivery wrote the credential (HAI-262), when it did.
+	CredentialSecretRef string `json:"credential_secret_ref,omitempty"`
 }
 
 // connectors maps each provider Kei builds to its connector (contract
@@ -142,7 +145,7 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 		Store: e.Store, BackendUnavailable: e.BackendUnavailable, Now: e.Now,
 	}.Resolve(ctx, credentials.Request{
 		Source: credentials.Source(meta.EffectiveCredentialSource()), Backend: resp.Connector.CredentialBackend,
-		Ref: meta.CredentialRef, OAuth: resp.OAuth, ControlPlaneURL: controlPlaneURL,
+		Ref: meta.CredentialRef, SecretRef: resp.Connector.CredentialSecretRef, OAuth: resp.OAuth, ControlPlaneURL: controlPlaneURL,
 	})
 	if err != nil {
 		var ce *credentials.Error

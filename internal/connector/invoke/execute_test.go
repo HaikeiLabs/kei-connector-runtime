@@ -819,3 +819,41 @@ func TestConnectorInvokeCRMWithoutBaseURLIsDescriptorInvalid(t *testing.T) {
 		t.Fatal("CRM was called without a configured origin")
 	}
 }
+
+// A connector secret delivered by the control plane (HAI-262) lives at a
+// backend-qualified location the opaque credential_ref cannot spell; the
+// descriptor carries it as credential_secret_ref and the runtime reads it.
+func TestConnectorInvokeReadsTheDeliveredSecretRef(t *testing.T) {
+	h := newExecHarness(t)
+	delivered := "aws-secrets-manager://us-west-2/" + execSecretRef
+	h.store.values[execBackend+"|"+delivered] = execTitoToken
+	caps := `[{"name":"event.list","action":"read"}]`
+	h.catalogBody = allowJSON(envelopeJSON("event.list", "read", "tito/acme/events", execUser),
+		descriptorJSON("tito", "opaque_ref", "", "", caps, fmt.Sprintf(`,"config":{"account_slug":"acme"},"credential_secret_ref":%q`, delivered)), "")
+	h.transport.routes["api.tito.io"] = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Token token="+execTitoToken {
+			t.Errorf("tito authorization = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"events":[],"meta":{"next_page":null}}`)
+	}
+	out, code := h.run("--capability", "event.list", "--action", "read", "--resource", "tito/acme/events", "--user", execUser, "--input", `{"status":"upcoming"}`)
+	if code != 0 {
+		t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
+	}
+}
+
+// A credential_secret_ref that does not name the connector's credential_ref
+// is a descriptor the runtime refuses before reading any secret.
+func TestConnectorInvokeRejectsASecretRefForAnotherName(t *testing.T) {
+	h := newExecHarness(t)
+	other := "aws-secrets-manager://us-west-2/kei/other/connectors/x/api_token"
+	h.store.values[execBackend+"|"+other] = execTitoToken
+	caps := `[{"name":"event.list","action":"read"}]`
+	h.catalogBody = allowJSON(envelopeJSON("event.list", "read", "tito/acme/events", execUser),
+		descriptorJSON("tito", "opaque_ref", "", "", caps, fmt.Sprintf(`,"config":{"account_slug":"acme"},"credential_secret_ref":%q`, other)), "")
+	h.transport.routes["api.tito.io"] = func(w http.ResponseWriter, r *http.Request) {
+		t.Error("provider called with a mismatched secret reference")
+	}
+	out, code := h.run("--capability", "event.list", "--action", "read", "--resource", "tito/acme/events", "--user", execUser, "--input", `{"status":"upcoming"}`)
+	h.assertDeny(out, code, "descriptor_invalid")
+}

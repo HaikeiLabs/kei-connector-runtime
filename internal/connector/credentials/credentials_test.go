@@ -167,3 +167,26 @@ func TestOAuthTokenNeverPrintsOrEncodesTheToken(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedSecretReadsTheDeliveredSecretRef(t *testing.T) {
+	const name = "kei/acme/connectors/7d1c9a52-6f0e-4d1b-9a53-0f2f6f0f1a11/api_token"
+	delivered := "aws-secrets-manager://us-west-2/" + name
+	store := &fakeStore{values: map[string]string{delivered: secret}}
+	got, err := resolver(store, time.Now()).Resolve(context.Background(), Request{Source: SourceOpaqueRef, Backend: backend, Ref: name, SecretRef: delivered})
+	if err != nil || got != secret {
+		t.Fatalf("Resolve = %q, %v", got, err)
+	}
+
+	// The delivered location must name the connector's own credential_ref.
+	for _, mismatched := range []string{
+		"aws-secrets-manager://us-west-2/kei/acme/connectors/other/api_token",
+		"aws-secrets-manager://us-west-2/prefix" + name,
+		name,
+	} {
+		store := &fakeStore{values: map[string]string{mismatched: secret}}
+		_, err := resolver(store, time.Now()).Resolve(context.Background(), Request{Source: SourceOpaqueRef, Backend: backend, Ref: name, SecretRef: mismatched})
+		if c := code(t, err); c != "descriptor_invalid" || store.calls != 0 {
+			t.Fatalf("%q: code=%q calls=%d, want descriptor_invalid without a lookup", mismatched, c, store.calls)
+		}
+	}
+}
