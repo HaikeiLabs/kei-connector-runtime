@@ -60,7 +60,7 @@ kei-proxy (tenant runtime)
      ◄──── allow + connector descriptor                         (bridge secret stays
            + oauth {access_token, expires_at} (OAuth only)      in the control plane)
   4. resolve the credential
-       path 1: SecretStore.Get(credential_backend, credential_ref)
+       path 1: secrets.Store.Get(credential_backend, credential_ref)
        path 2: use the oauth access token from step 3 (this call only)
        crm:    also sign the service assertion with the installation key (D3)
   5. execute the provider call                   (contracts/providers client)
@@ -166,15 +166,15 @@ through the same store, but it belongs to the installation, not to a connector
   `aws-secrets-manager`, `azure-key-vault`, `gcp-secret-manager`) from the
   organization's credential-store installation, the same store that model
   profiles use.
-- The runtime resolves it with the same `SecretStore` registry as the
-  model-profile path (`model_invoke.go`, `secret_store.go`), using workload
-  identity: `SecretStore.Get(credential_backend, credential_ref)`.
+- The runtime resolves it with the same `secrets.Store` registry as the
+  model-profile path (`model_invoke.go`, `internal/secrets`), using workload
+  identity: `Store.Get(credential_backend, credential_ref)`.
 - When the secret was delivered by Kei (HAI-262, section 9), `credential_ref`
   is its stored name, and the descriptor also carries
   `credential_secret_ref`, the backend-qualified location the runtime wrote
   (`aws-secrets-manager://<region>/<name>`,
   `https://<vault>/secrets/<name>`, or `projects/<project>/secrets/<name>`).
-  The runtime reads `SecretStore.Get(credential_backend,
+  The runtime reads `secrets.Store.Get(credential_backend,
   credential_secret_ref)` instead, and only when that location ends in
   `"/" + credential_ref`; any other value is `descriptor_invalid`.
 - The runtime has no GCP backend yet (HAI-137 is catalog-only), so a
@@ -369,7 +369,7 @@ Only for `gmail` and `google_drive` on a Google Workspace domain.
   **shared secret (path 1)** in the customer's secret manager
   (`credential_source=opaque_ref`). The impersonated mailbox is non-secret
   connector config, `impersonate_email`.
-- **What the runtime does:** it resolves the key through `SecretStore`, signs
+- **What the runtime does:** it resolves the key through `secrets.Store`, signs
   a JWT-bearer assertion (`iss` = the key's `client_email`,
   `sub=impersonate_email`, `scope` = the connector's fixed scope, `exp`
   ≤ 1h), and exchanges it at `https://oauth2.googleapis.com/token` for an
@@ -528,7 +528,7 @@ The assertion:
 - Each runtime installation has one ES256 (P-256) signing key. It is generated
   on the tenant side during setup and stored in the tenant's secret manager.
   Neither Kei nor the catalog ever sees the private key. The runtime reads it
-  with the same `SecretStore`, configured by
+  with the same `secrets.Store`, configured by
   `KEI_SERVICE_ASSERTION_KEY_BACKEND`, `KEI_SERVICE_ASSERTION_KEY_REF` (the
   PEM private key), and `KEI_SERVICE_ASSERTION_KID`, formatted
   `kei-rt-<installation_id>-<n>`.
@@ -736,7 +736,7 @@ How the values flow:
   existing reference (for example `kei/prod/crm/connector-api-key`, as
   provisioned by MarketingSite's `provision-crm-connector-key.sh`). It must
   pass `ValidateCredentialRef`, and `credential sync` must check it with
-  `SecretStore.Validate` (new behavior) before the connector becomes `active`.
+  `secrets.Store.Validate` (new behavior) before the connector becomes `active`.
 - Validation errors name the field and never echo a submitted value.
 
 ## 10. Writes (a later layer)

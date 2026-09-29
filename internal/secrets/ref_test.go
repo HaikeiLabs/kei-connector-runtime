@@ -1,4 +1,4 @@
-package connectorruntime
+package secrets
 
 import (
 	"errors"
@@ -20,8 +20,8 @@ func TestValidateSecretRefAcceptsBackendReferences(t *testing.T) {
 		{"gcp-secret-manager", "projects/my-proj/secrets/github-token/versions/1"},
 	}
 	for _, c := range cases {
-		if err := ValidateSecretRef(c.backend, c.ref); err != nil {
-			t.Errorf("ValidateSecretRef(%q, %q) = %v, want nil", c.backend, c.ref, err)
+		if err := ValidateRef(c.backend, c.ref); err != nil {
+			t.Errorf("ValidateRef(%q, %q) = %v, want nil", c.backend, c.ref, err)
 		}
 	}
 }
@@ -40,13 +40,13 @@ func TestValidateSecretRefRejectsInlineMaterial(t *testing.T) {
 		"vault\nsecret",
 	}
 	for _, ref := range material {
-		err := ValidateSecretRef("custom", ref)
+		err := ValidateRef("custom", ref)
 		if err == nil {
-			t.Errorf("ValidateSecretRef accepted inline material (len=%d)", len(ref))
+			t.Errorf("ValidateRef accepted inline material (len=%d)", len(ref))
 			continue
 		}
-		if !errors.Is(err, ErrSecretRefMaterial) {
-			t.Errorf("ValidateSecretRef(len=%d) = %v, want ErrSecretRefMaterial", len(ref), err)
+		if !errors.Is(err, ErrRefMaterial) {
+			t.Errorf("ValidateRef(len=%d) = %v, want ErrRefMaterial", len(ref), err)
 		}
 	}
 }
@@ -62,22 +62,22 @@ func TestValidateSecretRefRejectsMalformedFormat(t *testing.T) {
 		{"azure-key-vault", "aws-secrets-manager://us-east-1/123/github-token"},
 	}
 	for _, c := range cases {
-		err := ValidateSecretRef(c.backend, c.ref)
-		if !errors.Is(err, ErrSecretRefMalformed) {
-			t.Errorf("ValidateSecretRef(%q, %q) = %v, want ErrSecretRefMalformed", c.backend, c.ref, err)
+		err := ValidateRef(c.backend, c.ref)
+		if !errors.Is(err, ErrRefMalformed) {
+			t.Errorf("ValidateRef(%q, %q) = %v, want ErrRefMalformed", c.backend, c.ref, err)
 		}
 	}
 }
 
 func TestValidateSecretRefRejectsEmptyTooLongUnknown(t *testing.T) {
-	if err := ValidateSecretRef("custom", ""); !errors.Is(err, ErrSecretRefEmpty) {
-		t.Errorf("empty = %v, want ErrSecretRefEmpty", err)
+	if err := ValidateRef("custom", ""); !errors.Is(err, ErrRefEmpty) {
+		t.Errorf("empty = %v, want ErrRefEmpty", err)
 	}
-	if err := ValidateSecretRef("custom", strings.Repeat("x", maxSecretRefLen+1)); !errors.Is(err, ErrSecretRefTooLong) {
-		t.Errorf("too long = %v, want ErrSecretRefTooLong", err)
+	if err := ValidateRef("custom", strings.Repeat("x", maxRefLen+1)); !errors.Is(err, ErrRefTooLong) {
+		t.Errorf("too long = %v, want ErrRefTooLong", err)
 	}
-	if err := ValidateSecretRef("not-a-backend", "secret/kei/x"); !errors.Is(err, ErrSecretRefUnknown) {
-		t.Errorf("unknown = %v, want ErrSecretRefUnknown", err)
+	if err := ValidateRef("not-a-backend", "secret/kei/x"); !errors.Is(err, ErrRefUnknown) {
+		t.Errorf("unknown = %v, want ErrRefUnknown", err)
 	}
 }
 
@@ -86,7 +86,7 @@ func TestValidateSecretRefRejectsEmptyTooLongUnknown(t *testing.T) {
 // returned error.
 func TestValidateSecretRefErrorNeverEchoesReference(t *testing.T) {
 	secret := "ghp_" + strings.Repeat("Z", 36)
-	err := ValidateSecretRef("custom", secret)
+	err := ValidateRef("custom", secret)
 	if err == nil {
 		t.Fatal("expected error for inline material")
 	}
@@ -95,7 +95,7 @@ func TestValidateSecretRefErrorNeverEchoesReference(t *testing.T) {
 	}
 
 	weird := "https://example.com/" + strings.Repeat("Y", 50)
-	if err := ValidateSecretRef("aws-secrets-manager", weird); err != nil && strings.Contains(err.Error(), weird) {
+	if err := ValidateRef("aws-secrets-manager", weird); err != nil && strings.Contains(err.Error(), weird) {
 		t.Fatalf("error echoed the reference: %v", err)
 	}
 }

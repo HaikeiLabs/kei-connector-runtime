@@ -1,4 +1,4 @@
-package connectorruntime
+package secrets
 
 import (
 	"errors"
@@ -18,14 +18,14 @@ import (
 // reference back: a reference that is actually secret material must not be
 // repeated into logs, audit records, or API responses.
 var (
-	ErrSecretRefEmpty     = errors.New("secret_ref is required")
-	ErrSecretRefTooLong   = errors.New("secret_ref exceeds maximum length")
-	ErrSecretRefMaterial  = errors.New("secret_ref must be an opaque reference, not secret material")
-	ErrSecretRefUnknown   = errors.New("unsupported secret_backend")
-	ErrSecretRefMalformed = errors.New("secret_ref is malformed for its backend")
+	ErrRefEmpty     = errors.New("secret_ref is required")
+	ErrRefTooLong   = errors.New("secret_ref exceeds maximum length")
+	ErrRefMaterial  = errors.New("secret_ref must be an opaque reference, not secret material")
+	ErrRefUnknown   = errors.New("unsupported secret_backend")
+	ErrRefMalformed = errors.New("secret_ref is malformed for its backend")
 )
 
-const maxSecretRefLen = 1024
+const maxRefLen = 1024
 
 // secretRefBackends mirrors the control-plane backend allowlist so the runtime
 // rejects a backend it cannot resolve before it is ever used.
@@ -54,20 +54,20 @@ var jwtShape = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-
 // credentials, e.g. "postgres://user:hunter2@host/db".
 var urlWithEmbeddedCreds = regexp.MustCompile(`^[a-z][a-z0-9+.-]*://[^/@\s]+:[^/@\s]+@`)
 
-// ValidateSecretRef reports whether ref is a safe, well-formed reference for
+// ValidateRef reports whether ref is a safe, well-formed reference for
 // backend. It never includes ref in the returned error.
-func ValidateSecretRef(backend, ref string) error {
+func ValidateRef(backend, ref string) error {
 	if ref == "" {
-		return ErrSecretRefEmpty
+		return ErrRefEmpty
 	}
-	if len(ref) > maxSecretRefLen {
-		return ErrSecretRefTooLong
+	if len(ref) > maxRefLen {
+		return ErrRefTooLong
 	}
 	if !secretRefBackends[backend] {
-		return fmt.Errorf("%w: %s", ErrSecretRefUnknown, backend)
+		return fmt.Errorf("%w: %s", ErrRefUnknown, backend)
 	}
 	if looksLikeSecretMaterial(ref) {
-		return ErrSecretRefMaterial
+		return ErrRefMaterial
 	}
 	return validateSecretRefFormat(backend, ref)
 }
@@ -80,17 +80,17 @@ func validateSecretRefFormat(backend, ref string) error {
 	switch backend {
 	case "azure-key-vault":
 		if _, _, _, err := parseKeyVaultSecretRef(ref); err != nil {
-			return fmt.Errorf("%w: %s", ErrSecretRefMalformed, backend)
+			return fmt.Errorf("%w: %s", ErrRefMalformed, backend)
 		}
 		return nil
 	case "aws-secrets-manager":
 		if _, _, err := parseAWSSecretRef(ref); err != nil {
-			return fmt.Errorf("%w: %s", ErrSecretRefMalformed, backend)
+			return fmt.Errorf("%w: %s", ErrRefMalformed, backend)
 		}
 		return nil
 	default:
 		if strings.ContainsAny(ref, "\r\n\t ") {
-			return fmt.Errorf("%w: %s", ErrSecretRefMalformed, backend)
+			return fmt.Errorf("%w: %s", ErrRefMalformed, backend)
 		}
 		return nil
 	}

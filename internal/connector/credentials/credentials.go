@@ -35,7 +35,7 @@ const (
 // DefaultTimeout bounds one secret-store lookup.
 const DefaultTimeout = 5 * time.Second
 
-// Store reads a secret value; the runtime's SecretStore satisfies it.
+// Store reads a secret value; secrets.Store satisfies it.
 type Store interface {
 	Get(ctx context.Context, backend, ref string) (*string, error)
 }

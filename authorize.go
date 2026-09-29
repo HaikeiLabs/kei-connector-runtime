@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 )
 
 // CredentialResponse carries only the secret value. Injection is decided by the
@@ -39,7 +41,7 @@ type authorizeParams struct {
 	abac         ABACClient
 	// Deprecated compatibility fields; runtime authorization never uses them.
 	credentialBinding CredentialBindingClient
-	secretStore       SecretStore
+	secretStore       secrets.Store
 	oidcBridge        OIDCBridgeClient
 	auditPath         string
 	auditMaxBytes     int64
@@ -149,7 +151,7 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 			}
 			cred, err = p.secretStore.Get(p.ctx, descriptor.SecretBackend, descriptor.SecretRef)
 			if err != nil {
-				if errors.Is(err, errSecretNotFound) {
+				if errors.Is(err, secrets.ErrNotFound) {
 					slog.Info("credential secret not found", "user_id", p.user, "service", service)
 				} else {
 					slog.Warn("credential secret lookup error", "user_id", p.user, "service", service, "error", err)
@@ -361,10 +363,10 @@ func runAuthorize(args []string) int {
 		oidcBridge = NewOIDCBridgeClient(cfg.OIDCBridgeURL, cfg.OIDCBridgeSecret, time.Duration(*timeout)*time.Second)
 	}
 	var credentialBinding CredentialBindingClient
-	var secretStore SecretStore
+	var secretStore secrets.Store
 	if cfg.IsRuntime() {
 		credentialBinding = NewCredentialBindingClient(cfg.RuntimeControlPlaneURL, time.Duration(*timeout)*time.Second)
-		secretStore, err = NewSecretStore()
+		secretStore, err = secrets.NewStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: runtime secret store initialization failed: %v\n", err)
 			return 1

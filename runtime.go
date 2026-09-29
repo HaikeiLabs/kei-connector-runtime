@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/crypto"
 )
 
 // runRuntime provides the startup contract used by a Bot Runtime image. The
@@ -324,7 +326,7 @@ func registerCredentialSyncKey(ctx context.Context, client RuntimeClient, cfg Co
 	if cfg.CredentialStoreInstallationID == "" || cfg.CredentialSyncKeyID == "" || cfg.CredentialSyncPrivateKey == "" {
 		return nil
 	}
-	publicKey, err := credentialSyncPublicKey(cfg.CredentialSyncPrivateKey)
+	publicKey, err := crypto.PublicKey(cfg.CredentialSyncPrivateKey)
 	if err != nil {
 		return fmt.Errorf("derive credential sync public key: %w", err)
 	}

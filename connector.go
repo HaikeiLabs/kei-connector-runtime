@@ -7,6 +7,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 )
 
 // runConnector dispatches the connector subcommand.
@@ -27,7 +28,7 @@ func runConnector(args []string) int {
 			ProviderUserID:         cfg.ProviderUserID,
 			Stdin:                  os.Stdin,
 			Store:                  connectorSecretStore(),
-			BackendUnavailable:     func(err error) bool { return errors.Is(err, errSecretStore) },
+			BackendUnavailable:     func(err error) bool { return errors.Is(err, secrets.ErrUnavailable) },
 			AssertionKey:           crm.KeyConfigFromEnv(),
 			Audit: func(record []byte) error {
 				if cfg.AuditPath == "" {
@@ -44,8 +45,8 @@ func runConnector(args []string) int {
 // connectorSecretStore is the tenant secret store for connector credentials:
 // the same backends model profiles use. Without one, opaque_ref connectors
 // deny credential_backend_unavailable.
-func connectorSecretStore() SecretStore {
-	store, err := NewSecretStore()
+func connectorSecretStore() secrets.Store {
+	store, err := secrets.NewStore()
 	if err != nil {
 		return nil
 	}

@@ -1,4 +1,4 @@
-package connectorruntime
+package secrets
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 )
 
-// awsSecretsManagerStore implements SecretStore for AWS Secrets Manager. It
+// awsSecretsManagerStore implements Store for AWS Secrets Manager. It
 // holds the resolved base configuration and derives a per-region client from
 // it, so an injected credential provider (e.g. an IRSA web-identity token) is
 // preserved across region overrides instead of being re-resolved from the
@@ -37,7 +37,7 @@ type awsSecretsManagerStore struct {
 // AWS_WEB_IDENTITY_TOKEN_FILE, AWS_ROLE_ARN, and AWS_ROLE_SESSION_NAME and
 // exchanges the projected service-account token for short-lived STS
 // credentials. No static cloud credentials are read or stored.
-func NewAWSSecretsManagerStore() (SecretStore, error) {
+func NewAWSSecretsManagerStore() (Store, error) {
 	awsCfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("create AWS config: %w", err)
@@ -57,7 +57,7 @@ func NewAWSSecretsManagerStore() (SecretStore, error) {
 // inject it here. The store derives every region client from the injected
 // config so the chosen credential provider is never replaced by the default
 // chain.
-func NewAWSSecretsManagerStoreFromConfig(awsCfg aws.Config) (SecretStore, error) {
+func NewAWSSecretsManagerStoreFromConfig(awsCfg aws.Config) (Store, error) {
 	return &awsSecretsManagerStore{
 		base:    awsCfg,
 		clients: map[string]*secretsmanager.Client{},
@@ -108,7 +108,7 @@ func (s *awsSecretsManagerStore) clientFor(region string) (*secretsmanager.Clien
 
 func (s *awsSecretsManagerStore) Get(ctx context.Context, backend, secretRef string) (*string, error) {
 	if backend != "aws-secrets-manager" {
-		return nil, fmt.Errorf("%w: backend is %q, expected aws-secrets-manager", errSecretStore, backend)
+		return nil, fmt.Errorf("%w: backend is %q, expected aws-secrets-manager", ErrUnavailable, backend)
 	}
 	region, secretName, err := parseAWSSecretRef(secretRef)
 	if err != nil {
@@ -125,19 +125,19 @@ func (s *awsSecretsManagerStore) Get(ctx context.Context, backend, secretRef str
 	if err != nil {
 		var resourceNotFound *types.ResourceNotFoundException
 		if errors.As(err, &resourceNotFound) {
-			return nil, errSecretNotFound
+			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("%w: %v", errSecretStore, err)
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	if result.SecretString == nil {
-		return nil, errSecretNotFound
+		return nil, ErrNotFound
 	}
 	return result.SecretString, nil
 }
 
 func (s *awsSecretsManagerStore) Put(ctx context.Context, backend, secretRef, value string) error {
 	if backend != "aws-secrets-manager" {
-		return fmt.Errorf("%w: backend is %q, expected aws-secrets-manager", errSecretStore, backend)
+		return fmt.Errorf("%w: backend is %q, expected aws-secrets-manager", ErrUnavailable, backend)
 	}
 	region, secretName, err := parseAWSSecretRef(secretRef)
 	if err != nil {
@@ -155,7 +155,7 @@ func (s *awsSecretsManagerStore) Put(ctx context.Context, backend, secretRef, va
 	if err != nil {
 		var notFound *types.ResourceNotFoundException
 		if !errors.As(err, &notFound) {
-			return fmt.Errorf("%w: %v", errSecretStore, err)
+			return fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 		// Fresh-install cutovers have no pre-existing secret. Create the secret
 		// once, then tolerate the create race by retrying PutSecretValue.
@@ -168,10 +168,10 @@ func (s *awsSecretsManagerStore) Put(ctx context.Context, backend, secretRef, va
 		}
 		var exists *types.ResourceExistsException
 		if !errors.As(createErr, &exists) {
-			return fmt.Errorf("%w: %v", errSecretStore, createErr)
+			return fmt.Errorf("%w: %v", ErrUnavailable, createErr)
 		}
 		if _, err = client.PutSecretValue(ctx, input); err != nil {
-			return fmt.Errorf("%w: %v", errSecretStore, err)
+			return fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 	}
 	return nil
@@ -179,7 +179,7 @@ func (s *awsSecretsManagerStore) Put(ctx context.Context, backend, secretRef, va
 
 func (s *awsSecretsManagerStore) Delete(ctx context.Context, backend, secretRef string) error {
 	if backend != "aws-secrets-manager" {
-		return fmt.Errorf("%w: backend is %q, expected aws-secrets-manager", errSecretStore, backend)
+		return fmt.Errorf("%w: backend is %q, expected aws-secrets-manager", ErrUnavailable, backend)
 	}
 	region, secretName, err := parseAWSSecretRef(secretRef)
 	if err != nil {
@@ -199,7 +199,7 @@ func (s *awsSecretsManagerStore) Delete(ctx context.Context, backend, secretRef 
 			// Already deleted, which is fine for idempotency
 			return nil
 		}
-		return fmt.Errorf("%w: %v", errSecretStore, err)
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	return nil
 }
@@ -207,8 +207,8 @@ func (s *awsSecretsManagerStore) Delete(ctx context.Context, backend, secretRef 
 func (s *awsSecretsManagerStore) Validate(ctx context.Context, backend, secretRef string) error {
 	// Validate by attempting to get the secret - if it exists and is readable, it's valid
 	_, err := s.Get(ctx, backend, secretRef)
-	if errors.Is(err, errSecretNotFound) {
-		return errSecretNotFound
+	if errors.Is(err, ErrNotFound) {
+		return ErrNotFound
 	}
 	return err
 }
