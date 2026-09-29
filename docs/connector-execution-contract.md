@@ -428,6 +428,8 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | tito | `release.list` | `tito/<account>/events/<event>/releases` | `{}` | `[TitoRelease]` |
 | tito | `ticket.summary` | `tito/<account>/events/<event>/ticket-summary` | `{}` | `{account_slug, event_slug, total, by_state, by_release}`; fails closed above 5000 tickets |
 | crm | `lead.read` | `leads`, `leads/<id>`, `customers`, `customers/<id>` | `{}` | `{records: [Lead]}` or `{record: Lead}` |
+| crm | `investor.list` (HAI-210) | `investors` | `{stage?: prospect \| contacted \| meeting \| diligence \| committed \| passed, q?: ≤200 chars, limit?: 1-100 (default 20), cursor?: ≤128 chars}`, sent to the Worker as `{"data": <input>}` | `{records: [Investor], next_cursor: string \| null, has_more}` |
+| crm | `investor.read` (HAI-210) | `investors/<id>` | `{}` | `{record: Investor}` |
 | http_api | `http.get`, `http.head` | the exact request path, e.g. `/contacts/1` (no query) | `{path: string (must equal the resource exactly), query?: {name: [values]} (names must be in query_allowlist)}` | `{status_code, headers, body}`, with headers and JSON fields redacted per the connector's `redaction` rules and the body capped at `response_max_bytes` |
 
 Redaction per capability:
@@ -445,7 +447,9 @@ Redaction per capability:
 - **CRM:** a Lead is `{id, company_name, contact_name, email, role, status,
   priority, source, tier, created_at, updated_at}`. Free text (`message`,
   `early_access_notes`, audit answers) is dropped even if the Worker returns
-  it.
+  it. An
+  Investor is `{id, name, firm, email, stage, created_at, updated_at}`; any
+  other field the Worker returns is dropped.
 
 `http_api` (D4) is the existing `ExecuteHTTP` path
 (`internal/connector/httpapi`): one
@@ -672,7 +676,7 @@ authentication options and fields:
 | linear | OAuth + `account_model` ∈ {per_user, shared} | none | none |
 | github | OAuth + `account_model` ∈ {per_user, shared} | none | none |
 | tito | shared secret | `account_slug` | `api_token` |
-| crm | shared secret | `base_url` (https, the MarketingSite origin; no userinfo, query, or fragment; host must resolve to a public address), `assertion_audience` (must equal the Worker's `KEI_SERVICE_ASSERTION_AUDIENCE`), `allowed_actions` (default `["read"]`), `allowed_resources` (default `["leads", "customers"]`) | `api_key` (≥ 32 chars, the Worker's `CRM_CONNECTOR_API_KEY`) |
+| crm | shared secret | `base_url` (https, the MarketingSite origin; no userinfo, query, or fragment; host must resolve to a public address), `assertion_audience` (must equal the Worker's `KEI_SERVICE_ASSERTION_AUDIENCE`), `allowed_actions` (default `["read"]`), `allowed_resources` (default `["leads", "customers"]`; add `investors` for `investor.list`/`investor.read`, and declare those capabilities only after the Worker serves them, because the assertion carries every declared capability and the Worker rejects unknown ones) | `api_key` (≥ 32 chars, the Worker's `CRM_CONNECTOR_API_KEY`) |
 | http_api | shared secret | the existing `http_api` block: `registered_base_url` (https, one host), `allowed_methods` (`GET`/`HEAD`), `allowed_path_patterns`, `query_allowlist`, `credential_injection` (`location` header or query, `name`, optional `scheme`), `timeout_ms`, `response_max_bytes`, redirect policy, `redaction` | the injected key |
 
 The CRM assertion signing key is per **installation**, not per connector, so it

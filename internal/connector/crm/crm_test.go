@@ -149,3 +149,122 @@ func verify(t *testing.T, token string, pub *ecdsa.PublicKey) (map[string]any, m
 	}
 	return decode(parts[0]), decode(parts[1])
 }
+
+var investorConfig = map[string]any{"base_url": "https://crm.example.com", "assertion_audience": "kei-crm", "allowed_resources": []any{"leads", "investors"}}
+
+// worker records the one request body the Worker receives and answers with
+// response.
+func worker(t *testing.T, r *connectortest.Routes, key *ecdsa.PrivateKey, capability, resource, response string) *string {
+	t.Helper()
+	var body string
+	r.Handle("crm.example.com", func(w http.ResponseWriter, req *http.Request) {
+		_, claims := verify(t, strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), &key.PublicKey)
+		if claims["capability"] != capability || claims["resource"] != resource || claims["action"] != "read" {
+			t.Errorf("claims = %v", claims)
+		}
+		raw, _ := io.ReadAll(req.Body)
+		body = string(raw)
+		_, _ = io.WriteString(w, response)
+	})
+	return &body
+}
+
+func investorCall(r *connectortest.Routes, capability, resource string, in any) connector.Call {
+	call := connectortest.Call(r, contract.ProviderCRM, capability, contract.ActionRead, resource, in, apiKey)
+	call.Meta.Config = investorConfig
+	return call
+}
+
+func TestLeadReadSendsAnEmptyBody(t *testing.T) {
+	key, st := newKey(t)
+	r := connectortest.NewRoutes()
+	body := worker(t, r, key, "lead.read", "leads", `{"success":true,"data":{"records":[]}}`)
+	if _, err := (Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}).Execute(context.Background(), crmCall(r, validConfig)); err != nil {
+		t.Fatal(err)
+	}
+	if *body != `{}` {
+		t.Fatalf("lead.read body = %s, want {}", *body)
+	}
+}
+
+func TestInvestorListSendsItsInputAsDataAndProjects(t *testing.T) {
+	key, st := newKey(t)
+	r := connectortest.NewRoutes()
+	body := worker(t, r, key, "investor.list", "investors",
+		`{"success":true,"data":{"records":[{"id":7,"name":"Grace","firm":"Compiler Ventures","email":"g@example.com","stage":"diligence","created_at":"c","updated_at":"u","notes":"PRIVATE"}],"next_cursor":"eyJpZCI6N30","has_more":true}}`)
+	in := input.CRMInvestorList{Stage: "diligence", Limit: 5}
+	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.list", "investors", in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *body != `{"data":{"stage":"diligence","limit":5}}` {
+		t.Fatalf("investor.list body = %s", *body)
+	}
+	raw, _ := json.Marshal(got)
+	want := `{"has_more":true,"next_cursor":"eyJpZCI6N30","records":[{"created_at":"c","email":"g@example.com","firm":"Compiler Ventures","id":7,"name":"Grace","stage":"diligence","updated_at":"u"}]}`
+	if string(raw) != want {
+		t.Fatalf("result = %s\nwant %s", raw, want)
+	}
+}
+
+func TestInvestorListLastPageHasANullCursor(t *testing.T) {
+	key, st := newKey(t)
+	r := connectortest.NewRoutes()
+	body := worker(t, r, key, "investor.list", "investors", `{"success":true,"data":{"records":[],"next_cursor":null,"has_more":false}}`)
+	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.list", "investors", input.CRMInvestorList{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *body != `{"data":{}}` {
+		t.Fatalf("investor.list body = %s", *body)
+	}
+	if raw, _ := json.Marshal(got); string(raw) != `{"has_more":false,"next_cursor":null,"records":[]}` {
+		t.Fatalf("result = %s", raw)
+	}
+}
+
+func TestInvestorReadSendsAnEmptyBodyAndProjects(t *testing.T) {
+	key, st := newKey(t)
+	r := connectortest.NewRoutes()
+	body := worker(t, r, key, "investor.read", "investors/7",
+		`{"success":true,"data":{"record":{"id":7,"name":"Grace","firm":"Compiler Ventures","email":"g@example.com","stage":"diligence","created_at":"c","updated_at":"u","notes":"PRIVATE"}}}`)
+	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.read", "investors/7", input.Empty{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *body != `{}` {
+		t.Fatalf("investor.read body = %s", *body)
+	}
+	raw, _ := json.Marshal(got)
+	if !strings.Contains(string(raw), `"stage":"diligence"`) || strings.Contains(string(raw), "PRIVATE") {
+		t.Fatalf("result = %s", raw)
+	}
+}
+
+func TestInvestorCallsFailClosedBeforeCallingTheWorker(t *testing.T) {
+	_, st := newKey(t)
+	cases := []struct {
+		name, capability, resource string
+		in                         any
+	}{
+		{"list on one investor", "investor.list", "investors/7", input.CRMInvestorList{}},
+		{"read on the collection", "investor.read", "investors", input.Empty{}},
+		{"read on a nested path", "investor.read", "investors/7/notes", input.Empty{}},
+		{"read on a lead", "investor.read", "leads/7", input.Empty{}},
+		{"list with empty input type", "investor.list", "investors", input.Empty{}},
+		{"read with list input", "investor.read", "investors/7", input.CRMInvestorList{}},
+		{"lead read with list input", "lead.read", "leads", input.CRMInvestorList{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := connectortest.NewRoutes()
+			_, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, tc.capability, tc.resource, tc.in))
+			if !errors.Is(err, connector.ErrInput) {
+				t.Fatalf("err = %v, want ErrInput", err)
+			}
+			if r.Count() != 0 {
+				t.Fatal("the Worker was called")
+			}
+		})
+	}
+}

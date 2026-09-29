@@ -16,6 +16,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/providers"
 )
 
 // MaxBytes is the largest input accepted.
@@ -100,6 +102,10 @@ type TitoEventList struct {
 	Page   int    `json:"page,omitempty"`
 }
 
+// CRMInvestorList is the crm/investor.list input. Its bounds are the
+// contract's (providers.InvestorListPayload.Validate).
+type CRMInvestorList = providers.InvestorListPayload
+
 // HTTPRequest is the http_api/http.get and http.head input. Method comes from
 // the capability, never from the input.
 type HTTPRequest struct {
@@ -119,7 +125,7 @@ var emptyInput = map[string]bool{
 	"github/repository.read": true, "github/issue.read": true, "github/pull_request.read": true,
 	"github/check.read": true, "github/workflow.read": true,
 	"tito/event.get": true, "tito/release.list": true, "tito/ticket.summary": true,
-	"crm/lead.read": true,
+	"crm/lead.read": true, "crm/investor.read": true,
 }
 
 // Decode strictly decodes a canonical input for one provider capability.
@@ -155,6 +161,12 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 			return in, nil
 		}
 		return nil, ErrInvalid
+	case "crm/investor.list":
+		var in CRMInvestorList
+		if strict(raw, &in) != nil || in.Validate() != nil {
+			return nil, ErrInvalid
+		}
+		return in, nil
 	case "http_api/http.get", "http_api/http.head":
 		var in HTTPRequest
 		if strict(raw, &in) != nil || in.Path == "" {
