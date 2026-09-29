@@ -37,7 +37,7 @@ is resolved.
 | `tito` | shared secret (path 1) | n/a | supported |
 | `crm` | shared secret (path 1), plus a service assertion signed by the runtime's installation key (D3) | n/a | supported |
 | `http_api` | shared secret (path 1) | n/a | supported: a generic governed connector with one allow-listed base URL (D4) |
-| `notion` | n/a | n/a | later (HAI-216) |
+| `notion` | shared secret (path 1): a Notion internal integration token | n/a | supported (HAI-216); OAuth is not offered |
 | `s3` | n/a | n/a | **removed**: S3 is storage, not a connector. The runtime denies it; removing the provider code and the catalog CHECK value is a separate ticket. |
 | `freshbooks`, `mercury` | n/a | n/a | not supported (present in `kei-connector-contracts`, not built) |
 
@@ -154,7 +154,8 @@ exactly one, and the runtime never falls back from one path to the other.
 
 ### Path 1: shared secret (`credential_source = opaque_ref`)
 
-Used by: `tito` (API token), `crm` (the Worker's `X-KEI-API-Key`),
+Used by: `tito` (API token), `notion` (the internal integration token),
+`crm` (the Worker's `X-KEI-API-Key`),
 `http_api` (the injected key), and Google domain-wide delegation (the
 service-account key). The runtime's CRM assertion signing key (D3) is read
 through the same store, but it belongs to the installation, not to a connector
@@ -427,6 +428,9 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | tito | `event.get` | `tito/<account>/events/<event>` | `{}` | `TitoEvent` |
 | tito | `release.list` | `tito/<account>/events/<event>/releases` | `{}` | `[TitoRelease]` |
 | tito | `ticket.summary` | `tito/<account>/events/<event>/ticket-summary` | `{}` | `{account_slug, event_slug, total, by_state, by_release}`; fails closed above 5000 tickets |
+| notion | `search` | `search` (exactly; the `search/<query>` form is refused, so the query never reaches the catalog) | `{query?: string ≤512, page_size?: 1..25 (default 10)}` | `{results: [NotionItem], has_more, next_cursor?}`; an empty query lists what the integration can see |
+| notion | `page.read` | `pages/<id>` (32 hex digits, bare or dashed) | `{}` | `NotionPage` |
+| notion | `database.query` | `databases/<id>` | `{page_size?: 1..25 (default 10)}`; filters and sorts are not accepted yet | `[NotionPage]` |
 | crm | `lead.read` | `leads`, `leads/<id>`, `customers`, `customers/<id>` | `{}` | `{records: [Lead]}` or `{record: Lead}` |
 | crm | `investor.list` (HAI-210) | `investors` | `{stage?: prospect \| contacted \| meeting \| diligence \| committed \| passed, q?: ≤200 chars, limit?: 1-100 (default 20), cursor?: ≤128 chars}`, sent to the Worker as `{"data": <input>}` | `{records: [Investor], next_cursor: string \| null, has_more}` |
 | crm | `investor.read` (HAI-210) | `investors/<id>` | `{}` | `{record: Investor}` |
@@ -444,6 +448,15 @@ Redaction per capability:
 - **Tito:** no attendee PII (names, emails, phones, answers). No capability
   lists tickets.
 - **Linear:** no descriptions or comments in `issue.read`.
+- **Notion:** titles and metadata only. A `NotionItem` is `{object: page |
+  database, id, title, url, parent_type?, parent_id?, created_at, updated_at,
+  archived}`; a `NotionPage` is the same without `object`. Property values
+  (people, emails, rich text, numbers, and so on) are dropped when the
+  provider response is decoded, and page block content is never fetched. No
+  policy attribute opts in to more yet; adding one (like
+  `gmail_include_body`) is a contract change. The runtime calls
+  `api.notion.com/v1` with `Notion-Version: 2022-06-28`, and a connector
+  whose `credential_source` is not `opaque_ref` is `descriptor_invalid`.
 - **CRM:** a Lead is `{id, company_name, contact_name, email, role, status,
   priority, source, tier, created_at, updated_at}`. Free text (`message`,
   `early_access_notes`, audit answers) is dropped even if the Worker returns
@@ -574,7 +587,9 @@ In `kei-connector-runtime`, connector code lives under `internal/connector`:
 `invoke` (the command, the catalog call, execution dispatch, and audit),
 `input` (input parsing and per-capability validation), `credentials` (the two
 credential paths), and one package per connector: `gmail`, `googledrive`,
-`linear`, `github`, `tito`, `crm` (the MarketingSite Worker client and the D3
+`linear`, `github`, `tito`, `notion` (the Notion REST backend behind the
+contract's `providers.NotionBackend` seam, since the module has only an
+in-memory one), `crm` (the MarketingSite Worker client and the D3
 assertion signing), and `httpapi` (the governed HTTP executor). Each connector
 package wraps its `kei-connector-contracts/providers` client and applies that
 connector's redaction.
@@ -676,6 +691,7 @@ authentication options and fields:
 | linear | OAuth + `account_model` ∈ {per_user, shared} | none | none |
 | github | OAuth + `account_model` ∈ {per_user, shared} | none | none |
 | tito | shared secret | `account_slug` | `api_token` |
+| notion | shared secret | none | `api_token` (the internal integration token). Not in `kei.connector-setup/v1` yet: `kei-connector-contracts` has no Notion setup schema, so the catalog cannot set a Notion connector up until one is added (follow-up) |
 | crm | shared secret | `base_url` (https, the MarketingSite origin; no userinfo, query, or fragment; host must resolve to a public address), `assertion_audience` (must equal the Worker's `KEI_SERVICE_ASSERTION_AUDIENCE`), `allowed_actions` (default `["read"]`), `allowed_resources` (default `["leads", "customers"]`; add `investors` for `investor.list`/`investor.read`, and declare those capabilities only after the Worker serves them, because the assertion carries every declared capability and the Worker rejects unknown ones) | `api_key` (≥ 32 chars, the Worker's `CRM_CONNECTOR_API_KEY`) |
 | http_api | shared secret | the existing `http_api` block: `registered_base_url` (https, one host), `allowed_methods` (`GET`/`HEAD`), `allowed_path_patterns`, `query_allowlist`, `credential_injection` (`location` header or query, `name`, optional `scheme`), `timeout_ms`, `response_max_bytes`, redirect policy, `redaction` | the injected key |
 
@@ -826,5 +842,7 @@ Settled by the user on 2026-09-28:
 | MarketingSite | `KEI_SERVICE_ASSERTION_PUBLIC_KEYS` key list or JWKS; kid → installation/tenant/workspace binding; `iss = kei-runtime:<installation_id>`; `revoked_kids`; later, approval sync for CRM writes |
 | `kei-policy-catalog` | Import `kei-connector-contracts` v0.2.0 and delete the in-tree `pkg/connectors` fork; stop allowing new `s3` connectors |
 | `kei-policy-catalog` (layer 3) | Done in HAI-241: descriptor, `account_model` column, token proxy on allow, `provider_user_id`, `reason_code`. Open: the `config` column (HAI-254) and storing `input_digest` |
+| `kei-connector-contracts` (HAI-216) | A Notion setup schema (shared secret, `api_token`); optionally move the Notion REST backend from the runtime into the module |
+| `pde-harness` (HAI-216) | `notion_search` must send `--resource search` (not `notion/workspace`) and the query as `--input '{"query": …}'`; today it passes no input |
 | Runtime setup (HAI-222) | Generate and store the per-installation assertion key; export its JWK for the Worker |
 | CLI and web UI setup | Render `kei.connector-setup/v1`; seal secret fields to the installation's credential-sync key |

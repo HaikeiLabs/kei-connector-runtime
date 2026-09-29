@@ -102,6 +102,19 @@ type TitoEventList struct {
 	Page   int    `json:"page,omitempty"`
 }
 
+// NotionSearch is the notion/search input. An empty query lists what the
+// integration can see.
+type NotionSearch struct {
+	Query    string `json:"query,omitempty"`
+	PageSize int    `json:"page_size,omitempty"`
+}
+
+// NotionDatabaseQuery is the notion/database.query input. Filters and sorts
+// are not accepted yet.
+type NotionDatabaseQuery struct {
+	PageSize int `json:"page_size,omitempty"`
+}
+
 // CRMInvestorList is the crm/investor.list input. Its bounds are the
 // contract's (providers.InvestorListPayload.Validate).
 type CRMInvestorList = providers.InvestorListPayload
@@ -126,6 +139,7 @@ var emptyInput = map[string]bool{
 	"github/check.read": true, "github/workflow.read": true,
 	"tito/event.get": true, "tito/release.list": true, "tito/ticket.summary": true,
 	"crm/lead.read": true, "crm/investor.read": true,
+	"notion/page.read": true,
 }
 
 // Decode strictly decodes a canonical input for one provider capability.
@@ -161,6 +175,18 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 			return in, nil
 		}
 		return nil, ErrInvalid
+	case "notion/search":
+		var in NotionSearch
+		if strict(raw, &in) != nil || len(in.Query) > 512 || in.PageSize < 0 || in.PageSize > 25 {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "notion/database.query":
+		var in NotionDatabaseQuery
+		if strict(raw, &in) != nil || in.PageSize < 0 || in.PageSize > 25 {
+			return nil, ErrInvalid
+		}
+		return in, nil
 	case "crm/investor.list":
 		var in CRMInvestorList
 		if strict(raw, &in) != nil || in.Validate() != nil {

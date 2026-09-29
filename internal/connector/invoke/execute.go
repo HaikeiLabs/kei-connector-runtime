@@ -31,6 +31,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/httpapi"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/linear"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/notion"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/tito"
 )
 
@@ -58,6 +59,7 @@ func (e Env) connectors() map[contract.Provider]connector.Connector {
 		contract.ProviderLinear:  linear.Connector{},
 		contract.ProviderGitHub:  github.Connector{},
 		contract.ProviderTito:    tito.Connector{},
+		contract.ProviderNotion:  notion.Connector{},
 		contract.ProviderCRM:     crm.Connector{Store: e.Store, Key: e.AssertionKey},
 		contract.ProviderHTTPAPI: httpapi.Connector{},
 	}
