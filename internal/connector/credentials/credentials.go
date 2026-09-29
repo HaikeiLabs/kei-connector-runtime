@@ -3,7 +3,9 @@
 // paths and they never mix:
 //
 //   - opaque_ref (shared secret): the connector's opaque reference is read
-//     from the tenant secret store, the same store model profiles use.
+//     from the tenant secret store, the same store model profiles use. When
+//     the control plane delivered the secret, it is read from the delivered
+//     location the descriptor names (credential_secret_ref).
 //   - oauth (user-delegated): the access token the catalog proxied in its
 //     invoke response for this call (D2). It is accepted only over TLS and
 //     before its use-by time, and is never persisted or printed.
@@ -16,6 +18,7 @@ import (
 	"context"
 	"net"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
@@ -68,6 +71,12 @@ type Request struct {
 	// Backend and Ref locate an opaque_ref secret.
 	Backend string
 	Ref     string
+	// SecretRef is the backend-qualified location of a secret the control
+	// plane delivered for this connector (HAI-262): Ref is then its stored
+	// name, which as an opaque reference cannot carry the backend's scheme,
+	// region, or vault. It must end in "/"+Ref, so it can only locate the
+	// connector's own secret.
+	SecretRef string
 	// OAuth is the token from the catalog's invoke response, if any.
 	OAuth *OAuthToken
 	// ControlPlaneURL is where OAuth came from; it must be TLS.
@@ -121,13 +130,20 @@ func (r Resolver) sharedSecret(ctx context.Context, req Request) (string, error)
 	if contract.ValidateCredentialRef(req.Ref) != nil {
 		return "", deny("credential_unavailable", "credential reference is invalid")
 	}
+	location := req.Ref
+	if req.SecretRef != "" {
+		if !strings.HasSuffix(req.SecretRef, "/"+req.Ref) {
+			return "", deny("descriptor_invalid", "delivered secret reference does not name the connector credential")
+		}
+		location = req.SecretRef
+	}
 	timeout := r.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	value, err := r.Store.Get(lookupCtx, req.Backend, req.Ref)
+	value, err := r.Store.Get(lookupCtx, req.Backend, location)
 	if err != nil {
 		if r.BackendUnavailable != nil && r.BackendUnavailable(err) {
 			return "", deny("credential_backend_unavailable", "credential backend is not available")

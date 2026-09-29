@@ -13,8 +13,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // runCredential provides credential management commands including sync.
@@ -56,6 +59,40 @@ type CredentialDelivery struct {
 	SealedPayload  string `json:"sealed_payload"`
 	RecipientKeyID string `json:"recipient_key_id"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// OperationKind, ConnectorID, and Field are additive (HAI-262). A
+	// connector_secret delivery writes one connector's secret setup field; it
+	// is written exactly like a model-profile key, to SecretRef.
+	OperationKind string `json:"operation_kind,omitempty"`
+	ConnectorID   string `json:"connector_id,omitempty"`
+	Field         string `json:"field,omitempty"`
+}
+
+// OperationKindConnectorSecret is the delivery kind for a connector secret.
+const OperationKindConnectorSecret = "connector_secret"
+
+// connectorSecretField bounds a connector secret field name.
+var connectorSecretField = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// connectorSecretRefNamesField reports whether ref is the location the
+// control plane names for this connector's field in each backend:
+// ".../connectors/<id>/<field>" (AWS), ".../<prefix>-connectors-<id>-<field
+// with - for _>" (Azure), or ".../<prefix>-connectors-<id>-<field>" (GCP). A
+// connector delivery for any other location, such as a model profile's
+// secret, is refused before anything is written.
+func connectorSecretRefNamesField(ref, connectorID, field string) bool {
+	if _, err := uuid.Parse(connectorID); err != nil || !connectorSecretField.MatchString(field) {
+		return false
+	}
+	for _, suffix := range []string{
+		"/connectors/" + connectorID + "/" + field,
+		"-connectors-" + connectorID + "-" + strings.ReplaceAll(field, "_", "-"),
+		"-connectors-" + connectorID + "-" + field,
+	} {
+		if strings.HasSuffix(ref, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // CredentialDeliveryClaimRequest is the request to claim a delivery
@@ -117,11 +154,16 @@ func isStaleGeneration(gen, active int) bool {
 type CredentialSyncOutput struct {
 	Claimed     bool   `json:"claimed"`
 	OperationID string `json:"operation_id,omitempty"`
-	Backend     string `json:"backend,omitempty"`
-	SecretName  string `json:"secret_name,omitempty"`
-	Success     bool   `json:"success"`
-	Error       string `json:"error,omitempty"` // redacted error class only
-	ProcessedAt string `json:"processed_at"`
+	// OperationKind, ConnectorID, and Field identify a connector secret
+	// delivery; they name the field, never its value.
+	OperationKind string `json:"operation_kind,omitempty"`
+	ConnectorID   string `json:"connector_id,omitempty"`
+	Field         string `json:"field,omitempty"`
+	Backend       string `json:"backend,omitempty"`
+	SecretName    string `json:"secret_name,omitempty"`
+	Success       bool   `json:"success"`
+	Error         string `json:"error,omitempty"` // redacted error class only
+	ProcessedAt   string `json:"processed_at"`
 }
 
 func runCredentialSync(args []string, stdout, stderr io.Writer, cfg Config) int {
@@ -173,7 +215,7 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg Config) int 
 	return 0
 }
 
-func performCredentialSync(ctx context.Context, cfg Config, timeout time.Duration, store SecretStore) (*CredentialSyncOutput, error) {
+func performCredentialSync(ctx context.Context, cfg Config, timeout time.Duration, store SecretStore) (out *CredentialSyncOutput, err error) {
 	client := NewCredentialDeliveryClient(cfg.RuntimeControlPlaneURL, timeout)
 
 	// Step 1: Get runtime identity to know our installation ID
@@ -205,6 +247,12 @@ func performCredentialSync(ctx context.Context, cfg Config, timeout time.Duratio
 
 	delivery := claimResp.Delivery
 	activeGeneration := claimResp.ActiveGeneration
+	// Every outcome for a connector delivery names the connector field.
+	defer func() {
+		if out != nil && delivery.OperationKind == OperationKindConnectorSecret {
+			out.OperationKind, out.ConnectorID, out.Field = delivery.OperationKind, delivery.ConnectorID, delivery.Field
+		}
+	}()
 
 	// Step 3: Decrypt the sealed payload (in memory, never log plaintext)
 	plaintext, err := decryptDeliveryPayload(delivery.SealedPayload, runtimeInstallID, delivery.RecipientKeyID, cfg.CredentialSyncKeyID, cfg.CredentialSyncPrivateKey)
@@ -234,7 +282,11 @@ func performCredentialSync(ctx context.Context, cfg Config, timeout time.Duratio
 	// reference that is actually secret material, or a delivery older than the
 	// active generation, is rejected without writing and without echoing the
 	// untrusted reference into the output.
-	if err := ValidateSecretRef(delivery.SecretBackend, delivery.SecretRef); err != nil {
+	invalidRef := ValidateSecretRef(delivery.SecretBackend, delivery.SecretRef) != nil
+	if delivery.OperationKind == OperationKindConnectorSecret && !connectorSecretRefNamesField(delivery.SecretRef, delivery.ConnectorID, delivery.Field) {
+		invalidRef = true
+	}
+	if invalidRef {
 		_ = client.AcknowledgeDelivery(ctx, cfg.RuntimeToken, CredentialDeliveryAckRequest{
 			OperationID:    delivery.OperationID,
 			RecipientID:    delivery.RecipientID,
