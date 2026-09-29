@@ -183,20 +183,46 @@ account models).
 bridge and never holds `OIDC_BRIDGE_SECRET` (ADR-020).
 
 1. The catalog finishes the whole decision first: structure, agent binding,
-   ABAC policy, and approval. Only when the final decision is `allow` does it
-   fetch a token, and only for that decision's (invoking Kei user, connector,
-   capability).
-2. The catalog calls the existing bridge relay server to server, with the
-   bridge secret, which stays in the control plane:
-   `GET /oauth/credentials/{user_id}/{provider}?tenant_id=…&workspace_id=…&subject=…`.
-   The binding comes from the account model (section 4): per-user uses
-   `user_id = subject = <invoking Kei user id>`; shared uses
-   `user_id = subject = connector:<connector_id>`. The bridge checks the
-   binding (403 on mismatch) and refreshes an expired token.
-3. The catalog returns the token in the invoke response, under
+   ABAC policy, and approval, then `setup.ValidateMetadata` over the
+   descriptor. Only when the final decision is `allow`, and only for a
+   connector with `credential_source=oauth`, does it fetch a token, for that
+   decision's (invoking Kei user, connector, capability).
+2. **TLS first.** The catalog fetches a token only for a caller that reached
+   it over TLS: `r.TLS` is set, `X-Forwarded-Proto` is `https`, or the caller
+   is loopback with no `X-Forwarded-For`. Otherwise it denies
+   `insecure_transport` before calling the bridge.
+3. **Who the token belongs to.** The binding comes from the account model
+   (section 4):
+   - **per-user:** `user_id = subject = <invoking Kei user id>`. The invoking
+     subject must be a Kei user id that is a member of the connector's
+     workspace. Otherwise the catalog denies `policy_deny` and never calls the
+     bridge. Agent ids and email-address subjects never fetch a token.
+   - **shared:** `user_id = subject = connector:<connector_id>`.
+   - **legacy oauth** (no account model): the connector's declared subject.
+4. The catalog calls the existing bridge relay server to server, with the
+   bridge secret (`OIDC_BRIDGE_SECRET`), which stays in the control plane:
+   `GET {OIDC_BRIDGE_URL}/oauth/credentials/{user_id}/{provider}?tenant_id=…&workspace_id=…&subject=…`.
+   The bridge checks the binding (403 on mismatch) and refreshes an expired
+   token.
+5. **The catalog checks the bridge's answer too.** It rejects a relay
+   response whose echoed `tenant_id`, `workspace_id`, or `subject` differs
+   from the binding it asked for (`oauth_binding_mismatch`). A legacy
+   *unbound* bridge row echoes an empty binding, so it also denies
+   `oauth_binding_mismatch`. There is no legacy fallback: per-user rows must be
+   connected with a binding whose subject is the Kei user id.
+6. The catalog returns the token in the invoke response, under
    `oauth: {access_token, token_type, expires_at, account_email_digest?}`
    (section 11).
-4. The runtime uses the token for this one provider call and then drops it.
+7. The runtime uses the token for this one provider call and then drops it.
+
+**Scope of the token.** The catalog fetches it per call, after the (user,
+connector, capability) decision, and the runtime may use it for at most 60
+seconds. It is still the user's **provider-wide grant**: a Gmail token carries
+the full `gmail.readonly` scope the user consented to, not a token narrowed to
+this capability or resource. The bridge cannot mint narrower tokens.
+Narrowing happens around the token: the catalog's decision, the runtime's
+fixed capability-to-endpoint mapping, and the redaction in each connector
+package.
 
 Requirements (layer 3 and layer 2 each test them):
 
@@ -212,26 +238,30 @@ Requirements (layer 3 and layer 2 each test them):
   not log the response.
 - **Never in audit:** audit records carry `account_email_digest` and the
   credential subject, never the token.
-- **TLS only:** the catalog sets `Cache-Control: no-store`. The runtime
-  refuses an `oauth` block received over plain HTTP
-  (`insecure_transport`), unless the control-plane host is loopback (for
-  local tests). This means local compose (`host.docker.internal` over http)
-  cannot run OAuth connectors.
+- **TLS only, enforced on both sides:** the catalog refuses to fetch a token
+  for a non-TLS caller (step 2) and sets `Cache-Control: no-store` on every
+  invoke response. The runtime refuses an `oauth` block it received over
+  plain HTTP, unless the control-plane host is loopback (for local tests).
+  Both deny `insecure_transport`. This means local compose
+  (`host.docker.internal` over http) cannot run OAuth connectors.
 - **Only on a matching allow:** a deny response never carries `oauth`. The
   runtime checks that `oauth` is present exactly when the descriptor says
   `credential_source=oauth`, and that the descriptor's connector and
   capability equal the request's; any mismatch is `descriptor_invalid`.
 - **Bridge failures become catalog denies** (section 7): bridge 404 →
-  `oauth_not_connected`, 409 → `oauth_reconnect_required`, 403 →
-  `oauth_binding_mismatch`, unreachable or 5xx → `oauth_bridge_unavailable`.
-  None of them falls back to another credential.
+  `oauth_not_connected`; 409 → `oauth_reconnect_required`; 403, or an echoed
+  binding that doesn't match → `oauth_binding_mismatch`; unreachable, 5xx,
+  401, a malformed relay response, or a catalog without `OIDC_BRIDGE_URL`/
+  `OIDC_BRIDGE_SECRET` → `oauth_bridge_unavailable`. None of them falls back
+  to another credential.
 
-ADR-011 note: the OAuth access token transits the control plane **in memory
-only**. That means bridge → catalog → runtime, for one allowed call. It is
-never stored, logged, or audited on the way, and refresh tokens never leave
-the bridge. This amends this contract's earlier statement that the token
-never transits the catalog. Shared-secret values (path 1) still never enter
-the control plane.
+ADR-011 note: the OAuth access token moves bridge → catalog → runtime **in
+memory**, for one allowed call. The catalog fetches it only after the final
+allow, only for `credential_source=oauth`, and only for a TLS caller, and it
+never stores, logs, or audits it. The runtime uses it for one provider call.
+Refresh tokens never leave the bridge. Shared-secret values (path 1) never
+enter the control plane. This amends this contract's earlier statement that
+the token never transits the catalog.
 
 ## 4. OAuth account models
 
@@ -252,7 +282,9 @@ of the **invoking** Kei user.
   same chain applies to Discord and Teams, with their own platform ids.
 - **Binding in the bridge:** the token row `(user_id = kei_user_id, provider)`,
   bound to `tenant_id`, `workspace_id`, and `subject = kei_user_id`, with
-  `credential_source = oauth`.
+  `credential_source = oauth`. The binding is required: the catalog denies a
+  legacy unbound row with `oauth_binding_mismatch` (section 3, step 5), so a
+  user connected before bindings existed must reconnect.
 - **How the token is fetched:** the runtime sends only the chat identity
   (`--provider-user`) or `--user`. The catalog resolves the invoking Kei user,
   then fetches that user's row from the bridge (path 2, step 2). The harness
@@ -396,7 +428,7 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | tito | `release.list` | `tito/<account>/events/<event>/releases` | `{}` | `[TitoRelease]` |
 | tito | `ticket.summary` | `tito/<account>/events/<event>/ticket-summary` | `{}` | `{account_slug, event_slug, total, by_state, by_release}`; fails closed above 5000 tickets |
 | crm | `lead.read` | `leads`, `leads/<id>`, `customers`, `customers/<id>` | `{}` | `{records: [Lead]}` or `{record: Lead}` |
-| http_api | `http.get`, `http.head` | the request path | `{path: string (relative, must match allowed_path_patterns), query?: {name: [values]} (names must be in query_allowlist)}` | `{status_code, headers, body}`, with headers and JSON fields redacted per the connector's `redaction` rules and the body capped at `response_max_bytes` |
+| http_api | `http.get`, `http.head` | the exact request path, e.g. `/contacts/1` (no query) | `{path: string (must equal the resource exactly), query?: {name: [values]} (names must be in query_allowlist)}` | `{status_code, headers, body}`, with headers and JSON fields redacted per the connector's `redaction` rules and the body capped at `response_max_bytes` |
 
 Redaction per capability:
 
@@ -415,7 +447,8 @@ Redaction per capability:
   `early_access_notes`, audit answers) is dropped even if the Worker returns
   it.
 
-`http_api` (D4) is the existing `ExecuteHTTP` path (`http_runtime.go`): one
+`http_api` (D4) is the existing `ExecuteHTTP` path
+(`internal/connector/httpapi`): one
 allow-listed base URL per connector, a shared-secret key injected into the
 configured header or query parameter, SSRF checks on the resolved addresses,
 a same-host redirect policy, a timeout, and a response-size limit. It returns
@@ -423,6 +456,17 @@ redacted bytes rather than a typed struct, so it is the one capability whose
 result is not re-encoded. The connector's `redaction` rules are its
 allowlist. MarketingSite's `/api/leads` (key only) is reached through
 `http_api`, not through `crm`.
+
+**The http_api resource is the request.** Its resource is the exact request
+path, with no query string, and that is what policy authorizes. The catalog
+checks the resource against the connector's `allowed_path_patterns`. The
+runtime then requires `input.path == resource` exactly, before any
+credential is fetched. Both must be a plain absolute path: a leading `/`, no
+`?`, `#`, or backslash, no `.` or `..` segment, no percent-encoded dot,
+slash, or backslash, and no scheme or host. Nothing is normalized, and any
+difference denies `input_invalid`. Without this, an allow for `/contacts/1`
+could be used to read `/contacts/999` (HAI-256). Query parameters travel
+separately in `input.query` and are limited to `query_allowlist`.
 
 ### CRM service assertion (D3: signed by the runtime)
 
@@ -533,34 +577,39 @@ connector's redaction.
 
 ## 7. Errors and fail-closed rules
 
-Every row denies (exit 1) and returns no result data.
+Every row denies (exit 1) and returns no result data. "Catalog" codes arrive
+in the invoke response's `reason_code` and the runtime passes them through
+unchanged. "Runtime" codes are decided locally. A catalog deny without a
+`reason_code` (an older catalog) is classified by the runtime as
+`enrollment_required` when it carries `enrollment`, `approval_required` when
+its reason is "approval required", and `policy_deny` otherwise.
 
-| reason_code | When |
-| --- | --- |
-| `input_invalid` | Input fails the capability schema, is over 16 KiB, or is not JSON |
-| `catalog_unavailable` | The catalog is unreachable, returns non-200, or returns a malformed body |
-| `policy_deny` | The catalog denies (binding, policy, structure); the catalog's `reason` is passed through |
-| `approval_required` | Non-read capability without a valid, unconsumed approval |
-| `enrollment_required` | The chat identity is not linked; carries `enrollment` |
-| `descriptor_invalid` | An allow without a connector descriptor, or a descriptor that fails `Metadata.Validate`, or a provider/capability mismatch with the request |
-| `provider_not_supported` | Provider not in section 1 |
-| `credential_backend_unavailable` | The backend is not registered in this runtime (e.g. GCP today) |
-| `credential_unavailable` | Secret missing, empty, or unreadable (path 1); the reference is never echoed |
-| `oauth_not_connected` | The catalog got a bridge 404: no token row for the binding |
-| `oauth_reconnect_required` | The catalog got a bridge 409: refresh failed, or the token expired with no refresh token (row deleted) |
-| `oauth_binding_mismatch` | The catalog got a bridge 403: the row is bound to another tenant, workspace, or subject |
-| `oauth_bridge_unavailable` | The bridge is unreachable or returns 5xx. This is **not** mapped to enrollment, unlike the legacy `authorize` path. |
-| `oauth_token_expired` | The `oauth` block is past `expires_at` when the runtime would use it |
-| `insecure_transport` | An `oauth` block arrived over non-TLS HTTP to a non-loopback host |
-| `assertion_key_unavailable` | A `crm` call with no installation signing key configured, or the key failed to load or parse |
-| `provider_denied` | Provider 401 or 403 |
-| `provider_not_found` | Provider 404 |
-| `provider_rate_limited` | Provider 429 |
-| `provider_error` | Other provider failure; only the status class is recorded |
-| `provider_timeout` | Provider deadline exceeded |
-| `result_too_large` | Raw provider response over 4 MiB, or redacted result over 1 MiB |
-| `capability_not_supported` | The capability's action is not `read`. Writes are a later layer (section 10). |
-| `account_model_not_supported` | `domain_delegation`: the account model is defined but not executed yet (follow-up) |
+| reason_code | Emitted by | When |
+| --- | --- | --- |
+| `input_invalid` | runtime | Input fails the capability schema, is over 16 KiB, or is not JSON |
+| `catalog_unavailable` | runtime | The catalog is unreachable, returns non-200, or returns a malformed body |
+| `policy_deny` | catalog | Structure, agent binding, or ABAC policy denies; or a per-user invoking subject is not a Kei user in the connector's workspace (no bridge call) |
+| `approval_required` | catalog | A permit policy requires an approval the call did not present |
+| `enrollment_required` | catalog | The chat identity is not linked (the catalog answers `decision: "enrollment_required"`); carries `enrollment` |
+| `descriptor_invalid` | both | Catalog: the descriptor fails `setup.ValidateMetadata`. Runtime: an allow without a descriptor or envelope, a descriptor that doesn't match the request or fails `setup.ValidateMetadata`, an `oauth` block on a non-OAuth connector (or none on an OAuth one), or a connector config the connector needs is missing (for example crm without `base_url`) |
+| `insecure_transport` | both | Catalog: the caller is not TLS, so no token is fetched. Runtime: an `oauth` block arrived over plain HTTP from a non-loopback host |
+| `oauth_not_connected` | catalog | Bridge 404: no token row for the binding |
+| `oauth_reconnect_required` | catalog | Bridge 409: refresh failed, or the token expired with no refresh token (row deleted) |
+| `oauth_binding_mismatch` | catalog | Bridge 403, or the relay echoed a different tenant, workspace, or subject, including a legacy unbound row |
+| `oauth_bridge_unavailable` | catalog | Bridge unreachable, 5xx, 401, a malformed relay response, or the catalog has no bridge configured. This is **not** mapped to enrollment, unlike the legacy `authorize` path. |
+| `oauth_token_expired` | runtime | The `oauth` block is past `expires_at` when the runtime would use it |
+| `provider_not_supported` | runtime | Provider not in section 1 |
+| `capability_not_supported` | runtime | The capability's action is not `read`. Writes are a later layer (section 10). |
+| `account_model_not_supported` | runtime | `domain_delegation`: the account model is defined but not executed yet (follow-up) |
+| `credential_backend_unavailable` | runtime | No backend in the descriptor (the org has no active credential store), or the backend is not registered in this runtime (e.g. GCP today) |
+| `credential_unavailable` | runtime | Secret missing, empty, or unreadable (path 1); the reference is never echoed |
+| `assertion_key_unavailable` | runtime | A `crm` call with no installation signing key configured, or the key failed to load or parse |
+| `provider_denied` | runtime | Provider 401 or 403 |
+| `provider_not_found` | runtime | Provider 404 |
+| `provider_rate_limited` | runtime | Provider 429 |
+| `provider_error` | runtime | Other provider failure; only the status class is recorded |
+| `provider_timeout` | runtime | Provider deadline exceeded |
+| `result_too_large` | runtime | Raw provider response over 4 MiB, or redacted result over 1 MiB |
 
 Timeouts, all inside the `--timeout` budget (default 30s): catalog 10s,
 credential resolution 5s, provider 15s. Reads are not retried in layer 2, and
@@ -671,55 +720,79 @@ Writes are approval-gated and not implemented in layer 2: Linear
   approval into the Worker's store. It is tracked as a follow-up, not decided
   here.
 
-## 11. Catalog changes (layer 3)
+## 11. Catalog changes (layer 3, HAI-241)
 
-The invoke allow response gains a non-secret `connector` descriptor. The
-current handler comment says "the caller already holds the connector's
-credential reference", which is not true for a tenant runtime.
+`POST /api/v1/data-connectors/invoke` in `kei-policy-catalog` implements this
+as follows. It uses the `kei-connector-contracts` v0.2.0 `contract.Metadata`
+and `envelope.Envelope` types.
+
+**Request** gains two fields:
+- `provider_user_id`: the chat identity on the harness key's platform,
+  resolved through `web.chat_identities` to the Kei user, who becomes the
+  invoking subject. An unlinked identity gets `enrollment_required`. Combining
+  it with a different `invoking_subject` or `user_id` is a 400.
+- `input_digest`: accepted, but not stored yet.
+
+**Allow** (every invoke response carries `Cache-Control: no-store`):
 
 ```jsonc
 {
   "decision": "allow",
-  "capability": { … }, "envelope": { … }, "audit_record": { … },
-  "connector": {
-    "id": "…", "provider": "gmail", "status": "active",
-    "credential_source": "oauth", "account_model": "per_user",
-    "credential_ref": "…",           // opaque_ref only
-    "credential_backend": "aws-secrets-manager", // opaque_ref only
-    "config": { "include_body": false },
-    "policy": { "gmail_include_body": false }
+  "capability": { … }, "envelope": { … }, "audit_record": { … }, // audit never carries the token
+  "connector": {                  // contract.Metadata v0.2.0 + credential_backend
+    "id": "…", "tenant_id": "…", "workspace_id": "…", "name": "gmail",
+    "provider": "gmail", "status": "active",
+    "credential_ref": "…", "scopes": ["…"], "resources": ["…"],
+    "policy": { "allowed_actions": ["read"], "allowed_resources": ["…"], "destructive_enabled": false },
+    "capabilities": [{ "name": "message.search", "action": "read", "description": "" }],
+    "created_by": "…", "created_at": "…", "updated_at": "…",
+    "credential_source": "oauth",
+    "account_model": "per_user",               // omitted when unset
+    "subject": "…",                            // omitted when empty
+    "credential_backend": "aws-secrets-manager" // opaque_ref only
   },
-  "credential_subject": "<kei user id> | connector:<id>",
-  "oauth": {                        // allow + credential_source=oauth only
+  "credential_subject": "<kei user id> | connector:<id> | <declared subject>",
+  "oauth": {                        // credential_source=oauth only
     "access_token": "…",
     "token_type": "Bearer",
-    "expires_at": "2026-09-28T20:00:00Z",   // use-by, ≤ now + 60s
-    "account_email_digest": "hmac-sha256:…" // when the bridge supplies it
+    "expires_at": "2026-09-28T20:00:00Z",   // min(provider expiry, now + 60s)
+    "account_email_digest": "hmac-sha256:…" // passed through from the bridge (HAI-242), when present
   }
 }
 ```
 
-The `connector` descriptor is the connector's full non-secret metadata (the
-`kei-connector-contracts` `contract.Metadata` shape, including `name`,
-`scopes`, `capabilities`, `policy`, `config`, and `created_by`) plus
-`credential_backend`, because the provider clients re-run `ValidateCall` over
-it. The runtime validates it with `setup.ValidateMetadata`.
+- `connector` is the connector's non-secret `contract.Metadata`, plus
+  `credential_backend`. The provider clients re-run `ValidateCall` over it,
+  and both the catalog (before allowing) and the runtime validate it with
+  `setup.ValidateMetadata`.
+- `credential_backend` is the org's **active** credential store backend, sent
+  for `opaque_ref` connectors only. It is absent when the org has no active
+  store, and the runtime then denies `credential_backend_unavailable`.
+- `credential_subject` is `contract.CredentialSubject(meta, invocation)`.
+- An allow for an `opaque_ref` connector carries no `oauth`, and the bridge
+  is never called.
 
-A deny response gains `reason_code` (section 7) and never carries `oauth`.
-The invoke handler sets `Cache-Control: no-store` and never logs the
-response body. The token is not copied into `envelope`, `audit_record`, or
-`audit_records`.
+**Deny:** `{"decision": "deny", "reason", "reason_code", "envelope",
+"audit_record"}`, with no `connector`, `credential_subject`, or `oauth`.
+**Enrollment:** `{"decision": "enrollment_required", "reason",
+"reason_code": "enrollment_required", "enrollment": {…}}`, with no envelope and
+no token. The runtime treats every decision other than `allow` as a deny and
+passes `reason_code` and `enrollment` through. The reason codes are in section
+7.
 
-The request gains `provider_user_id` (chat identity; resolved to the Kei user
-through `chat_identities`, with `enrollment_required` when unlinked, as
-`authorize` does) and `input_digest`. Descriptor field names avoid the
-substring `secret` because of the API redaction guard.
+**Catalog configuration:** `OIDC_BRIDGE_URL` and `OIDC_BRIDGE_SECRET` (the
+`kei` Helm chart must supply both). With either unset, every OAuth invoke
+denies `oauth_bridge_unavailable`.
 
-The catalog reads the bridge relay with the bridge secret, which already
-exists in the control plane, so no new bridge endpoint is needed. The bridge
-changes (the `account_email` column and digest, the per-user and shared row
-keys, and the `connector_provider` state fix) are a separate `kei` stack.
-Layer 2 runs against a fake catalog until layer 3 lands.
+**Known gap: `config` is not sent yet.** `abac.data_connectors` has no `config`
+column, so the descriptor never carries `Metadata.Config`. Connectors that
+need config deny until that lands. In particular, every `crm` allow currently
+hits `connector.ErrConfig` (no `base_url` or `assertion_audience`) and denies
+`descriptor_invalid`. Tracked in HAI-254.
+
+The bridge changes (the `account_email` column and digest, and the
+`connector_provider` state fix) are a separate `kei` stack (HAI-242,
+HAI-244).
 
 ## Decisions
 
@@ -748,6 +821,6 @@ Settled by the user on 2026-09-28:
 | `kei` (oidc-bridge) | `account_email` column (field-encrypted) populated at connect; per-tenant HMAC digest on the relay response; shared-model rows keyed `connector:<id>`; widen the unique key to `(user_id, provider, tenant_id, workspace_id)`; persist `connector_provider` in `oauth_states` (Gmail callback bug) |
 | MarketingSite | `KEI_SERVICE_ASSERTION_PUBLIC_KEYS` key list or JWKS; kid → installation/tenant/workspace binding; `iss = kei-runtime:<installation_id>`; `revoked_kids`; later, approval sync for CRM writes |
 | `kei-policy-catalog` | Import `kei-connector-contracts` v0.2.0 and delete the in-tree `pkg/connectors` fork; stop allowing new `s3` connectors |
-| `kei-policy-catalog` (layer 3) | Connector descriptor, `account_model`/`config` columns, token proxy on allow, `provider_user_id`, `input_digest`, `reason_code` |
+| `kei-policy-catalog` (layer 3) | Done in HAI-241: descriptor, `account_model` column, token proxy on allow, `provider_user_id`, `reason_code`. Open: the `config` column (HAI-254) and storing `input_digest` |
 | Runtime setup (HAI-222) | Generate and store the per-installation assertion key; export its JWK for the Worker |
 | CLI and web UI setup | Render `kei.connector-setup/v1`; seal secret fields to the installation's credential-sync key |
