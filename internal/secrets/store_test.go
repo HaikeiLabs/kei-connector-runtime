@@ -1,4 +1,4 @@
-package connectorruntime
+package secrets
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// fakeBackend is a SecretStore that records calls and returns canned values.
+// fakeBackend is a Store that records calls and returns canned values.
 // It is shared with the redaction tests.
 type fakeBackend struct {
 	value     string
@@ -44,10 +44,10 @@ func (f *fakeBackend) Validate(ctx context.Context, backend, ref string) error {
 func TestCompositeStoreValidatesRefBeforeBackendIO(t *testing.T) {
 	fake := &fakeBackend{value: "the-secret"}
 	reg := NewBackendRegistry()
-	reg.Register("aws-secrets-manager", func() (SecretStore, error) { return fake, nil })
-	store, err := NewSecretStoreFromRegistry(reg)
+	reg.Register("aws-secrets-manager", func() (Store, error) { return fake, nil })
+	store, err := NewStoreFromRegistry(reg)
 	if err != nil {
-		t.Fatalf("NewSecretStoreFromRegistry: %v", err)
+		t.Fatalf("NewStoreFromRegistry: %v", err)
 	}
 	if _, err := store.Get(context.Background(), "aws-secrets-manager", "aws-secrets-manager://us-east-1/123/github-token"); err != nil {
 		t.Fatalf("Get(valid ref): %v", err)
@@ -58,11 +58,11 @@ func TestCompositeStoreValidatesRefBeforeBackendIO(t *testing.T) {
 
 	fake2 := &fakeBackend{}
 	reg2 := NewBackendRegistry()
-	reg2.Register("aws-secrets-manager", func() (SecretStore, error) { return fake2, nil })
-	store2, _ := NewSecretStoreFromRegistry(reg2)
+	reg2.Register("aws-secrets-manager", func() (Store, error) { return fake2, nil })
+	store2, _ := NewStoreFromRegistry(reg2)
 	_, err = store2.Get(context.Background(), "aws-secrets-manager", "ghp_"+strings.Repeat("a", 36))
-	if !errors.Is(err, ErrSecretRefMaterial) {
-		t.Fatalf("Get(material ref) = %v, want ErrSecretRefMaterial", err)
+	if !errors.Is(err, ErrRefMaterial) {
+		t.Fatalf("Get(material ref) = %v, want ErrRefMaterial", err)
 	}
 	if fake2.getCalled {
 		t.Fatal("backend Get was called for an inline-material reference")
@@ -72,24 +72,24 @@ func TestCompositeStoreValidatesRefBeforeBackendIO(t *testing.T) {
 func TestCompositeStoreUnknownBackend(t *testing.T) {
 	fake := &fakeBackend{}
 	reg := NewBackendRegistry()
-	reg.Register("aws-secrets-manager", func() (SecretStore, error) { return fake, nil })
-	store, _ := NewSecretStoreFromRegistry(reg)
+	reg.Register("aws-secrets-manager", func() (Store, error) { return fake, nil })
+	store, _ := NewStoreFromRegistry(reg)
 	// "vault" is a known backend name (passes reference validation) but is not
 	// registered, so resolution fails closed without touching a backend.
 	_, err := store.Get(context.Background(), "vault", "secret/kei/x")
-	if !errors.Is(err, errSecretStore) {
-		t.Fatalf("Get(unregistered backend) = %v, want errSecretStore", err)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get(unregistered backend) = %v, want ErrUnavailable", err)
 	}
 }
 
 func TestRegistryLazyConstruction(t *testing.T) {
 	calls := 0
 	reg := NewBackendRegistry()
-	reg.Register("aws-secrets-manager", func() (SecretStore, error) {
+	reg.Register("aws-secrets-manager", func() (Store, error) {
 		calls++
 		return &fakeBackend{}, nil
 	})
-	store, _ := NewSecretStoreFromRegistry(reg)
+	store, _ := NewStoreFromRegistry(reg)
 	if calls != 0 {
 		t.Fatalf("backend constructed eagerly: calls=%d", calls)
 	}
@@ -104,14 +104,14 @@ func TestRegistryLazyConstruction(t *testing.T) {
 func TestRegistryMemoizesFailureAndRedactsDetail(t *testing.T) {
 	calls := 0
 	reg := NewBackendRegistry()
-	reg.Register("aws-secrets-manager", func() (SecretStore, error) {
+	reg.Register("aws-secrets-manager", func() (Store, error) {
 		calls++
 		return nil, errors.New("boom: /etc/secret-credentials")
 	})
-	store, _ := NewSecretStoreFromRegistry(reg)
+	store, _ := NewStoreFromRegistry(reg)
 	_, err := store.Get(context.Background(), "aws-secrets-manager", "aws-secrets-manager:///x")
-	if !errors.Is(err, errSecretStore) {
-		t.Fatalf("Get = %v, want errSecretStore", err)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get = %v, want ErrUnavailable", err)
 	}
 	if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "/etc/secret-credentials") {
 		t.Fatalf("factory error detail leaked: %v", err)
@@ -123,22 +123,22 @@ func TestRegistryMemoizesFailureAndRedactsDetail(t *testing.T) {
 }
 
 func TestNewSecretStoreDefaultRegistryIsLazy(t *testing.T) {
-	// NewSecretStore must not fail (or construct backends) just because an
+	// NewStore must not fail (or construct backends) just because an
 	// unused backend's cloud credentials are absent in this environment.
-	store, err := NewSecretStore()
+	store, err := NewStore()
 	if err != nil {
-		t.Fatalf("NewSecretStore: %v", err)
+		t.Fatalf("NewStore: %v", err)
 	}
 	if store == nil {
-		t.Fatal("NewSecretStore returned nil")
+		t.Fatal("NewStore returned nil")
 	}
 }
 
 func TestNewSecretStoreFromEmptyRegistry(t *testing.T) {
-	if _, err := NewSecretStoreFromRegistry(NewBackendRegistry()); !errors.Is(err, errSecretStore) {
-		t.Fatalf("empty registry = %v, want errSecretStore", err)
+	if _, err := NewStoreFromRegistry(NewBackendRegistry()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("empty registry = %v, want ErrUnavailable", err)
 	}
-	if _, err := NewSecretStoreFromRegistry(nil); !errors.Is(err, errSecretStore) {
-		t.Fatalf("nil registry = %v, want errSecretStore", err)
+	if _, err := NewStoreFromRegistry(nil); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil registry = %v, want ErrUnavailable", err)
 	}
 }

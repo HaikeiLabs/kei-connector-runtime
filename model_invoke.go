@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 )
 
 // ModelInvokeRequest is the input from Pedro
@@ -137,7 +139,7 @@ func getModelProfileAPIKey(profile *ModelProfile) (string, error) {
 	}
 
 	// Create secret store (uses workload identity)
-	store, err := NewSecretStore()
+	store, err := secrets.NewStore()
 	if err != nil {
 		return "", fmt.Errorf("failed to create secret store: %w", err)
 	}

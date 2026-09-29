@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 )
 
 // runModelProfile resolves a runtime model profile and, when applicable,
@@ -59,7 +61,7 @@ func runModelProfile(args []string) int {
 		APIKey string `json:"api_key,omitempty"`
 	}{ModelProfile: profile}
 	if profile.AuthType == "api_key" {
-		store, storeErr := NewSecretStore()
+		store, storeErr := secrets.NewStore()
 		if storeErr != nil {
 			fmt.Fprintf(os.Stderr, "model profile credential store unavailable: %v\n", storeErr)
 			return 1

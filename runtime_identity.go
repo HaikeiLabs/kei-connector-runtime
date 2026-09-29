@@ -3,8 +3,6 @@ package connectorruntime
 import (
 	"bytes"
 	"context"
-	"crypto/ecdh"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -182,21 +180,6 @@ func (c *runtimeClient) RegisterCredentialSyncKey(ctx context.Context, token, st
 		return fmt.Errorf("credential sync key registration returned %d", response.StatusCode)
 	}
 	return nil
-}
-
-func credentialSyncPublicKey(encodedPrivateKey string) (string, error) {
-	privateBytes, err := base64.RawStdEncoding.DecodeString(encodedPrivateKey)
-	if err != nil {
-		privateBytes, err = base64.StdEncoding.DecodeString(encodedPrivateKey)
-	}
-	if err != nil || len(privateBytes) != 32 {
-		return "", errors.New("invalid credential sync private key")
-	}
-	key, err := ecdh.X25519().NewPrivateKey(privateBytes)
-	if err != nil {
-		return "", errors.New("invalid credential sync private key")
-	}
-	return base64.RawStdEncoding.EncodeToString(key.PublicKey().Bytes()), nil
 }
 
 // bootstrapRuntime proves the runtime credential resolves to an installation
