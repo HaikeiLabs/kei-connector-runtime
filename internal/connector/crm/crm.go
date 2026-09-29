@@ -2,8 +2,9 @@
 // governed endpoint, POST <base_url>/api/crm/v1/invoke (contract section 5,
 // HAI-221). Each call carries the connector's API key (shared secret) and a
 // service assertion the runtime signs with its installation key (D3).
-// Results are projected to a fixed Lead allowlist, so free text the Worker
-// returns never leaves the runtime.
+// It executes lead.read, investor.list and investor.read (HAI-210). Results
+// are projected to a fixed Lead or Investor allowlist, so free text the
+// Worker returns never leaves the runtime.
 package crm
 
 import (
@@ -14,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -29,6 +31,44 @@ const invokePath = "/api/crm/v1/invoke"
 
 // leadFields is the Lead allowlist returned to the harness.
 var leadFields = []string{"id", "company_name", "contact_name", "email", "role", "status", "priority", "source", "tier", "created_at", "updated_at"}
+
+// investorFields is the Investor allowlist returned to the harness.
+var investorFields = []string{"id", "name", "firm", "email", "stage", "created_at", "updated_at"}
+
+var investorResource = regexp.MustCompile(`^investors/[^/]+$`)
+
+// request is one checked crm read: the body sent to the Worker and the
+// allowlist its records are projected to.
+type request struct {
+	body   []byte
+	fields []string
+}
+
+// requestFor checks the input type and resource against the capability.
+// Empty inputs send {}; investor.list sends its input as the body's data
+// (contract section 5).
+func requestFor(inv contract.Invocation, in any) (request, error) {
+	_, empty := in.(input.Empty)
+	switch inv.Capability {
+	case "lead.read":
+		if empty {
+			return request{body: []byte("{}"), fields: leadFields}, nil
+		}
+	case "investor.read":
+		if empty && investorResource.MatchString(inv.Resource) {
+			return request{body: []byte("{}"), fields: investorFields}, nil
+		}
+	case "investor.list":
+		if list, ok := in.(input.CRMInvestorList); ok && inv.Resource == "investors" {
+			body, err := json.Marshal(map[string]any{"data": list})
+			if err != nil {
+				return request{}, connector.ErrInput
+			}
+			return request{body: body, fields: investorFields}, nil
+		}
+	}
+	return request{}, connector.ErrInput
+}
 
 // Connector executes crm reads. Store and Key locate the installation's
 // assertion signing key.
@@ -77,8 +117,9 @@ func stringList(value any, fallback []string) []string {
 
 // Execute runs one crm read.
 func (c Connector) Execute(ctx context.Context, call connector.Call) (any, error) {
-	if _, ok := call.Input.(input.Empty); !ok || call.Invocation.Capability != "lead.read" {
-		return nil, connector.ErrInput
+	req, err := requestFor(call.Invocation, call.Input)
+	if err != nil {
+		return nil, err
 	}
 	cfg, err := configFrom(call.Meta)
 	if err != nil {
@@ -99,7 +140,7 @@ func (c Connector) Execute(ctx context.Context, call connector.Call) (any, error
 	if err != nil {
 		return nil, ErrAssertionKey
 	}
-	return invoke(ctx, call.HTTPClient, cfg, call.Credential, assertion)
+	return invoke(ctx, call.HTTPClient, cfg, call.Credential, assertion, req)
 }
 
 // claims maps the catalog-minted envelope and descriptor onto the Worker's
@@ -130,10 +171,10 @@ func claims(s *signer, cfg config, meta contract.Metadata, inv contract.Invocati
 	return out
 }
 
-func invoke(ctx context.Context, client *http.Client, cfg config, apiKey, assertion string) (any, error) {
+func invoke(ctx context.Context, client *http.Client, cfg config, apiKey, assertion string, r request) (any, error) {
 	endpoint := *cfg.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + invokePath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(r.body))
 	if err != nil {
 		return nil, errors.New("build CRM request failed")
 	}
@@ -157,26 +198,33 @@ func invoke(ctx context.Context, client *http.Client, cfg config, apiKey, assert
 	var out struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Records []map[string]any `json:"records"`
-			Record  map[string]any   `json:"record"`
+			Records    []map[string]any `json:"records"`
+			Record     map[string]any   `json:"record"`
+			NextCursor *string          `json:"next_cursor"`
+			HasMore    *bool            `json:"has_more"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil || !out.Success {
 		return nil, errors.New("CRM response was not successful")
 	}
 	if out.Data.Record != nil {
-		return map[string]any{"record": project(out.Data.Record)}, nil
+		return map[string]any{"record": project(out.Data.Record, r.fields)}, nil
 	}
 	records := make([]map[string]any, 0, len(out.Data.Records))
-	for _, r := range out.Data.Records {
-		records = append(records, project(r))
+	for _, rec := range out.Data.Records {
+		records = append(records, project(rec, r.fields))
 	}
-	return map[string]any{"records": records}, nil
+	result := map[string]any{"records": records}
+	// Paged lists (investor.list) carry their page state.
+	if out.Data.HasMore != nil {
+		result["has_more"], result["next_cursor"] = *out.Data.HasMore, out.Data.NextCursor
+	}
+	return result, nil
 }
 
-func project(in map[string]any) map[string]any {
-	out := make(map[string]any, len(leadFields))
-	for _, f := range leadFields {
+func project(in map[string]any, fields []string) map[string]any {
+	out := make(map[string]any, len(fields))
+	for _, f := range fields {
 		if v, ok := in[f]; ok {
 			out[f] = v
 		}

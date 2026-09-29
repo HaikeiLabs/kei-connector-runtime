@@ -91,7 +91,7 @@ func TestDecodeReturnsTypedInputs(t *testing.T) {
 	}
 	for _, key := range [][2]string{
 		{"linear", "issue.read"}, {"linear", "team.read"}, {"github", "repository.read"}, {"github", "workflow.read"},
-		{"google_drive", "docs.read"}, {"tito", "ticket.summary"}, {"crm", "lead.read"},
+		{"google_drive", "docs.read"}, {"tito", "ticket.summary"}, {"crm", "lead.read"}, {"crm", "investor.read"},
 	} {
 		if got, err := Decode(key[0], key[1], []byte(`{}`)); err != nil || got != (Empty{}) {
 			t.Errorf("%s/%s = %#v, %v", key[0], key[1], got, err)
@@ -114,11 +114,31 @@ func TestDecodeRejectsInvalidInput(t *testing.T) {
 		{"http_api", "http.get", `{"path":"/x","method":"POST"}`},
 		{"linear", "issue.read", `{"id":"ENG-1"}`},
 		{"crm", "lead.create", `{"data":{}}`},
+		{"crm", "investor.read", `{"investor_id":"7"}`},
+		{"crm", "investor.list", `{"stage":"won"}`},
+		{"crm", "investor.list", `{"q":"` + strings.Repeat("q", 201) + `"}`},
+		{"crm", "investor.list", `{"limit":101}`},
+		{"crm", "investor.list", `{"limit":-1}`},
+		{"crm", "investor.list", `{"limit":"5"}`},
+		{"crm", "investor.list", `{"cursor":"` + strings.Repeat("c", 129) + `"}`},
+		{"crm", "investor.list", `{"data":{"stage":"meeting"}}`},
+		{"crm", "investor.list", `{"tenant_id":"t-2"}`},
 		{"s3", "object.read", `{}`},
 	}
 	for _, tc := range cases {
 		if _, err := Decode(tc.provider, tc.capability, []byte(tc.input)); !errors.Is(err, ErrInvalid) {
 			t.Errorf("Decode(%s, %s, %s) err = %v", tc.provider, tc.capability, tc.input, err)
 		}
+	}
+}
+
+func TestDecodeCRMInvestorList(t *testing.T) {
+	got, err := Decode("crm", "investor.list", []byte(`{"stage":"diligence","q":"north","limit":5,"cursor":"eyJpZCI6N30"}`))
+	want := CRMInvestorList{Stage: "diligence", Query: "north", Limit: 5, Cursor: "eyJpZCI6N30"}
+	if err != nil || got != want {
+		t.Fatalf("investor.list = %#v, %v", got, err)
+	}
+	if got, err := Decode("crm", "investor.list", []byte(`{}`)); err != nil || got != (CRMInvestorList{}) {
+		t.Fatalf("empty investor.list = %#v, %v", got, err)
 	}
 }
