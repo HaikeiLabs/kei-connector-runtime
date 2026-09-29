@@ -1,8 +1,9 @@
 # Connector execution contract
 
-Status: **Proposed** (layer 1 of the connector-exec stack). Layers 2 (runtime
-execution) and 3 (catalog descriptor) implement it once the decisions in
-[Open decisions](#open-decisions) are confirmed.
+Status: **Accepted**. Decisions D1–D5 were settled by the user on 2026-09-28
+(see [Decisions](#decisions)). Implementation order: `kei-connector-contracts`
+v0.2.0, then runtime execution (layer 2, against fakes), then the catalog
+descriptor and token proxy (layer 3).
 
 Today `kei-proxy connector invoke` returns only the catalog's decision and
 envelope. The provider clients exist in `kei-policy-catalog`'s
@@ -10,8 +11,9 @@ envelope. The provider clients exist in `kei-policy-catalog`'s
 carry a query. So every governed connector call returns no data. This
 document defines how the tenant-side runtime executes the provider call
 itself, as ADR-011 requires. The catalog stays the metadata and decision
-control plane, and it never executes a provider or sees a payload, result,
-or credential value.
+control plane, and it never executes a provider or sees a payload or result.
+It never sees a shared-secret value. It does relay a user-delegated OAuth
+access token in memory for one allowed call (D2, section 3).
 
 Sources: kei ADR-011 (data plane), ADR-012 (governance pivot), ADR-014
 (identity propagation), ADR-017 (contracts module), ADR-020 (one installation
@@ -28,14 +30,14 @@ is resolved.
 
 | Provider | Credential path | Account models | Status |
 | --- | --- | --- | --- |
-| `gmail` | OAuth relay (path 2), or shared secret for domain-wide delegation | per-user (default), shared, domain delegation | supported |
-| `google_drive` | OAuth relay (path 2), or shared secret for domain-wide delegation | per-user (default), shared, domain delegation | supported |
-| `linear` | OAuth relay (path 2) | per-user (default), shared | supported |
-| `github` | OAuth relay (path 2) | per-user (default), shared | supported |
+| `gmail` | OAuth token proxied by the catalog (path 2), or shared secret for domain-wide delegation | per-user (default), shared, domain delegation | supported |
+| `google_drive` | OAuth token proxied by the catalog (path 2), or shared secret for domain-wide delegation | per-user (default), shared, domain delegation | supported |
+| `linear` | OAuth token proxied by the catalog (path 2) | per-user (default), shared | supported |
+| `github` | OAuth token proxied by the catalog (path 2) | per-user (default), shared | supported |
 | `tito` | shared secret (path 1) | n/a | supported |
-| `crm` | shared secret (path 1) plus a Kei service assertion | n/a | supported |
+| `crm` | shared secret (path 1), plus a service assertion signed by the runtime's installation key (D3) | n/a | supported |
+| `http_api` | shared secret (path 1) | n/a | supported: a generic governed connector with one allow-listed base URL (D4) |
 | `notion` | n/a | n/a | later (HAI-216) |
-| `http_api` | shared secret (path 1) | n/a | **open decision** (D4) |
 | `s3` | n/a | n/a | **removed**: S3 is storage, not a connector. The runtime denies it; removing the provider code and the catalog CHECK value is a separate ticket. |
 | `freshbooks`, `mercury` | n/a | n/a | not supported (present in `kei-connector-contracts`, not built) |
 
@@ -49,15 +51,18 @@ harness
 kei-proxy (tenant runtime)
   1. validate input against the capability's input schema   (local, no I/O)
   2. input_digest = sha256(canonical JSON of input)
-  3. POST /api/v1/data-connectors/invoke  ──────────────────► catalog
+  3. POST /api/v1/data-connectors/invoke  (TLS) ────────────► catalog
          (runtime token, connector, capability, resource,       decides: structure,
           subject, input_digest; never the input itself)        agent binding, policy,
-                                                                approval (consumed),
-     ◄──── allow + connector descriptor                         mints grant/assertion
-           + credential_grant (OAuth) | service_assertion (crm)
+                                                                approval (consumed);
+                                                                on allow for OAuth:
+                                                                GET bridge token ──► oidc-bridge
+     ◄──── allow + connector descriptor                         (bridge secret stays
+           + oauth {access_token, expires_at} (OAuth only)      in the control plane)
   4. resolve the credential
        path 1: SecretStore.Get(credential_backend, credential_ref)
-       path 2: POST <bridge>/oauth/credentials:relay {grant} ──► oidc-bridge
+       path 2: use the oauth access token from step 3 (this call only)
+       crm:    also sign the service assertion with the installation key (D3)
   5. execute the provider call                   (contracts/providers client)
   6. redact the result per capability           (typed allowlist, size cap)
   7. emit the audit event                        (digests only, section 8)
@@ -73,12 +78,13 @@ Rules:
   `reason_code` (section 7) and **no partial data**.
 - The decision stays online in this contract. When ADR-026 bundles land, the
   runtime may decide locally, but connector execution still calls the catalog:
-  the OAuth grant, the CRM assertion, and approval consumption (HAI-214) are
-  online by design. This contract does not touch the bundle loader or the
-  state-dir code (HAI-219).
+  the OAuth token and approval consumption (HAI-214) are online by design.
+  This contract does not touch the bundle loader or the state-dir code
+  (HAI-219).
 - The runtime holds a resolved credential only for the duration of one call.
   It is never written to stdout, logs, audit, the spool, or a cache. The
-  existing 5-minute token cache in `oidc_bridge.go` is not used on this path.
+  runtime does not call the bridge on this path, so the existing 5-minute
+  token cache in `oidc_bridge.go` is not involved.
 
 ### CLI surface (layer 2)
 
@@ -143,8 +149,11 @@ exactly one, and the runtime never falls back from one path to the other.
 
 ### Path 1: shared secret (`credential_source = opaque_ref`)
 
-Used by: `tito` (API token), `crm` (the Worker's `X-KEI-API-Key`), `http_api`
-(if kept), and Google domain-wide delegation (the service-account key).
+Used by: `tito` (API token), `crm` (the Worker's `X-KEI-API-Key`),
+`http_api` (the injected key), and Google domain-wide delegation (the
+service-account key). The runtime's CRM assertion signing key (D3) is read
+through the same store, but it belongs to the installation, not to a connector
+(section 5).
 
 - The connector stores only `credential_ref`, an opaque pointer that passes
   `ValidateCredentialRef`. The catalog adds `credential_backend` (one of
@@ -165,30 +174,59 @@ Used by: `tito` (API token), `crm` (the Worker's `X-KEI-API-Key`), `http_api`
 Used by: `gmail`, `google_drive`, `linear`, `github` (per-user and shared
 account models).
 
-- The runtime never holds `OIDC_BRIDGE_SECRET`. ADR-020 says a customer
-  runtime receives no service secret, and the current relay
-  (`GET /oauth/credentials/{user_id}/{provider}`) is authenticated with
-  exactly that secret. So this contract adds a relay method authenticated by a
-  **credential grant** instead (decision D2):
-  - On an allow for an OAuth connector, the catalog mints `credential_grant`:
-    a compact JWS, ES256, `iss=kei-policy-catalog`, `aud=oidc-bridge`,
-    `exp <= iat + 60s`, a unique `jti`. Its claims are `tenant_id`,
-    `workspace_id`, `connector_id`, `provider`, `account_model`, `trace_id`,
-    `scopes`, and exactly one binding: `kei_user_id` (per-user) or
-    `credential_ref` (shared).
-  - The runtime calls `POST <OIDC_BRIDGE_URL>/oauth/credentials:relay` with
-    body `{"grant": "<jws>"}`. The bridge verifies the grant against the
-    catalog's published key, consumes `jti` (single use), loads the bound token
-    row, re-checks the row's tenant/workspace/subject binding, refreshes the
-    token if it has expired, and returns
-    `{access_token, token_type, expires_in, account_email_digest}`. It never
-    returns the raw account email.
-- The access token lives only for the call. Refresh tokens never leave the
-  bridge.
-- ADR-011 note: the bridge is a Kei-hosted token store, so an access token
-  does cross from Kei to the tenant runtime for each call. This is the
-  documented current placement (ADR-011 Consequences), unchanged here. The
-  token never transits the catalog.
+**Decision D2: the catalog proxies the token.** The runtime never calls the
+bridge and never holds `OIDC_BRIDGE_SECRET` (ADR-020).
+
+1. The catalog finishes the whole decision first: structure, agent binding,
+   ABAC policy, and approval. Only when the final decision is `allow` does it
+   fetch a token, and only for that decision's (invoking Kei user, connector,
+   capability).
+2. The catalog calls the existing bridge relay server to server, with the
+   bridge secret, which stays in the control plane:
+   `GET /oauth/credentials/{user_id}/{provider}?tenant_id=…&workspace_id=…&subject=…`.
+   The binding comes from the account model (section 4): per-user uses
+   `user_id = subject = <invoking Kei user id>`; shared uses
+   `user_id = subject = connector:<connector_id>`. The bridge checks the
+   binding (403 on mismatch) and refreshes an expired token.
+3. The catalog returns the token in the invoke response, under
+   `oauth: {access_token, token_type, expires_at, account_email_digest?}`
+   (section 11).
+4. The runtime uses the token for this one provider call and then drops it.
+
+Requirements (layer 3 and layer 2 each test them):
+
+- **Short-lived:** `expires_at` is a use-by time,
+  `min(the provider token's expiry, now + 60s)`. The runtime refuses a token
+  past `expires_at` (`oauth_token_expired`). Some provider tokens (GitHub
+  OAuth apps, for example) don't expire on their own, which is why the next
+  rule matters.
+- **Never persisted:** the catalog does not write the token to a table, cache,
+  `audit_records`, or `envelope`. The runtime does not write it anywhere.
+- **Never logged:** neither side logs the token or the response body. The
+  catalog's logger already redacts `token` keys, and the invoke handler must
+  not log the response.
+- **Never in audit:** audit records carry `account_email_digest` and the
+  credential subject, never the token.
+- **TLS only:** the catalog sets `Cache-Control: no-store`. The runtime
+  refuses an `oauth` block received over plain HTTP
+  (`insecure_transport`), unless the control-plane host is loopback (for
+  local tests). This means local compose (`host.docker.internal` over http)
+  cannot run OAuth connectors.
+- **Only on a matching allow:** a deny response never carries `oauth`. The
+  runtime checks that `oauth` is present exactly when the descriptor says
+  `credential_source=oauth`, and that the descriptor's connector and
+  capability equal the request's; any mismatch is `descriptor_invalid`.
+- **Bridge failures become catalog denies** (section 7): bridge 404 →
+  `oauth_not_connected`, 409 → `oauth_reconnect_required`, 403 →
+  `oauth_binding_mismatch`, unreachable or 5xx → `oauth_bridge_unavailable`.
+  None of them falls back to another credential.
+
+ADR-011 note: the OAuth access token transits the control plane **in memory
+only**. That means bridge → catalog → runtime, for one allowed call. It is
+never stored, logged, or audited on the way, and refresh tokens never leave
+the bridge. This amends this contract's earlier statement that the token
+never transits the catalog. Shared-secret values (path 1) still never enter
+the control plane.
 
 ## 4. OAuth account models
 
@@ -210,9 +248,10 @@ of the **invoking** Kei user.
 - **Binding in the bridge:** the token row `(user_id = kei_user_id, provider)`,
   bound to `tenant_id`, `workspace_id`, and `subject = kei_user_id`, with
   `credential_source = oauth`.
-- **What the runtime sends:** a grant with `account_model=per_user` and
-  `kei_user_id=<resolved invoking user>`. The catalog sets `kei_user_id`; the
-  harness cannot choose it.
+- **How the token is fetched:** the runtime sends only the chat identity
+  (`--provider-user`) or `--user`. The catalog resolves the invoking Kei user,
+  then fetches that user's row from the bridge (path 2, step 2). The harness
+  cannot name another user's token.
 - **Invariant:** a per-user connector never falls back to another user's
   token or to a shared token. No row for the invoking user means a deny with
   `oauth_not_connected` and a connect link.
@@ -235,13 +274,14 @@ of the **invoking** Kei user.
   `DELETE /oauth/credentials/...`. The bridge revokes at the provider (best
   effort) and deletes the row; the next call denies `oauth_not_connected`. A
   revoke on the provider side surfaces as a failed refresh: the bridge returns
-  409, deletes the row, and the runtime denies `oauth_reconnect_required`.
+  409, deletes the row, and the catalog denies `oauth_reconnect_required`.
   Suspending the connector in the catalog denies every user.
 - **Audit:** `credential_subject = kei_user_id` and
   `account_email_digest`. The raw email never appears in audit.
 - **Supported today:** the token row, its binding, `UNIQUE(user_id, provider)`,
-  the connect flow, and revoke. **New:** the `account_email` column; the
-  grant-authenticated relay; `account_model` on the connector; a per-user
+  the connect flow, revoke, and the secret-authenticated relay the catalog
+  calls. **New:** the `account_email` column and digest; `account_model` on
+  the connector; a per-user
   connector with an empty `subject` (the catalog currently requires `subject`
   on every OAuth connector and fails `ValidateCall` when the invoker differs,
   so each user would need their own connector row). Also new: widening the
@@ -256,11 +296,11 @@ An admin connects one account for the connector instance, and every user
 the policy allows reads it (for example a shared `events@` mailbox).
 
 - **Binding in the bridge:** exactly one token row per connector instance,
-  referenced by the connector's unique `credential_ref`. The row is bound to
-  tenant/workspace and `subject = connector:<connector_id>`, a service subject
-  rather than the admin who connected it.
-- **What the runtime sends:** a grant with `account_model=shared` and
-  `credential_ref`.
+  stored as `user_id = subject = connector:<connector_id>` (a service subject,
+  not the admin who connected it), bound to tenant/workspace, with the
+  connector's unique `credential_ref`.
+- **How the token is fetched:** the catalog fetches the `connector:<id>` row
+  (path 2, step 2) for any invoking user the policy allows.
 - **Gating:** ABAC policy decides who may invoke. `ValidateCall` must not
   compare the invoker to the credential subject for shared connectors. This
   is a contract change: today it fails closed on any mismatch.
@@ -294,8 +334,9 @@ Only for `gmail` and `google_drive` on a Google Workspace domain.
 - **Revocation:** the Workspace admin removes the client id from domain-wide
   delegation, or deletes or rotates the key. On the Kei side, suspend the
   connector.
-- **Audit:** `credential_subject = connector:<id>`,
-  `account_email_digest` of `impersonate_email`.
+- **Audit:** `credential_subject = connector:<id>`. `impersonate_email` is
+  admin-set connector config, so it is already visible to admins in the
+  connector's settings.
 - **Supported today:** nothing. **New:** the account model, the
   `impersonate_email` config, and the runtime JWT exchange (standard library
   `crypto/rsa`; no new dependency).
@@ -314,11 +355,20 @@ per-user. Shared and delegation are opt-in by an admin, per connector.
 
 ### Email digest
 
-`account_email_digest = "hmac-sha256:" + hex(HMAC-SHA256(k_tenant, lower(trim(email))))`,
-computed by the bridge with a per-tenant key the bridge holds. The digest is
-stable within a tenant, so an auditor can tell whether two calls used the same
-account, but a dictionary attack outside Kei cannot reverse it. A plain
-sha256 would be reversible. See decision D5.
+**Decision D5.** The consented email is stored on the bridge token row, and
+audit uses:
+
+`account_email_digest = "hmac-sha256:" + hex(HMAC-SHA256(k_tenant, lower(trim(email))))`
+
+where `k_tenant = HMAC-SHA256(k_bridge, tenant_id)` and `k_bridge` is a key
+held only by the bridge. The bridge computes the digest and returns it on the
+relay response, so the raw email never reaches the catalog or the runtime.
+The digest is stable within a tenant, so an auditor can tell whether two calls
+used the same account, but a dictionary attack outside Kei cannot reverse it.
+Until the bridge ships the column and the digest, `account_email_digest` is
+absent, and audit records the credential subject only. For delegation (c),
+the runtime cannot hold `k_bridge`, so it records `credential_subject` only
+and no email digest.
 
 ## 5. Capability inputs and results (reads)
 
@@ -341,6 +391,7 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | tito | `release.list` | `tito/<account>/events/<event>/releases` | `{}` | `[TitoRelease]` |
 | tito | `ticket.summary` | `tito/<account>/events/<event>/ticket-summary` | `{}` | `{account_slug, event_slug, total, by_state, by_release}`; fails closed above 5000 tickets |
 | crm | `lead.read` | `leads`, `leads/<id>`, `customers`, `customers/<id>` | `{}` | `{records: [Lead]}` or `{record: Lead}` |
+| http_api | `http.get`, `http.head` | the request path | `{path: string (relative, must match allowed_path_patterns), query?: {name: [values]} (names must be in query_allowlist)}` | `{status_code, headers, body}`, with headers and JSON fields redacted per the connector's `redaction` rules and the body capped at `response_max_bytes` |
 
 Redaction per capability:
 
@@ -359,22 +410,86 @@ Redaction per capability:
   `early_access_notes`, audit answers) is dropped even if the Worker returns
   it.
 
+`http_api` (D4) is the existing `ExecuteHTTP` path (`http_runtime.go`): one
+allow-listed base URL per connector, a shared-secret key injected into the
+configured header or query parameter, SSRF checks on the resolved addresses,
+a same-host redirect policy, a timeout, and a response-size limit. It returns
+redacted bytes rather than a typed struct, so it is the one capability whose
+result is not re-encoded. The connector's `redaction` rules are its
+allowlist. MarketingSite's `/api/leads` (key only) is reached through
+`http_api`, not through `crm`.
+
+### CRM service assertion (D3: signed by the runtime)
+
 The CRM Worker (`POST /api/crm/v1/invoke`) needs two credentials on every
 call:
 
-1. `X-KEI-API-Key`: the Worker's `CRM_CONNECTOR_API_KEY` (path 1).
-2. `Authorization: Bearer <service_assertion>`: an ES256 JWT that the catalog
-   mints on allow. `iss` and `aud` match the Worker's
-   `KEI_SERVICE_ASSERTION_ISSUER`/`_AUDIENCE`, `exp` is at most 300s away, and
-   the `jti` is single-use. The claims are the Worker's `claimsSchema`:
-   tenant, workspace, subject, agent, connector, `provider=crm`, connector
-   status, capabilities, policy, capability, action, resource, trace id,
-   optional idempotency key, and optional approval id.
+1. `X-KEI-API-Key`: the Worker's `CRM_CONNECTOR_API_KEY` (path 1, per
+   connector).
+2. `Authorization: Bearer <assertion>`: an ES256 JWT that **the runtime
+   signs** with its own per-installation key, after the catalog allows the
+   call.
 
-The runtime forwards the assertion unmodified and sends
-`{"data": <input.data>}` as the body. A Worker 401 or 403 maps to
-`provider_denied`. The `/api/leads` API (key only, no assertion) belongs to
-`http_api`, not to `crm`.
+The assertion:
+
+- Header `{alg: ES256, typ: JWT, kid: <installation key id>}`.
+- Claims are the Worker's `claimsSchema`: `iss = kei-runtime:<installation_id>`,
+  `aud` = the connector's `assertion_audience`, `iat`, `exp = iat + 60s`
+  (inside the Worker's max age), a random `jti` (the Worker consumes it once),
+  plus tenant, workspace, subject, agent, connector (all from the
+  catalog-minted envelope, never from harness input), `provider=crm`,
+  `connector_status`, `capabilities`, `policy`, `capability`, `action`,
+  `resource`, `trace_id`, and the optional `idempotency_key` and
+  `approval_id`.
+- `capabilities` must carry the Worker's fixed `requires_approval` values
+  (`lead.read` false; `lead.create` and `lead.update` true), because the
+  Worker rejects any mismatch. `policy.allowed_actions` and
+  `policy.allowed_resources` come from the connector's descriptor. The Worker
+  denies an empty list, so a `crm` connector must set them (section 9).
+- The runtime sends `{"data": <input.data>}` as the body. A Worker 401 or 403
+  maps to `provider_denied`.
+
+**Key provisioning (part of runtime setup, HAI-222):**
+
+- Each runtime installation has one ES256 (P-256) signing key. It is generated
+  on the tenant side during setup and stored in the tenant's secret manager.
+  Neither Kei nor the catalog ever sees the private key. The runtime reads it
+  with the same `SecretStore`, configured by
+  `KEI_SERVICE_ASSERTION_KEY_BACKEND`, `KEI_SERVICE_ASSERTION_KEY_REF` (the
+  PEM private key), and `KEI_SERVICE_ASSERTION_KID`, formatted
+  `kei-rt-<installation_id>-<n>`.
+- Setup exports the public key as a JWK and registers it with the Worker,
+  together with the installation's `installation_id`, `tenant_id`, and
+  `workspace_id`.
+- A runtime without a signing key configured denies `crm` calls with
+  `assertion_key_unavailable`. Other providers are unaffected.
+
+**Worker change (separate MarketingSite ticket):** replace the single
+`KEI_SERVICE_ASSERTION_PUBLIC_KEY` with a key list,
+`KEI_SERVICE_ASSERTION_PUBLIC_KEYS`, as JSON or a JWKS URL:
+`{keys: [{kid, kty: "EC", crv: "P-256", x, y, alg: "ES256", installation_id,
+tenant_id, workspace_id, status: "active" | "retiring"}], revoked_kids: []}`.
+The Worker must:
+
+- require `kid` and pick the key by it; an unknown or revoked `kid` is 401;
+- require `iss == kei-runtime:<the key's installation_id>`;
+- require the claims' tenant and workspace to equal the key's, otherwise 403,
+  so one installation's key cannot assert for another tenant;
+- keep the existing `jti` replay check, the idempotency check, and the D1
+  approval gate.
+
+**Rotation:** generate a new key, add it to the Worker list as `active`,
+switch the runtime to the new ref and kid, mark the old key `retiring`, and
+remove it after the assertion max age (300s) has passed. **Revocation:** add
+the `kid` to `revoked_kids` (effective immediately), then delete the secret.
+
+**Residual risk (accepted with D3):** the Worker can no longer verify that
+the catalog allowed the call, because the runtime signs its own assertion.
+A compromised runtime holding both its signing key and the connector's API
+key can call the CRM within its own tenant and workspace without a catalog
+decision. The kid → tenant/workspace binding bounds that exposure, writes
+still need a Worker-side approval, and the catalog's decision record (joined
+on `trace_id`) makes an unaudited call detectable.
 
 ## 6. Where the provider code lives
 
@@ -415,11 +530,13 @@ Every row denies (exit 1) and returns no result data.
 | `provider_not_supported` | Provider not in section 1 |
 | `credential_backend_unavailable` | The backend is not registered in this runtime (e.g. GCP today) |
 | `credential_unavailable` | Secret missing, empty, or unreadable (path 1); the reference is never echoed |
-| `oauth_not_connected` | Relay 404: no token row for the binding |
-| `oauth_reconnect_required` | Relay 409: refresh failed or expired with no refresh token (row deleted) |
-| `oauth_binding_mismatch` | Relay 403: row bound to another tenant, workspace, or subject |
-| `oauth_grant_rejected` | Relay rejects the grant: signature, audience, expiry, or replayed `jti` |
-| `oauth_relay_unavailable` | Bridge unreachable or 5xx. This is **not** mapped to enrollment, unlike the legacy `authorize` path. |
+| `oauth_not_connected` | The catalog got a bridge 404: no token row for the binding |
+| `oauth_reconnect_required` | The catalog got a bridge 409: refresh failed, or the token expired with no refresh token (row deleted) |
+| `oauth_binding_mismatch` | The catalog got a bridge 403: the row is bound to another tenant, workspace, or subject |
+| `oauth_bridge_unavailable` | The bridge is unreachable or returns 5xx. This is **not** mapped to enrollment, unlike the legacy `authorize` path. |
+| `oauth_token_expired` | The `oauth` block is past `expires_at` when the runtime would use it |
+| `insecure_transport` | An `oauth` block arrived over non-TLS HTTP to a non-loopback host |
+| `assertion_key_unavailable` | A `crm` call with no installation signing key configured, or the key failed to load or parse |
 | `provider_denied` | Provider 401 or 403 |
 | `provider_not_found` | Provider 404 |
 | `provider_rate_limited` | Provider 429 |
@@ -446,7 +563,8 @@ Two records per call, both metadata only (ADR-011):
    `agent_id`, `invoking_subject`, `connector_id`, `provider`, `capability`,
    `action`, `resource`, `credential_source`, `account_model`,
    `credential_subject` (Kei user id, or `connector:<id>`),
-   `account_email_digest` (OAuth and delegation only), `input_digest`,
+   `account_email_digest` (OAuth only, when the bridge supplies it),
+   `assertion_kid` (crm only), `input_digest`,
    `result_digest`, `result_bytes`, `result_items`, `provider_status_class`
    (`2xx`/`4xx`/`5xx`/`timeout`), `decision`, `reason_code`, `duration_ms`,
    `approval_id`, and `idempotency_key`.
@@ -482,7 +600,12 @@ authentication options and fields:
 | linear | OAuth + `account_model` ∈ {per_user, shared} | none | none |
 | github | OAuth + `account_model` ∈ {per_user, shared} | none | none |
 | tito | shared secret | `account_slug` | `api_token` |
-| crm | shared secret | `base_url` (https, the MarketingSite origin; no userinfo, query, or fragment; host must resolve to a public address) and `assertion_audience` (must equal the Worker's `KEI_SERVICE_ASSERTION_AUDIENCE`) | `api_key` (≥ 32 chars, the Worker's `CRM_CONNECTOR_API_KEY`) |
+| crm | shared secret | `base_url` (https, the MarketingSite origin; no userinfo, query, or fragment; host must resolve to a public address), `assertion_audience` (must equal the Worker's `KEI_SERVICE_ASSERTION_AUDIENCE`), `allowed_actions` (default `["read"]`), `allowed_resources` (default `["leads", "customers"]`) | `api_key` (≥ 32 chars, the Worker's `CRM_CONNECTOR_API_KEY`) |
+| http_api | shared secret | the existing `http_api` block: `registered_base_url` (https, one host), `allowed_methods` (`GET`/`HEAD`), `allowed_path_patterns`, `query_allowlist`, `credential_injection` (`location` header or query, `name`, optional `scheme`), `timeout_ms`, `response_max_bytes`, redirect policy, `redaction` | the injected key |
+
+The CRM assertion signing key is per **installation**, not per connector, so it
+is not a connector setup field. Runtime setup (HAI-222) provisions it
+(section 5).
 
 How the values flow:
 
@@ -520,9 +643,10 @@ Writes are approval-gated and not implemented in layer 2: Linear
 - The runtime never retries a write.
 - CRM writes currently pass **two** approval checks: the catalog's, and the
   Worker's D1 `crm_approvals` copy. This must be reconciled before CRM writes
-  ship, either by having the Worker trust the approval id in the
-  catalog-signed assertion or by syncing the two stores. It is tracked as a
-  follow-up, not decided here.
+  ship. With D3 the assertion is runtime-signed, so the Worker cannot take the
+  catalog's approval on trust; the likely direction is to sync the catalog's
+  approval into the Worker's store. It is tracked as a follow-up, not decided
+  here.
 
 ## 11. Catalog changes (layer 3)
 
@@ -543,38 +667,58 @@ credential reference", which is not true for a tenant runtime.
     "policy": { "gmail_include_body": false }
   },
   "credential_subject": "<kei user id> | connector:<id>",
-  "credential_grant": "<jws>",      // oauth only
-  "service_assertion": "<jwt>"      // crm only
+  "oauth": {                        // allow + credential_source=oauth only
+    "access_token": "…",
+    "token_type": "Bearer",
+    "expires_at": "2026-09-28T20:00:00Z",   // use-by, ≤ now + 60s
+    "account_email_digest": "hmac-sha256:…" // when the bridge supplies it
+  }
 }
 ```
 
+A deny response gains `reason_code` (section 7) and never carries `oauth`.
+The invoke handler sets `Cache-Control: no-store` and never logs the
+response body. The token is not copied into `envelope`, `audit_record`, or
+`audit_records`.
+
 The request gains `provider_user_id` (chat identity; resolved to the Kei user
 through `chat_identities`, with `enrollment_required` when unlinked, as
-`authorize` does) and `input_digest`. Field names avoid the substring
-`secret` because of the API redaction guard. Signing keys: one ES256 key pair
-per purpose (`kid` scoped to `oidc-bridge` or the CRM audience), with public
-keys published for the bridge and the Worker. The bridge relay method and
-`account_email` column are a separate `kei` stack. Layer 2 runs against a
-fixture bridge until that stack lands.
+`authorize` does) and `input_digest`. Descriptor field names avoid the
+substring `secret` because of the API redaction guard.
 
-## Open decisions
+The catalog reads the bridge relay with the bridge secret, which already
+exists in the control plane, so no new bridge endpoint is needed. The bridge
+changes (the `account_email` column and digest, the per-user and shared row
+keys, and the `connector_provider` state fix) are a separate `kei` stack.
+Layer 2 runs against a fake catalog until layer 3 lands.
 
-The user decided the PDE Gmail account model: **per-user** (section 4a). These
-still need confirmation:
+## Decisions
 
-- **D1: provider code home.** Converge in `kei-connector-contracts` v0.2.0
-  (recommended), which requires a contracts release before layer 2 merges.
-- **D2: OAuth relay authentication.** A catalog-minted, single-use,
-  60-second credential grant presented to a new bridge
-  `POST /oauth/credentials:relay` (recommended), versus giving runtimes
-  `OIDC_BRIDGE_SECRET` (violates ADR-020) or having the catalog proxy the token
-  (the token would transit the catalog).
-- **D3: CRM assertion issuer.** The catalog mints the ES256 service assertion
-  on allow, with a new catalog signing key whose public key is provisioned to
-  the Worker as `KEI_SERVICE_ASSERTION_PUBLIC_KEY`.
-- **D4: `http_api` status.** Keep the existing `ExecuteHTTP` path as a
-  supported generic connector, or freeze it (deny new connectors) now that
-  `crm` has its own provider.
-- **D5: account email storage and digest.** The email lives on the bridge
-  token row, and audit uses a per-tenant keyed HMAC digest (recommended),
-  versus a plain sha256 that is reversible by dictionary.
+Settled by the user on 2026-09-28:
+
+- **PDE Gmail account model:** per-user (section 4a), the default for chat
+  harnesses.
+- **D1 (provider code home):** `kei-connector-contracts` v0.2.0, with the
+  catalog's gmail/tito providers and the credential-source fields; released
+  first, then imported by the runtime. Moving the catalog onto the module is a
+  follow-up.
+- **D2 (OAuth token delivery):** the catalog proxies the token from the
+  bridge on an allowed invoke, for that call only (section 3, path 2).
+- **D3 (CRM assertion):** the runtime signs it with its own per-installation
+  ES256 key from the tenant secret manager; the Worker trusts a key list with
+  rotation and revocation (section 5).
+- **D4 (`http_api`):** kept as a generic governed connector with one
+  allow-listed base URL and a shared-secret key.
+- **D5 (account email):** stored on the bridge token row; audited as a
+  per-tenant HMAC digest (section 4).
+
+### Cross-repo follow-ups
+
+| Repo | Work |
+| --- | --- |
+| `kei` (oidc-bridge) | `account_email` column (field-encrypted) populated at connect; per-tenant HMAC digest on the relay response; shared-model rows keyed `connector:<id>`; widen the unique key to `(user_id, provider, tenant_id, workspace_id)`; persist `connector_provider` in `oauth_states` (Gmail callback bug) |
+| MarketingSite | `KEI_SERVICE_ASSERTION_PUBLIC_KEYS` key list or JWKS; kid → installation/tenant/workspace binding; `iss = kei-runtime:<installation_id>`; `revoked_kids`; later, approval sync for CRM writes |
+| `kei-policy-catalog` | Import `kei-connector-contracts` v0.2.0 and delete the in-tree `pkg/connectors` fork; stop allowing new `s3` connectors |
+| `kei-policy-catalog` (layer 3) | Connector descriptor, `account_model`/`config` columns, token proxy on allow, `provider_user_id`, `input_digest`, `reason_code` |
+| Runtime setup (HAI-222) | Generate and store the per-installation assertion key; export its JWK for the Worker |
+| CLI and web UI setup | Render `kei.connector-setup/v1`; seal secret fields to the installation's credential-sync key |
