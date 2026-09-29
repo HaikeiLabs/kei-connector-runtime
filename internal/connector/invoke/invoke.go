@@ -14,6 +14,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +35,12 @@ type Request struct {
 	InvokingSubject string `json:"invoking_subject,omitempty"`
 	UserID          string `json:"user_id,omitempty"`
 	Framework       string `json:"framework,omitempty"`
+	// ProviderUserID is the chat-platform identity (e.g. a WhatsApp E.164
+	// number); the catalog resolves it to the invoking Kei user.
+	ProviderUserID string `json:"provider_user_id,omitempty"`
+	// InputDigest binds the decision to the capability input without sending
+	// it: "sha256:<hex>" of the canonical input JSON.
+	InputDigest string `json:"input_digest,omitempty"`
 }
 
 // Response mirrors the ABAC invoke response. On an allow the
@@ -66,6 +73,10 @@ type Env struct {
 	RuntimeControlPlaneURL string
 	ABACURL                string
 	ABACSecret             string
+	// ProviderUserID is the default --provider-user ($KEI_PROXY_PROVIDER_USER).
+	ProviderUserID string
+	// Stdin is read for --input -.
+	Stdin io.Reader
 }
 
 // isRuntime reports customer-runtime mode, which the runtime token decides.
@@ -151,6 +162,7 @@ type connectorInvokePlan struct {
 	abacURL    string
 	abacSecret string
 	timeout    time.Duration
+	input      string
 }
 
 // parseConnectorInvokeArgs maps CLI flags and the identity-propagation
@@ -172,6 +184,8 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	framework := fs.String("framework", envOr("KEI_PROXY_FRAMEWORK", ""), "agent framework (e.g. claude, codex)")
 	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
+	inputArg := fs.String("input", "", "capability input: a JSON object, @<file>, or - for stdin (default {})")
+	providerUser := fs.String("provider-user", "", "chat-platform identity, e.g. a WhatsApp E.164 number (default $KEI_PROXY_PROVIDER_USER)")
 
 	if err := fs.Parse(args); err != nil {
 		return connectorInvokePlan{}, err
@@ -198,6 +212,9 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	if *invokingSubject == "" {
 		*invokingSubject = *userID
 	}
+	if *providerUser == "" {
+		*providerUser = env.ProviderUserID
+	}
 
 	// Customer runtimes relay the self-authenticating request through the
 	// public control-plane URL and never receive ABAC_API_SECRET.
@@ -221,10 +238,12 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 			InvokingSubject: *invokingSubject,
 			UserID:          *userID,
 			Framework:       *framework,
+			ProviderUserID:  *providerUser,
 		},
 		abacURL:    abacURLValue,
 		abacSecret: secret,
 		timeout:    time.Duration(*timeout) * time.Second,
+		input:      *inputArg,
 	}, nil
 }
 
@@ -234,6 +253,17 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 	plan, err := parseConnectorInvokeArgs(args, env)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	// The input is shape-checked here, before the control plane is asked
+	// anything; only its digest leaves the runtime.
+	raw, err := input.Read(plan.input, env.Stdin)
+	if err == nil {
+		_, plan.req.InputDigest, err = input.Canonicalize(raw)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "Error: --input must be one JSON object of at most 16 KiB")
 		return 1
 	}
 
