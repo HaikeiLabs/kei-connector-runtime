@@ -1,0 +1,6 @@
+{
+  "data": {},
+  "error": "Not Found: repository acme/missing does not exist",
+  "successful": false,
+  "log_id": "log_fixture_0002"
+}

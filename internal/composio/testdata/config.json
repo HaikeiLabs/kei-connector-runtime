@@ -1,0 +1,23 @@
+{
+  "enabled": true,
+  "credential_label": "third-party-managed",
+  "api_key_ref": "kei/composio/project-api-key",
+  "response_max_bytes": 65536,
+  "timeout_ms": 5000,
+  "redact_fields": ["email"],
+  "subjects": {
+    "user-member-0001": "kei-ws-fixture-0001-user-member-0001"
+  },
+  "tools": {
+    "composio.github.get_a_repository": {
+      "slug": "GITHUB_GET_A_REPOSITORY",
+      "version": "20250909_00",
+      "action": "read"
+    },
+    "composio.github.star_a_repository_for_the_authenticated_user": {
+      "slug": "GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER",
+      "version": "20250909_00",
+      "action": "create"
+    }
+  }
+}

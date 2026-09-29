@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "No connected account found for this user and toolkit",
+    "status": 400,
+    "request_id": "req_fixture_0001",
+    "suggested_fix": "Connect the user to the toolkit first"
+  }
+}

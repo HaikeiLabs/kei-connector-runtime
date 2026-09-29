@@ -1,0 +1,11 @@
+{
+  "data": {
+    "full_name": "acme/widgets",
+    "private": false,
+    "owner": {"login": "acme", "email": "owner@example.test"},
+    "stargazers_count": 42
+  },
+  "error": null,
+  "successful": true,
+  "log_id": "log_fixture_0001"
+}
