@@ -467,10 +467,6 @@ func (f *fakeRuntimeABAC) Authorize(_ context.Context, request AuthorizeRequest)
 	f.request = request
 	return &AuthorizeResponse{Decision: "allow"}, nil
 }
-func (f *fakeRuntimeABAC) InvokeConnector(context.Context, ConnectorInvokeRequest) (*ConnectorInvokeResponse, error) {
-	return nil, nil
-}
-
 func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {

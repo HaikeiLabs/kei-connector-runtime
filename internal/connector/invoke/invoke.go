@@ -1,4 +1,7 @@
-package connectorruntime
+// Package invoke is `kei-proxy connector invoke`: it parses the command,
+// asks the control plane's governed connector endpoint for a decision, and
+// prints it. The root package supplies the runtime configuration (Env).
+package invoke
 
 import (
 	"bytes"
@@ -14,11 +17,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// ConnectorInvokeRequest is the wire shape a harness sends to ABAC's governed
+// Request is the wire shape a harness sends to ABAC's governed
 // connector invocation endpoint. Tenant/workspace/agent are resolved
 // server-side from the harness token; the proxy only forwards the capability,
 // the resource, and the identity-propagation context.
-type ConnectorInvokeRequest struct {
+type Request struct {
 	HarnessToken    string `json:"harness_token"`
 	AgentID         string `json:"agent_id,omitempty"`
 	ConnectorID     string `json:"connector_id"`
@@ -33,10 +36,10 @@ type ConnectorInvokeRequest struct {
 	Framework       string `json:"framework,omitempty"`
 }
 
-// ConnectorInvokeResponse mirrors the ABAC invoke response. On an allow the
+// Response mirrors the ABAC invoke response. On an allow the
 // envelope carries the full propagation chain as minted by the control plane;
 // a deny carries a reason.
-type ConnectorInvokeResponse struct {
+type Response struct {
 	Decision string `json:"decision"`
 	Reason   string `json:"reason,omitempty"`
 	Envelope *struct {
@@ -56,11 +59,36 @@ type ConnectorInvokeResponse struct {
 	} `json:"envelope,omitempty"`
 }
 
-// InvokeConnector calls the governed connector invocation endpoint. The proxy
+// Env is the runtime configuration the command needs, taken from the root
+// package's Config so the two never disagree.
+type Env struct {
+	RuntimeToken           string
+	RuntimeControlPlaneURL string
+	ABACURL                string
+	ABACSecret             string
+}
+
+// isRuntime reports customer-runtime mode, which the runtime token decides.
+func (e Env) isRuntime() bool { return e.RuntimeToken != "" }
+
+// Client calls the control plane's governed connector endpoint.
+type Client struct {
+	baseURL string
+	secret  string
+	client  *http.Client
+}
+
+// NewClient returns a Client for baseURL. secret is sent as X-KEI-API-Key when
+// set; customer runtimes never have one.
+func NewClient(baseURL, secret string, timeout time.Duration) *Client {
+	return &Client{baseURL: baseURL, secret: secret, client: &http.Client{Timeout: timeout}}
+}
+
+// Invoke calls the governed connector invocation endpoint. The proxy
 // authenticates itself with X-KEI-API-Key (ADR-009) and fails closed on any
 // non-200 status, so a rejected or unavailable engine never yields a decision
 // the harness could act on.
-func (c *abacClient) InvokeConnector(ctx context.Context, req ConnectorInvokeRequest) (*ConnectorInvokeResponse, error) {
+func (c *Client) Invoke(ctx context.Context, req Request) (*Response, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal connector invoke request: %w", err)
@@ -93,7 +121,7 @@ func (c *abacClient) InvokeConnector(ctx context.Context, req ConnectorInvokeReq
 		return nil, fmt.Errorf("connector invoke returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var out ConnectorInvokeResponse
+	var out Response
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("unmarshal connector invoke response: %w", err)
 	}
@@ -119,7 +147,7 @@ type connectorInvokeArgs struct {
 // the request plus the ABAC endpoint, credential, and timeout the caller
 // should use, after applying CLI overrides and the runtime relay rules.
 type connectorInvokePlan struct {
-	req        ConnectorInvokeRequest
+	req        Request
 	abacURL    string
 	abacSecret string
 	timeout    time.Duration
@@ -128,7 +156,7 @@ type connectorInvokePlan struct {
 // parseConnectorInvokeArgs maps CLI flags and the identity-propagation
 // environment to an execution plan. The harness token is taken from the
 // environment, never from an argument.
-func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
+func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, error) {
 	fs := flag.NewFlagSet("connector invoke", flag.ContinueOnError)
 	connectorID := fs.String("connector", "", "connector id to invoke")
 	capability := fs.String("capability", "", "capability to invoke (e.g. lead.read)")
@@ -152,7 +180,7 @@ func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
 	if *userID == "" && *user != "" {
 		*userID = *user
 	}
-	cfg := configFromEnv()
+	cfg := env
 	if *abacURL != "" {
 		cfg.ABACURL = *abacURL
 	}
@@ -174,13 +202,13 @@ func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
 	// Customer runtimes relay the self-authenticating request through the
 	// public control-plane URL and never receive ABAC_API_SECRET.
 	abacURLValue, secret := cfg.ABACURL, cfg.ABACSecret
-	if cfg.IsRuntime() {
+	if cfg.isRuntime() {
 		abacURLValue = cfg.RuntimeControlPlaneURL
 		secret = ""
 	}
 
 	return connectorInvokePlan{
-		req: ConnectorInvokeRequest{
+		req: Request{
 			HarnessToken:    cfg.RuntimeToken,
 			AgentID:         *agentID,
 			ConnectorID:     *connectorID,
@@ -200,34 +228,27 @@ func parseConnectorInvokeArgs(args []string) (connectorInvokePlan, error) {
 	}, nil
 }
 
-// runConnector dispatches the connector subcommand.
-func runConnector(args []string) int {
-	if len(args) > 0 && args[0] == "invoke" {
-		return runConnectorInvoke(args[1:])
-	}
-	fmt.Fprintln(os.Stderr, "Error: unknown connector command\n\nUsage: kei-proxy connector invoke --connector <id> --capability <name> --action <action> --resource <resource>")
-	return 1
-}
-
-func runConnectorInvoke(args []string) int {
-	plan, err := parseConnectorInvokeArgs(args)
+// Run executes `connector invoke` with args (after "invoke"). It prints the
+// decision JSON to stdout and exits non-zero on anything but an allow.
+func Run(args []string, env Env, stdout, stderr io.Writer) int {
+	plan, err := parseConnectorInvokeArgs(args, env)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
 	defer cancel()
 
-	client := NewABACClient(plan.abacURL, plan.abacSecret, plan.timeout)
-	resp, err := client.InvokeConnector(ctx, plan.req)
+	client := NewClient(plan.abacURL, plan.abacSecret, plan.timeout)
+	resp, err := client.Invoke(ctx, plan.req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
 
-	if err := writeJSON(os.Stdout, resp); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	if err := writeJSON(stdout, resp); err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
 
@@ -236,4 +257,21 @@ func runConnectorInvoke(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// envOr and writeJSON mirror the root package's helpers of the same names.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func writeJSON(w io.Writer, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(data, '\n'))
+	return err
 }
