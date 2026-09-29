@@ -1,6 +1,7 @@
 package invoke
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -249,5 +250,65 @@ func testEnv() Env {
 		RuntimeControlPlaneURL: os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
 		ABACURL:                envOr("ABAC_URL", "http://localhost:8080"),
 		ABACSecret:             strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
+	}
+}
+
+func TestParseArgsTakesInputAndProviderUser(t *testing.T) {
+	env := Env{RuntimeToken: "kh_live_runtime_token_1234567890", RuntimeControlPlaneURL: "https://control.example.test", ProviderUserID: "+15550000000"}
+	base := []string{"--connector", "conn-1", "--capability", "message.search", "--action", "read", "--resource", "gmail/messages"}
+	plan, err := parseConnectorInvokeArgs(append(base, "--input", `{"query":"x"}`, "--provider-user", "+15551234567"), env)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if plan.input != `{"query":"x"}` || plan.req.ProviderUserID != "+15551234567" {
+		t.Fatalf("input = %q, provider_user_id = %q", plan.input, plan.req.ProviderUserID)
+	}
+	plan, err = parseConnectorInvokeArgs(base, env)
+	if err != nil || plan.req.ProviderUserID != "+15550000000" {
+		t.Fatalf("provider user default = %q, %v", plan.req.ProviderUserID, err)
+	}
+}
+
+// The catalog gets the input's digest, never the input, plus the chat identity
+// it resolves to the invoking Kei user.
+func TestRunSendsTheInputDigestNotTheInput(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"decision":"deny","reason":"no matching policy"}`))
+	}))
+	defer server.Close()
+	env := Env{RuntimeToken: "kh_live_runtime_token_1234567890", RuntimeControlPlaneURL: server.URL, Stdin: strings.NewReader(`{"query":"from:alice"}`)}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--connector", "conn-1", "--capability", "message.search", "--action", "read", "--resource", "gmail/messages", "--provider-user", "+15551234567", "--input", "-"}, env, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for a deny", code)
+	}
+	raw, _ := json.Marshal(got)
+	if strings.Contains(string(raw), "from:alice") {
+		t.Fatalf("catalog request carried the input: %s", raw)
+	}
+	digest, _ := got["input_digest"].(string)
+	if !strings.HasPrefix(digest, "sha256:") || got["provider_user_id"] != "+15551234567" {
+		t.Fatalf("request = %s", raw)
+	}
+}
+
+func TestRunRejectsInvalidInputBeforeTheCatalog(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer server.Close()
+	env := Env{RuntimeToken: "kh_live_runtime_token_1234567890", RuntimeControlPlaneURL: server.URL}
+	for _, in := range []string{`["a"]`, `{"q":`, `{"q":"` + strings.Repeat("a", 17<<10) + `"}`} {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"--connector", "conn-1", "--capability", "message.search", "--action", "read", "--resource", "gmail/messages", "--input", in}, env, &stdout, &stderr); code != 1 {
+			t.Fatalf("exit = %d for invalid input", code)
+		}
+		if strings.Contains(stderr.String(), "aaaa") {
+			t.Fatal("error echoed the input")
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("catalog called %d times with invalid input", calls)
 	}
 }
