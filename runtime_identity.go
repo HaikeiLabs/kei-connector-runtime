@@ -93,6 +93,7 @@ type RuntimeClient interface {
 	Heartbeat(ctx context.Context, token string, report HeartbeatReport) error
 	RegisterCredentialSyncKey(ctx context.Context, token, storeID, keyID, publicKey string) error
 	StartIdentityClaim(ctx context.Context, token string, request IdentityClaimStartRequest) (*IdentityClaimStartResponse, error)
+	SyncTools(ctx context.Context, token string, manifest *ToolManifest) error
 }
 
 type runtimeClient struct {
@@ -181,6 +182,62 @@ func (c *runtimeClient) RegisterCredentialSyncKey(ctx context.Context, token, st
 	}
 	return nil
 }
+
+// ToolSyncResponse is the catalog response for PUT /api/v1/runtime/tools.
+type ToolSyncResponse struct {
+	Added     int `json:"added"`
+	Updated   int `json:"updated"`
+	Removed   int `json:"removed"`
+	Unchanged int `json:"unchanged"`
+}
+
+// SyncTools PUTs the tool manifest to the catalog tool registry. A 409
+// (ALREADY_EXISTS) is returned as an error so callers can log and continue.
+func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *ToolManifest) error {
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("encode tool manifest: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/api/v1/runtime/tools", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build tool sync request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("tool sync request failed: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	if response.StatusCode == http.StatusConflict {
+		return &ToolSyncError{StatusCode: response.StatusCode, Conflict: true}
+	}
+	if response.StatusCode != http.StatusOK {
+		return &ToolSyncError{StatusCode: response.StatusCode}
+	}
+	return nil
+}
+
+// ToolSyncError is a non-fatal error from SyncTools. Callers log it and
+// continue bootstrap.
+type ToolSyncError struct {
+	StatusCode int
+	Conflict   bool
+	Wrapped    error
+}
+
+func (e *ToolSyncError) Error() string {
+	if e.Wrapped != nil {
+		return e.Wrapped.Error()
+	}
+	if e.Conflict {
+		return fmt.Sprintf("tool sync conflict (HTTP %d)", e.StatusCode)
+	}
+	return fmt.Sprintf("tool sync failed (HTTP %d)", e.StatusCode)
+}
+
+func (e *ToolSyncError) Unwrap() error { return e.Wrapped }
 
 // bootstrapRuntime proves the runtime credential resolves to an installation
 // before normal proxy work begins and records a liveness heartbeat. It does

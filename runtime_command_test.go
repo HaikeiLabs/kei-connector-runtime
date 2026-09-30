@@ -40,6 +40,7 @@ func (c *recordingRuntimeClient) RegisterCredentialSyncKey(context.Context, stri
 func (c *recordingRuntimeClient) StartIdentityClaim(context.Context, string, IdentityClaimStartRequest) (*IdentityClaimStartResponse, error) {
 	return nil, nil
 }
+func (c *recordingRuntimeClient) SyncTools(context.Context, string, *ToolManifest) error { return nil }
 
 func TestRuntimeBootstrapReportsHeartbeatBeforeBotStartup(t *testing.T) {
 	workspaceID := "workspace-1"

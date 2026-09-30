@@ -24,6 +24,7 @@ type Config struct {
 	AuditMaxBytes                 int64
 	ABACSecret                    string
 	Env                           string
+	ToolManifestPath              string
 }
 
 func envOr(key, fallback string) string {
@@ -76,6 +77,7 @@ func configFromEnv() Config {
 		AuditMaxBytes:                 auditMaxBytesFromEnv(),
 		ABACSecret:                    strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 		Env:                           os.Getenv("ENV"),
+		ToolManifestPath:              os.Getenv("KEI_TOOL_MANIFEST"),
 	}
 }
 

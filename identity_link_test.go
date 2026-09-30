@@ -33,6 +33,7 @@ func (c *identityClaimTestClient) StartIdentityClaim(_ context.Context, token st
 	c.token, c.input = token, input
 	return c.resp, c.err
 }
+func (c *identityClaimTestClient) SyncTools(context.Context, string, *ToolManifest) error { return nil }
 
 func TestIdentityLinkBeginWritesOnlyClaimJSONAndUsesRuntimeConfiguration(t *testing.T) {
 	const token = "kh_live_runtime_test_token_1234567890"
