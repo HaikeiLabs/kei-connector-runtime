@@ -114,6 +114,7 @@ Environment:
                             assigned agent from whoami (heartbeat identity event)
   KEI_PROXY_AGENT_VERSION   agent version
   KEI_PROXY_FRAMEWORK       agent framework (e.g. claude, codex)
+  KEI_TOOL_MANIFEST        path to the agentware tool-manifest v1 JSON file to sync at bootstrap
 
 Examples:
   kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets

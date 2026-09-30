@@ -75,6 +75,9 @@ func runRuntimeBootstrap(args []string, stdout, stderr io.Writer, cfg Config, ne
 		fmt.Fprintf(stderr, "runtime bootstrap failed: %v\n", err)
 		return 1
 	}
+	if cfg.ToolManifestPath != "" {
+		syncToolManifest(context.Background(), cfg, *timeout, newClient, stderr)
+	}
 	return writeRuntimeBootstrapOutput(stdout, identity, stderr)
 }
 
@@ -322,6 +325,29 @@ func bootstrapRuntimeWithClient(ctx context.Context, cfg Config, timeout time.Du
 // registerCredentialSyncKey registers the runtime's sync public key when a
 // credential store is configured. Runtimes without one skip it; once
 // configured, registration is idempotent.
+// syncToolManifest reads KEI_TOOL_MANIFEST and PUTs it to the catalog tool
+// registry. Failures are logged and never crash bootstrap; an unregistered
+// tool falls back to bare-name policies which already fail closed.
+func syncToolManifest(ctx context.Context, cfg Config, timeout time.Duration, newClient runtimeClientFactory, stderr io.Writer) {
+	if cfg.ToolManifestPath == "" {
+		return
+	}
+	manifest, err := LoadToolManifest(cfg.ToolManifestPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "runtime bootstrap: tool manifest: %v\n", err)
+		return
+	}
+	if manifest.Schema != "" && manifest.Schema != ToolManifestSchemaV1 {
+		fmt.Fprintf(stderr, "runtime bootstrap: tool sync skipped: unsupported manifest schema %q (expected %s)\n", manifest.Schema, ToolManifestSchemaV1)
+		return
+	}
+	client := newClient(cfg.RuntimeControlPlaneURL, timeout)
+	if err := client.SyncTools(ctx, cfg.RuntimeToken, manifest); err != nil {
+		fmt.Fprintf(stderr, "runtime bootstrap: tool sync: %v\n", err)
+		return
+	}
+}
+
 func registerCredentialSyncKey(ctx context.Context, client RuntimeClient, cfg Config) error {
 	if cfg.CredentialStoreInstallationID == "" || cfg.CredentialSyncKeyID == "" || cfg.CredentialSyncPrivateKey == "" {
 		return nil

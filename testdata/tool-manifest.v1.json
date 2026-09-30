@@ -1,0 +1,26 @@
+{
+  "schema": "kei.tool-manifest/v1",
+  "tools": [
+    {
+      "name": "github.create_pr",
+      "service": "github",
+      "description": "Create a pull request on GitHub",
+      "action": "github:write",
+      "resources": ["repo:acme/widgets"]
+    },
+    {
+      "name": "github.list_prs",
+      "service": "github",
+      "description": "List pull requests for a repository",
+      "action": "github:read",
+      "resources": ["repo:acme/widgets"]
+    },
+    {
+      "name": "slack.send_message",
+      "service": "slack",
+      "description": "Send a message to a Slack channel",
+      "action": "slack:write",
+      "resources": ["channel:C12345"]
+    }
+  ]
+}

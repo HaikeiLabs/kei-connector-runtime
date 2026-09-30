@@ -50,6 +50,7 @@ func (c *scriptedHeartbeatClient) RegisterCredentialSyncKey(context.Context, str
 func (c *scriptedHeartbeatClient) StartIdentityClaim(context.Context, string, IdentityClaimStartRequest) (*IdentityClaimStartResponse, error) {
 	return nil, nil
 }
+func (c *scriptedHeartbeatClient) SyncTools(context.Context, string, *ToolManifest) error { return nil }
 
 func (c *scriptedHeartbeatClient) calls() int {
 	c.mu.Lock()
