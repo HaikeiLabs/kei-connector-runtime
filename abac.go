@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -15,6 +16,7 @@ type AuthorizeRequest struct {
 	UserID         string `json:"user_id,omitempty"`
 	ProviderUserID string `json:"provider_user_id,omitempty"`
 	Action         string `json:"action"`
+	Tool           string `json:"tool,omitempty"`
 	Resource       string `json:"resource,omitempty"`
 	Service        string `json:"service,omitempty"`
 	AgentID        string `json:"agent_id,omitempty"`
@@ -68,6 +70,27 @@ func (c *abacClient) Authorize(ctx context.Context, req AuthorizeRequest) (*Auth
 	if err != nil {
 		return nil, fmt.Errorf("build authorize request: %w", err)
 	}
+	// Log the serialized authorization context for production diagnosis, but
+	// never credentials. HarnessToken is intentionally excluded; this explicit
+	// field allowlist also prevents future secret fields from leaking by default.
+	slog.Info("catalog_authorize_request",
+		"user_id", req.UserID,
+		"provider_user_id", req.ProviderUserID,
+		"action", req.Action,
+		"tool", req.Tool,
+		"resource", req.Resource,
+		"service", req.Service,
+		"agent_id", req.AgentID,
+		"workspace_id", req.WorkspaceID,
+		"invoking_subject", req.InvokingSubject,
+		"parent_span", req.ParentSpan,
+		"delegation_depth", req.DelegationDepth,
+		"agent_version", req.AgentVersion,
+		"framework", req.Framework,
+		"tool_args_digest", req.ToolArgsDigest,
+		"resources", req.Resources,
+	)
+
 	httpReq.Header.Set("Content-Type", "application/json")
 	// Service-to-service authentication to the ABAC engine. The application
 	// credential travels in X-KEI-API-Key; Authorization is reserved for the

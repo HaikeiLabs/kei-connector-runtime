@@ -1,7 +1,10 @@
 package connectorruntime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +35,71 @@ func TestABACClientSendsAPIKeyHeader(t *testing.T) {
 	}
 	if gotAuth != "" {
 		t.Fatalf("Authorization must stay free for the transport layer, got %q", gotAuth)
+	}
+}
+
+func TestABACClientSerializesToolAndCanonicalScopeContext(t *testing.T) {
+	var body AuthorizeRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/authorize" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	}))
+	defer srv.Close()
+
+	client := NewABACClient(srv.URL, "", 5*time.Second)
+	_, err := client.Authorize(context.Background(), AuthorizeRequest{
+		Tool: "search_wiki", Action: "read", AgentID: "agent-1", WorkspaceID: "workspace-1",
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if body.Tool != "search_wiki" || body.Action != "read" || body.Resource != "" || body.AgentID != "agent-1" || body.WorkspaceID != "workspace-1" {
+		t.Fatalf("serialized authorize request = %+v", body)
+	}
+}
+
+func TestABACClientLogsUsefulAuthorizeFieldsWithoutToken(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	}))
+	defer srv.Close()
+
+	const secret = "kh_live_do_not_log_this"
+	client := NewABACClient(srv.URL, "", 5*time.Second)
+	_, err := client.Authorize(context.Background(), AuthorizeRequest{
+		HarnessToken: secret, UserID: "user-1", ProviderUserID: "discord-42",
+		Action: "read", Tool: "search_wiki", Resource: "wiki:notes",
+		Service: "wiki", AgentID: "agent-1", WorkspaceID: "workspace-1",
+		InvokingSubject: "member-7", ParentSpan: "span-parent", DelegationDepth: 1,
+		AgentVersion: "v1", Framework: "agentware", ToolArgsDigest: "digest-1",
+		Resources: []string{"wiki:notes"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+
+	var event map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event); err != nil {
+		t.Fatalf("decode structured log: %v; log=%q", err, logs.String())
+	}
+	if event["msg"] != "catalog_authorize_request" || event["tool"] != "search_wiki" || event["action"] != "read" || event["resource"] != "wiki:notes" || event["service"] != "wiki" {
+		t.Fatalf("missing useful authorization fields: %v", event)
+	}
+	if event["provider_user_id"] != "discord-42" || event["user_id"] != "user-1" || event["workspace_id"] != "workspace-1" || event["agent_id"] != "agent-1" || event["invoking_subject"] != "member-7" {
+		t.Fatalf("missing principal/scope context: %v", event)
+	}
+	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), "harness_token") {
+		t.Fatalf("authorization log exposed a credential: %s", logs.String())
 	}
 }
 

@@ -19,7 +19,7 @@ func TestBuildDecisionEventPreservesCanonicalContext(t *testing.T) {
 		agentID:         "agent-1",
 		agentVersion:    "1.2.3",
 		framework:       "agentware",
-		tool:            "github.create_pr",
+		tool:            "search_wiki",
 		toolArgsDigest:  "digest-1",
 		resources:       []string{"repo:acme/widgets"},
 		workspaceID:     workspaceID,
@@ -36,6 +36,9 @@ func TestBuildDecisionEventPreservesCanonicalContext(t *testing.T) {
 	}
 	if event.DelegationDepth != 2 || event.AgentID != "agent-1" || event.Framework != "agentware" {
 		t.Fatalf("context not preserved: %+v", event)
+	}
+	if event.ToolName != "search_wiki" {
+		t.Fatalf("tool_name = %q, want canonical tool name search_wiki", event.ToolName)
 	}
 	if event.ToolArgsDigest == nil || *event.ToolArgsDigest != "digest-1" {
 		t.Fatalf("tool_args_digest = %v", event.ToolArgsDigest)
