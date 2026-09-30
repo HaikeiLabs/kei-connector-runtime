@@ -28,29 +28,63 @@ Nothing new needs to be framed or versioned. Startup and shutdown are also
 simple: the socket appears when the runtime is ready to accept connections
 and disappears when it stops.
 
-## 3. kei-proxy is a sidecar
+## 3. kei-proxy is a runtime daemon
 
-kei-proxy is built as a sidecar. It runs next to one harness in the same pod,
-Cloud Run service, or host, and shares that harness's lifecycle. A Unix socket
-on a shared volume fits this model:
+`kei-proxy serve` is a long-running daemon that exposes its HTTP/1.1 API on a
+Unix domain socket. Harness processes on the same host connect to that socket
+to make governed tool calls. The daemon and the harness run independently: the
+daemon provides the local API, the harness connects to it.
 
-- **Nothing is exposed on the network.** Because the socket lives on a volume
-  shared by the two processes, there is no listening port to secure, no TLS
-  certificate to issue or rotate, and no network policy to write.
+This daemon-socket model brings three benefits:
+
+- **Nothing is exposed on the network.** Because the socket is a file on a
+  local filesystem, there is no listening port to secure, no TLS certificate
+  to issue or rotate, and no network policy to write.
 - **Access control comes from the filesystem.** The mode (`0600`) and owner of
   the socket path decide who can connect. Only processes running as the
   runtime's OS user can open it.
-- **There is one proxy per harness and no service discovery.** The harness
-  finds its proxy at a fixed path. There is no registry, DNS name, or load
-  balancer, and a proxy can't be shared or reached by another tenant's
-  harness.
+- **No port management.** The address is just a file path. There is no port to
+  choose, reserve, or collide on.
 
-### Shared-volume setup
+### Same-host daemon and harness (primary deployment)
 
-Mount the same volume at `/run/kei-proxy` in both the harness and kei-proxy,
-and run both as the same UID, because the socket is owner-only.
+On a bare-metal or VM host, run `kei-proxy serve` as a system service. The
+harness connects to the socket at the default path
+`/run/kei-proxy/runtime.sock`. Both processes run under the same OS user so the
+harness can open the socket.
 
-Kubernetes, using an `emptyDir` shared by the two containers in a pod:
+With systemd, provision the runtime directory and user:
+
+```ini
+# /etc/systemd/system/kei-proxy.service
+[Service]
+User=kei-runtime
+RuntimeDirectory=kei-proxy
+ExecStart=/usr/local/bin/kei-proxy serve
+Environment=KEI_RUNTIME_TOKEN=kh_live_...
+Environment=KEI_RUNTIME_CONTROL_PLANE_URL=https://...
+```
+
+The service manager creates `/run/kei-proxy` owned by `kei-runtime` and removes
+it when the service stops. The harness process, also running as `kei-runtime`,
+opens the socket directly.
+
+### Docker same-container deployment
+
+When the harness and runtime share a container image, run `kei-proxy serve` as a
+background process (e.g., a supervisor or an init script) and have the harness
+connect over the socket at the agreed path. The socket lives on the container's
+own filesystem so no volume mount is needed.
+
+For the existing OpenWebUI deployment the runtime also keeps its TCP listener on
+`KEI_PROXY_LISTEN_ADDR` (default `:8085`). OpenWebUI continues to reach the
+runtime at `http://connector-runtime:8085/v1` as before.
+
+### Optional: companion container in Kubernetes
+
+In Kubernetes you can run the runtime as a companion container in the same pod
+as the harness, sharing a socket volume. This topology is optional and
+functionally identical to the same-host model above.
 
 ```yaml
 spec:
@@ -82,15 +116,11 @@ spec:
           mountPath: /run/kei-proxy
 ```
 
-For a Cloud Run multi-container service, declare an in-memory volume and mount
-it at `/run/kei-proxy` in the ingress (harness) container and in the
-kei-proxy sidecar.
-
-On a bare-metal or VM host, run kei-proxy as a service under the harness's
-user and have the service manager create the directory. With systemd, for
-example, use `User=<harness user>` and `RuntimeDirectory=kei-proxy`, which
-creates `/run/kei-proxy` owned by that user and removes it when the service
-stops.
+Mount an `emptyDir` volume at `/run/kei-proxy` in both containers and run both
+with the same UID (the socket is owner-only). The harness finds its runtime at
+the fixed path without service discovery. For Cloud Run multi-container
+services, declare an in-memory volume and mount it at `/run/kei-proxy` in the
+ingress (harness) container and in the kei-proxy companion.
 
 ### Harness client example (Go)
 
@@ -118,9 +148,10 @@ replace runtime authentication or policy authorization.
 
 1. Deploy the runtime version that supports the socket. `serve` creates the
    socket and continues to provide the TCP listener for compatibility.
-2. Make the socket directory writable by the runtime user. For a sidecar,
-   mount one shared volume at `/run/kei-proxy` in both containers and run them
-   with the same UID. For a host service, provision the runtime directory.
+2. Make the socket directory writable by the runtime user. For a host service,
+   provision `/run/kei-proxy` for that user. For a companion container in
+   Kubernetes, mount a shared `emptyDir` volume at `/run/kei-proxy` in both
+   containers and run them with the same UID.
 3. Update the harness client to dial `KEI_RUNTIME_SOCKET_PATH` (default
    `/run/kei-proxy/runtime.sock`) and confirm `GET /readyz` succeeds through
    that client. Ensure the request still includes the runtime bearer token.
@@ -136,6 +167,7 @@ replace runtime authentication or policy authorization.
 ## The TCP listener
 
 `serve` still opens the TCP listener on `KEI_PROXY_LISTEN_ADDR` (default
-`:8085`) for the existing Docker same-container OpenWebUI deployment. Sidecar
-deployments should connect through the socket and should not publish that
-port.
+`:8085`) for the existing Docker same-container OpenWebUI deployment. Harness
+deployments that use the socket should not publish this port. To disable
+external TCP access, bind the listener to loopback with
+`KEI_PROXY_LISTEN_ADDR=127.0.0.1:8085`.
