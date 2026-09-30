@@ -12,20 +12,85 @@ Extracted from `kei` (`cmd/kei-connector-runtime`) under
 
 [ADR-011](https://github.com/HaikeiLabs/kei/blob/main/docs/adr/011-tenant-side-proxy-data-plane.md)
 is canonical: as the **data plane** the connector runtime authorises every
-provider invocation. Authorisation *is* delegated to the remote ABAC control
-plane on every call — local bundle evaluation (ADR-011 §4) is the target
-architecture but is not yet implemented.
+provider invocation. **Current code** still delegates decisions to the remote
+ABAC control plane; the local bundle PEP is the approved target and is not yet
+implemented. The migration must remove catalog calls for both policy decisions
+and subject resolution from the governed invocation path.
 
 - Credentials are resolved **here**, from tenant-owned secret/OAuth backends.
 - Provider payloads and results stay **here**, inside the tenant runtime.
 - Only the decision and redacted audit metadata leave — digests, never content.
-- Failing closed on any ABAC denial, transport error, or unresolvable target
-  ensures the data-plane boundary is enforced at the delegation point.
+- The current remote-decision path fails closed on any ABAC denial, transport
+  error, or unresolvable target. Once local bundle evaluation is active, the
+  PEP decides from local policy/grant state and fails closed when its bundle
+  or trusted caller context is unusable.
+
+## Local decision and human interaction target
+
+For every governed tool invocation, the tenant-local PEP makes the allow/deny
+decision without calling the catalog to approve the tool, resolve the subject,
+or authorize that invocation. A local deny ends that attempt. After repeated
+denials, a harness may show the user a separate way to request a durable
+user/group grant from the policy catalog. That access request does not approve,
+pause, or replay the denied call; a granted policy change reaches the runtime
+through bundle distribution and affects later invocations.
+
+If a locally permitted provider call fails because its OAuth credential is
+invalid, reauthentication runs through the tenant's integration or secret
+manager. Credentials and provider data stay inside the tenant runtime and do
+not enter the catalog. Bundle bootstrap, signing-key retrieval, refresh,
+heartbeat, and redacted audit delivery remain control-plane operations, not
+per-call approval requests.
 
 Credential values, provider payloads, model prompts/completions and customer
 documents must never be sent to the Kei control plane. The authorize response
 carries no credential field, and connector invocation returns a metadata-only
 signed envelope that fails closed on any non-200.
+
+## Local PDP target (ADR-011)
+
+The target runtime resolves every governed invocation entirely from local state:
+
+- **No per-invocation catalog calls.** The tenant-local PEP decides allow/deny
+  using a cached policy bundle and resolved subject attributes. The catalog is
+  never called to approve a tool, resolve a subject identity, or authorize a
+  single invocation.
+- **Bundle sync is periodic and background.** Signed policy bundles arrive
+  through polling (default 60 s interval, ≤90 s propagation after a catalog
+  change). There is no synchronous bundle fetch per invocation. A missing,
+  expired, or invalid bundle produces a hard deny — never a fallback to the
+  control plane.
+- **Identity and grants arrive through a separate session flow.** The harness
+  authenticates its user session and resolves identity context outside the
+  daemon. The daemon receives resolved subject/grant state through its caller-
+  identity contract; it does not mint claims, manage enrollment, or perform
+  subject resolution itself.
+- **Harness owns workflow preflight and prompts.** The harness evaluates user
+  intent, constructs the tool-call prompt, and decides which tool to invoke.
+  The runtime PDP does not inspect prompt content or approve the workflow —
+  it evaluates the resulting tool action against policy.
+- **A local deny ends that invocation.** The harness does not pause, retry, or
+  escalate the denied call. A harness may offer the user a separate durable
+  access request to the policy catalog after repeated denials, but that request
+  does not unblock the denied invocation — a granted policy change reaches the
+  runtime through the next bundle sync and affects later invocations.
+
+### Pending G0 contract items
+
+The following are not yet resolved and remain open for human review before
+implementation starts:
+
+- **Bundle trust anchor.** How the runtime verifies bundle integrity and
+  provenance (DSSE/Ed25519 signing, audience, monotonic version) is proposed
+  in ADR-026 but not yet accepted.
+- **Trusted caller-identity proof.** How the daemon authenticates the calling
+  harness process and maps it to a trusted subject context is undecided.
+- **Local grant and subject representation.** How resolved grants, pending
+  identities, unlinked subjects, revoked grants, and cross-workspace outcomes
+  are modelled in local state is unresolved.
+- **Freshness and revocation bounds.** The maximum staleness of a connected
+  bundle and the revocation propagation latency are proposed as defaults
+  (12 h hard expiry, ≤90 s propagation) but not finalised.
 
 ## The binary is `kei-proxy`
 

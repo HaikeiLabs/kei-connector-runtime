@@ -54,9 +54,17 @@ Today the socket serves `GET /healthz`, `GET /readyz`, `GET /v1/models`, and
 the socket: Agentware harnesses still spawn `kei-proxy authorize` as a
 subprocess for each tool decision.
 
-ADR-011's local-PDP authorization over the daemon is the target. The socket
-route proposed in the closed PR #65 was rejected because it called the catalog
-authorize endpoint per request and did not authenticate the caller.
+ADR-011's local-PDP authorization over the daemon is the target — the runtime
+evaluates every governed invocation from local policy state with zero catalog
+calls per invocation. The socket route proposed in the closed PR #65 was
+rejected because it called the catalog authorize endpoint per request and did
+not authenticate the caller.
+
+The local-PDP socket path is not yet implemented. Several G0 contract items
+remain unresolved: bundle trust anchor, trusted caller-identity proof across
+the socket, local grant/subject representation, and freshness/revocation
+bounds. Until those are settled, governed tool calls continue through the
+CLI subprocess path.
 
 ### Same-host daemon and harness (primary deployment)
 
