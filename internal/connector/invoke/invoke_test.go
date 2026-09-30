@@ -25,7 +25,6 @@ func TestParseConnectorInvokeArgsPropagatesContext(t *testing.T) {
 		"--resource", "leads/42",
 		"--trace-id", "trace-1",
 		"--idempotency-key", "idem-1",
-		"--approval-id", "approval-1",
 		"--user-id", "u-1",
 	}, testEnv())
 	if err != nil {
@@ -41,8 +40,8 @@ func TestParseConnectorInvokeArgsPropagatesContext(t *testing.T) {
 	if req.ConnectorID != "conn-1" || req.Capability != "lead.read" || req.Action != "read" || req.Resource != "leads/42" {
 		t.Fatalf("capability context = %+v", req)
 	}
-	if req.TraceID != "trace-1" || req.IdempotencyKey != "idem-1" || req.ApprovalID != "approval-1" {
-		t.Fatalf("trace/idempotency/approval = %+v", req)
+	if req.TraceID != "trace-1" || req.IdempotencyKey != "idem-1" {
+		t.Fatalf("trace/idempotency = %+v", req)
 	}
 	if req.InvokingSubject != "human-1" || req.UserID != "u-1" || req.AgentID != "agent-9" || req.Framework != "claude" {
 		t.Fatalf("propagation context = %+v", req)
@@ -166,35 +165,6 @@ func TestInvokeConnectorPropagatesRequestAndCredential(t *testing.T) {
 	}
 	if gotKey != "proxy-secret" {
 		t.Fatalf("X-KEI-API-Key = %q, want proxy-secret", gotKey)
-	}
-}
-
-// TestInvokeConnectorSurfacesStructuredDeny: a 200 deny from the engine (e.g.
-// "approval required" from an approval_required policy) must surface with its
-// reason so the harness can report why the call was refused.
-func TestInvokeConnectorSurfacesStructuredDeny(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"decision":"deny","reason":"approval required"}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "proxy-secret", 5*time.Second)
-	resp, err := client.Invoke(context.Background(), Request{
-		ConnectorID: "conn-1",
-		Capability:  "lead.read",
-		Action:      "read",
-		Resource:    "leads/42",
-		TraceID:     "trace-1",
-	})
-	if err != nil {
-		t.Fatalf("InvokeConnector: %v", err)
-	}
-	if resp.Decision != "deny" {
-		t.Fatalf("decision = %q, want deny", resp.Decision)
-	}
-	if resp.Reason != "approval required" {
-		t.Fatalf("reason = %q, want approval required", resp.Reason)
 	}
 }
 

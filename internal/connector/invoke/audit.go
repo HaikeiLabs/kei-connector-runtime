@@ -43,7 +43,6 @@ type executionRecord struct {
 	ProviderStatusClass string `json:"provider_status_class,omitempty"`
 	ReasonCode          string `json:"reason_code,omitempty"`
 	DurationMS          int64  `json:"duration_ms"`
-	ApprovalID          string `json:"approval_id,omitempty"`
 	IdempotencyKey      string `json:"idempotency_key,omitempty"`
 }
 
@@ -65,7 +64,7 @@ func (env Env) emitAudit(plan connectorInvokePlan, exec *execution, out output, 
 		ResourcesTouched: []string{req.Resource}, Decision: out.Decision, PolicyReason: &reason,
 		ConnectorID: req.ConnectorID, Capability: req.Capability,
 		ReasonCode: out.ReasonCode, DurationMS: elapsed.Milliseconds(),
-		ApprovalID: req.ApprovalID, IdempotencyKey: req.IdempotencyKey,
+		IdempotencyKey: req.IdempotencyKey,
 	}
 	if req.InputDigest != "" {
 		digest := req.InputDigest

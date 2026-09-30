@@ -491,9 +491,6 @@ func TestConnectorInvokeFailsClosedWithoutCallingTheProvider(t *testing.T) {
 		{"policy deny without code", func(h *execHarness) {
 			h.catalogBody = `{"decision":"deny","reason":"no matching policy"}`
 		}, nil, "policy_deny"},
-		{"approval deny without code", func(h *execHarness) {
-			h.catalogBody = `{"decision":"deny","reason":"approval required"}`
-		}, nil, "approval_required"},
 		{"enrollment", func(h *execHarness) {
 			h.catalogBody = `{"decision":"deny","reason_code":"enrollment_required","reason":"link","enrollment":{"url":"https://kei.example/identity/link#claim=x"}}`
 		}, nil, "enrollment_required"},
@@ -657,7 +654,7 @@ func TestConnectorInvokeCRMLeadReadSignsAssertion(t *testing.T) {
 			t.Errorf("assertion claims = %v", claims)
 		}
 		caps := fmt.Sprint(claims["capabilities"])
-		if !strings.Contains(caps, "map[action:read name:lead.read requires_approval:false]") || !strings.Contains(caps, "map[action:create name:lead.create requires_approval:true]") {
+		if !strings.Contains(caps, "map[action:read name:lead.read]") || !strings.Contains(caps, "map[action:create name:lead.create]") {
 			t.Errorf("assertion capabilities = %v", caps)
 		}
 		if fmt.Sprint(claims["policy"]) != "map[allowed_actions:[read] allowed_resources:[leads]]" {

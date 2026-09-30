@@ -62,7 +62,7 @@ func (r SecretStoreCredentialResolver) Resolve(ctx context.Context, ref string) 
 // HTTPExecutionAudit is the audit/trace lineage for one governed HTTP
 // invocation. It preserves the full propagation chain — human subject, org,
 // workspace, agent, connector, capability, action, resource, trace id, and
-// approval reference — and never carries credential material.
+// trace id — and never carries credential material.
 type HTTPExecutionAudit struct {
 	Subject     string          `json:"subject"`
 	OrgID       string          `json:"org_id"`
@@ -73,7 +73,6 @@ type HTTPExecutionAudit struct {
 	Action      contract.Action `json:"action"`
 	Resource    string          `json:"resource"`
 	TraceID     string          `json:"trace_id"`
-	ApprovalID  string          `json:"approval_id,omitempty"`
 }
 
 // HTTPExecutionResult is the governed result of one invocation. Headers and
@@ -209,7 +208,6 @@ func (e HTTPExecutor) ExecuteHTTP(ctx context.Context, metadata contract.Metadat
 			Action:      in.Action,
 			Resource:    in.Resource,
 			TraceID:     in.TraceID,
-			ApprovalID:  in.ApprovalID,
 		},
 	}, nil
 }

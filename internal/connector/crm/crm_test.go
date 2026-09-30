@@ -77,7 +77,7 @@ func TestLeadReadSignsTheAssertionAndProjectsLeads(t *testing.T) {
 			t.Errorf("claims = %v", claims)
 		}
 		caps := fmt.Sprint(claims["capabilities"])
-		if !strings.Contains(caps, "map[action:read name:lead.read requires_approval:false]") || !strings.Contains(caps, "map[action:create name:lead.create requires_approval:true]") {
+		if !strings.Contains(caps, "map[action:read name:lead.read]") || !strings.Contains(caps, "map[action:create name:lead.create]") {
 			t.Errorf("capabilities = %s", caps)
 		}
 		if fmt.Sprint(claims["policy"]) != "map[allowed_actions:[read] allowed_resources:[leads]]" {
