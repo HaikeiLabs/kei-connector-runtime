@@ -28,6 +28,7 @@ type AuthorizeOutput struct {
 	Service    string              `json:"service,omitempty"`
 	Credential *CredentialResponse `json:"credential,omitempty"`
 	Enrollment *json.RawMessage    `json:"enrollment,omitempty"`
+	Connect    *json.RawMessage    `json:"connect,omitempty"`
 }
 
 type authorizeParams struct {
@@ -171,9 +172,11 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 		out.Decision = "deny"
 		out.Reason = resp.Reason
 		out.Enrollment = resp.Enrollment
+		out.Connect = resp.Connect
 	default:
 		out.Decision = "deny"
 		out.Reason = resp.Reason
+		out.Connect = resp.Connect
 	}
 
 	emitDecision(p.auditPath, p.auditMaxBytes, buildDecisionEvent(p, resp, out, resource))

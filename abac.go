@@ -37,6 +37,7 @@ type AuthorizeResponse struct {
 	PolicyID    string           `json:"policy_id,omitempty"`
 	WorkspaceID *string          `json:"workspace_id,omitempty"`
 	Enrollment  *json.RawMessage `json:"enrollment,omitempty"`
+	Connect     *json.RawMessage `json:"connect,omitempty"`
 }
 
 type ABACClient interface {
