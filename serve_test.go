@@ -327,6 +327,73 @@ func TestRuntimeHTTPHandlerHealthProbeSendsAuthHeader(t *testing.T) {
 	}
 }
 
+func TestExtractInvokingSubject_Valid(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"tenant object id", "acme-corp/user-123"},
+		{"email-like", "user@example.com/admin"},
+		{"path-like", "org/team/sub-team"},
+		{"with special chars", "org~name/user.name_suffix"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			r.Header.Set(invokingSubjectHeader, tc.value)
+			got, err := extractInvokingSubject(r)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.value {
+				t.Fatalf("got %q, want %q", got, tc.value)
+			}
+		})
+	}
+}
+
+func TestExtractInvokingSubject_Absent(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	got, err := extractInvokingSubject(r)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty", got)
+	}
+}
+
+func TestExtractInvokingSubject_Malformed(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"spaces", "user subject"},
+		{"control char", "user\tsubject"},
+		{"newline", "user\nsubject"},
+		{"too long", func() string {
+			s := ""
+			for i := 0; i <= maxInvokingSubjectLen; i++ {
+				s += "a"
+			}
+			return s
+		}()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			r.Header.Set(invokingSubjectHeader, tc.value)
+			_, err := extractInvokingSubject(r)
+			if err == nil {
+				t.Fatal("expected error for malformed subject")
+			}
+			if err.Error() != "invalid_invoking_subject" {
+				t.Fatalf("error message = %q, want %q", err.Error(), "invalid_invoking_subject")
+			}
+		})
+	}
+}
+
 func TestRuntimeHTTPHandlerRejectsInvalidToken(t *testing.T) {
 	var controlPlaneCalls, providerCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -430,6 +497,155 @@ func TestRuntimeHTTPHandlerRejectsModelOutsideAssignedProfile(t *testing.T) {
 	}
 	if _, err := handler.resolveProfile(context.Background(), "other-profile"); err == nil || !strings.Contains(err.Error(), "not assigned") {
 		t.Fatalf("resolveProfile error = %v, want assignment authorization error", err)
+	}
+}
+
+func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	const subject = "env-user"
+	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", subject)
+
+	var providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"completion-1"}`)
+	}))
+	defer provider.Close()
+
+	abac := &fakeRuntimeABAC{}
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           runtimeToken,
+		},
+		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
+		abac:     abac,
+		client:   &http.Client{Timeout: time.Second},
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
+	request.Header.Set("Authorization", "Bearer "+runtimeToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if abac.request.InvokingSubject != subject {
+		t.Fatalf("InvokingSubject = %q, want %q", abac.request.InvokingSubject, subject)
+	}
+}
+
+func TestRuntimeHTTPHandlerInvokingSubjectHeaderPassedToABAC(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	const headerSubject = "acme/end-user-42"
+
+	var providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"completion-1"}`)
+	}))
+	defer provider.Close()
+
+	abac := &fakeRuntimeABAC{}
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           runtimeToken,
+		},
+		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
+		abac:     abac,
+		client:   &http.Client{Timeout: time.Second},
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
+	request.Header.Set("Authorization", "Bearer "+runtimeToken)
+	request.Header.Set(invokingSubjectHeader, headerSubject)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if abac.request.InvokingSubject != headerSubject {
+		t.Fatalf("InvokingSubject = %q, want %q", abac.request.InvokingSubject, headerSubject)
+	}
+	if abac.request.UserID != headerSubject {
+		t.Fatalf("UserID = %q, want %q", abac.request.UserID, headerSubject)
+	}
+}
+
+func TestRuntimeHTTPHandlerInvokingSubjectMalformedReturns400(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+
+	var providerCalls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+	}))
+	defer provider.Close()
+
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           runtimeToken,
+		},
+		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
+		abac:     &fakeRuntimeABAC{},
+		client:   &http.Client{Timeout: time.Second},
+	}
+
+	badValue := "invalid subject with spaces"
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
+	request.Header.Set("Authorization", "Bearer "+runtimeToken)
+	request.Header.Set(invokingSubjectHeader, badValue)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Code != "invalid_invoking_subject" {
+		t.Fatalf("error code = %q, want %q", body.Error.Code, "invalid_invoking_subject")
+	}
+	if strings.Contains(response.Body.String(), badValue) {
+		t.Fatal("response must not echo the malformed header value")
+	}
+	if providerCalls != 0 {
+		t.Fatalf("malformed subject reached provider %d times; want 0", providerCalls)
+	}
+}
+
+func TestRuntimeHTTPHandlerInvokingSubjectWithoutTokenStill401(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+
+	handler := &runtimeHTTPHandler{
+		cfg: Config{
+			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeToken:           runtimeToken,
+		},
+		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", DefaultModel: "m1", Status: "active"}},
+		abac:     &fakeRuntimeABAC{},
+		client:   &http.Client{Timeout: time.Second},
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
+	request.Header.Set(invokingSubjectHeader, "tenant/user")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 }
 
