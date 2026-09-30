@@ -12,21 +12,53 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 )
 
 const (
+	invokingSubjectHeader    = "X-Kei-Invoking-Subject"
 	defaultListenAddr        = ":8085"
 	defaultRuntimeSocketPath = "/run/kei-proxy/runtime.sock"
 	maxModelRequest          = 4 << 20
 	shutdownFlushTimeout     = 5 * time.Second
 	collectorPollInterval    = time.Minute
+	maxInvokingSubjectLen    = 512
 )
+
+var (
+	validInvokingSubject = regexp.MustCompile(`^[a-zA-Z0-9@:/\-_.~]+$`)
+)
+
+// extractInvokingSubject reads and validates the optional end-user subject
+// header. An absent header is valid (empty string). A malformed value returns
+// an error with a fixed code; the value is never echoed in the response.
+func extractInvokingSubject(r *http.Request) (string, error) {
+	v := r.Header.Get(invokingSubjectHeader)
+	if v == "" {
+		return "", nil
+	}
+	if len(v) > maxInvokingSubjectLen {
+		return "", errors.New("invalid_invoking_subject")
+	}
+	if !validInvokingSubject.MatchString(v) {
+		return "", errors.New("invalid_invoking_subject")
+	}
+	// Reject invisible ASCII control characters (including tabs, newlines, etc.)
+	// that the regex would not catch.
+	for _, c := range v {
+		if c <= unicode.MaxASCII && (c < 32 || c == 127) {
+			return "", errors.New("invalid_invoking_subject")
+		}
+	}
+	return v, nil
+}
 
 // runServe starts the runtime-owned HTTP adapter. The adapter is deliberately
 // separate from the one-shot stdin/stdout commands so existing harnesses keep
@@ -259,6 +291,12 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		return
 	}
 
+	invokingSubject, err := extractInvokingSubject(r)
+	if err != nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_invoking_subject", "end-user subject header is malformed")
+		return
+	}
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxModelRequest))
 	if err != nil {
 		writeRuntimeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the configured limit")
@@ -287,7 +325,7 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		writeRuntimeError(w, http.StatusServiceUnavailable, "model_unavailable", "configured model is not active")
 		return
 	}
-	if err := h.authorizeModel(ctx, profile); err != nil {
+	if err := h.authorizeModel(ctx, profile, invokingSubject); err != nil {
 		writeRuntimeError(w, http.StatusForbidden, "model_invocation_denied", err.Error())
 		return
 	}
@@ -330,11 +368,14 @@ func rewriteProviderModel(body []byte, defaultModel string) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile) error {
+func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile, invokingSubject string) error {
 	// Use the same policy-catalog /api/v1/authorize path as the authorize CLI.
-	// The initial HTTP adapter receives a trusted subject from runtime
-	// configuration; OpenWebUI subject assertions will be added separately.
-	subject := envOr("KEI_PROXY_INVOKING_SUBJECT", "")
+	// The per-request header takes precedence; fall back to the env var for
+	// backward compatibility with configured subjects.
+	subject := invokingSubject
+	if subject == "" {
+		subject = envOr("KEI_PROXY_INVOKING_SUBJECT", "")
+	}
 	resource := "model:" + profile.ProfileID
 	decision, err := authorizeDecision(authorizeParams{
 		ctx:             ctx,
