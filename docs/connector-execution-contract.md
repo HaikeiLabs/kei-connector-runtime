@@ -142,8 +142,9 @@ Deny or error, exit 1:
 `enrollment` is passed through unchanged from the catalog, as in `authorize`
 (HAI-209). `connect` appears only on `oauth_not_connected` and
 `oauth_reconnect_required`, when the catalog supplies a connect link. The
-harness must show `url` privately to the user, never in a channel and never in
-a log. For compatibility, the pre-contract fields `reason` and `envelope` are
+same `connect` field is also passed through on the `authorize` path (HAI-266).
+The harness must show `url` privately to the user, never in a channel and never
+in a log. For compatibility, the pre-contract fields `reason` and `envelope` are
 kept, and any non-zero exit is a deny.
 
 ## 3. Credential paths
