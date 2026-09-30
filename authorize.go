@@ -60,6 +60,12 @@ type authorizeParams struct {
 	resources       []string
 	orgID           string
 	workspaceID     string
+
+	// catalogTool is sent as the catalog's "tool" field (HAI-271), which
+	// decides against the workspace tool registry scope. Only the runtime
+	// socket route sets it; the deprecated authorize CLI keeps its
+	// action/resource request.
+	catalogTool string
 }
 
 // authorizeDecision is the shared policy-catalog decision path used by both
@@ -72,6 +78,7 @@ func authorizeDecision(p authorizeParams, service, resource string) (*AuthorizeR
 		UserID:          p.user,
 		ProviderUserID:  p.providerUser,
 		Action:          p.action,
+		Tool:            p.catalogTool,
 		Resource:        resource,
 		Service:         service,
 		AgentID:         p.agentID,
@@ -99,6 +106,12 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 		resource = service + ":repo:" + resource
 	}
 
+	return decideTool(p, service, resource)
+}
+
+// decideTool asks the catalog for a decision, resolves the service credential
+// on allow, and emits the audit event. resource is sent as given.
+func decideTool(p authorizeParams, service, resource string) (AuthorizeOutput, error) {
 	resp, err := authorizeDecision(p, service, resource)
 	if err != nil {
 		return AuthorizeOutput{}, err

@@ -117,6 +117,14 @@ func TestRunAuthorizeHappyPathDerivesWorkspaceFromKey(t *testing.T) {
 	if got, ok := authorizeBody["workspace_id"].(string); !ok || got != workspaceKey {
 		t.Fatalf("authorize request workspace_id = %v, want key value %q", authorizeBody["workspace_id"], workspaceKey)
 	}
+	// The deprecated CLI keeps its legacy request: no registry-scoped tool,
+	// and the synthesized service:repo: resource.
+	if _, ok := authorizeBody["tool"]; ok {
+		t.Fatalf("deprecated CLI sent tool: %v", authorizeBody)
+	}
+	if got := authorizeBody["resource"]; got != "github:repo:acme/widgets" {
+		t.Fatalf("authorize request resource = %v, want github:repo:acme/widgets", got)
+	}
 }
 
 func TestRunAuthorizeNilWorkspaceIsFatal(t *testing.T) {

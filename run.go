@@ -80,7 +80,7 @@ Usage:
   kei-proxy <command> [flags]
 
 Commands:
-  authorize    authorize a tool call and serve its credential (stdout JSON, exit codes)
+  authorize    deprecated: use POST /v1/authorize on runtime.sock (kei-proxy serve)
   connector    invoke a governed data connector through the control plane
   collector    ship pending audit JSONL records to ABAC (idempotent, resumable)
   credential   manage credential sync (see: kei-proxy credential --help)
@@ -114,7 +114,7 @@ Environment:
   KEI_PROXY_FRAMEWORK       agent framework (e.g. claude, codex)
 
 Examples:
-  kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets
+  kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets  # deprecated
   kei-proxy connector invoke --connector conn-1 --capability lead.read --action read --resource leads/42 --trace-id t-1
   kei-proxy init --member --user U1234ABCD --org 9f2c...
   kei-proxy init --agent --org 9f2c... --name researcher --tools search_wiki,search_web --scopes wiki:read

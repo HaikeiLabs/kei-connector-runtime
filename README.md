@@ -59,6 +59,56 @@ to the initiating user and must not log or persist it. The default control
 plane timeout is eight seconds to fit within the Python harness's subprocess
 deadline.
 
+## Authorizing a tool call
+
+Harnesses authorize each tool call against the `kei-proxy serve` daemon over
+its owner-only Unix socket (`KEI_RUNTIME_SOCKET_PATH`, default
+`/run/kei-proxy/runtime.sock`, mode 0600). The daemon authenticates to Kei with
+its own `KEI_RUNTIME_TOKEN`; callers send no credential.
+
+```sh
+curl --unix-socket /run/kei-proxy/runtime.sock \
+  -H 'Content-Type: application/json' \
+  -d '{"tool":"utilities.admin_bonus.list_approval_blockers","invoking_subject":"alice@example.com","span_id":"4f1c…","framework":"claude"}' \
+  http://localhost/v1/authorize
+```
+
+Request body (`POST /v1/authorize`):
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool` | yes | Tool name, `^[a-z0-9_]+(\.[a-z0-9_]+)*$`, at most 128 characters |
+| `action` | no | Must equal the registered tool's action, or the catalog denies |
+| `invoking_subject` | no | The human who started the task; same rules as `X-Kei-Invoking-Subject` |
+| `span_id`, `parent_span`, `delegation_depth` | no | Delegation chain; `span_id` is the audit dedupe key |
+| `agent_version`, `framework` | no | Default to `KEI_PROXY_AGENT_VERSION` / `KEI_PROXY_FRAMEWORK` |
+| `tool_args_digest` | no | SHA-256 of the tool args, never the raw args |
+
+Callers never send `resource` or `resources`: the catalog decides against the
+workspace tool registry (HAI-271), so the route rejects either field with 400.
+
+Response: `{"decision", "reason", "code", "service", "enrollment", "connect"}`.
+Only `200` with `"decision": "allow"` means run the tool. Every other status is
+a deny and carries `"decision": "deny"` or `"enrollment_required"`:
+
+| Status | When |
+| --- | --- |
+| `200` | Allowed |
+| `403` | Policy deny, or `enrollment_required` when the tool's `tools.yaml` service has no credential binding; `enrollment`/`connect` links are passed through from the catalog |
+| `400` | Invalid `tool`, a caller `resource`/`resources`, or a malformed body |
+| `503` | Daemon not configured, `tools.yaml` unreadable, secret store or catalog unavailable |
+
+For a tool mapped to a service in `tools.yaml`, the daemon resolves the
+credential binding exactly like the authorize CLI to decide between `allow`
+and `enrollment_required`, but never returns secret material over the socket.
+Each decision writes the same audit event to `KEI_PROXY_AUDIT` (tool name,
+invoking subject, span). The route is served only on the Unix socket, never on
+the TCP listener (`KEI_PROXY_LISTEN_ADDR`).
+
+`kei-proxy authorize` is **deprecated**: use `POST /v1/authorize` on
+`runtime.sock`. The CLI keeps its action/resource request for existing callers
+and does not send `tool`.
+
 ## Runtime installation credential
 
 Per ADR-020 and HAI-119, `KEI_RUNTIME_TOKEN` is the only supported runtime installation

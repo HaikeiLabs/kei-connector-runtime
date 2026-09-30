@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 )
 
@@ -44,20 +45,29 @@ func extractInvokingSubject(r *http.Request) (string, error) {
 	if v == "" {
 		return "", nil
 	}
+	if err := validateInvokingSubject(v); err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
+// validateInvokingSubject applies the invoking-subject rules shared by the
+// header and the POST /v1/authorize body.
+func validateInvokingSubject(v string) error {
 	if len(v) > maxInvokingSubjectLen {
-		return "", errors.New("invalid_invoking_subject")
+		return errors.New("invalid_invoking_subject")
 	}
 	if !validInvokingSubject.MatchString(v) {
-		return "", errors.New("invalid_invoking_subject")
+		return errors.New("invalid_invoking_subject")
 	}
 	// Reject invisible ASCII control characters (including tabs, newlines, etc.)
 	// that the regex would not catch.
 	for _, c := range v {
 		if c <= unicode.MaxASCII && (c < 32 || c == 127) {
-			return "", errors.New("invalid_invoking_subject")
+			return errors.New("invalid_invoking_subject")
 		}
 	}
-	return v, nil
+	return nil
 }
 
 // runServe starts the runtime-owned HTTP adapter. The adapter is deliberately
@@ -98,6 +108,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	}
 	server := &http.Server{
 		Handler:           newRuntimeHTTPHandler(cfg),
+		ConnContext:       markUnixConn,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      2 * time.Minute,
@@ -145,15 +156,32 @@ type runtimeHTTPHandler struct {
 	profiles ControlPlaneModelProfileClient
 	abac     ABACClient
 	client   *http.Client
+
+	// Credential resolution for POST /v1/authorize, matching the authorize
+	// CLI. Resolved values decide allow vs enrollment_required and are never
+	// returned.
+	credentialBinding CredentialBindingClient
+	secretStore       secrets.Store
+	oidcBridge        OIDCBridgeClient
 }
 
 func newRuntimeHTTPHandler(cfg Config) http.Handler {
-	return &runtimeHTTPHandler{
-		cfg:      cfg,
-		profiles: NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second),
-		abac:     NewABACClient(cfg.RuntimeControlPlaneURL, "", 10*time.Second),
-		client:   &http.Client{Timeout: 2 * time.Minute},
+	h := &runtimeHTTPHandler{
+		cfg:               cfg,
+		profiles:          NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second),
+		abac:              NewABACClient(cfg.RuntimeControlPlaneURL, "", 10*time.Second),
+		client:            &http.Client{Timeout: 2 * time.Minute},
+		credentialBinding: NewCredentialBindingClient(cfg.RuntimeControlPlaneURL, 30*time.Second),
 	}
+	if store, err := secrets.NewStore(); err == nil {
+		h.secretStore = store
+	} else {
+		slog.Warn("runtime_secret_store_unavailable", "error", err)
+	}
+	if os.Getenv("OIDC_BRIDGE_URL") != "" {
+		h.oidcBridge = NewOIDCBridgeClient(cfg.OIDCBridgeURL, cfg.OIDCBridgeSecret, 30*time.Second)
+	}
+	return h
 }
 
 func (h *runtimeHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +194,8 @@ func (h *runtimeHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleModels(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		h.handleChatCompletions(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/authorize" && fromUnixSocket(r):
+		h.handleToolAuthorize(w, r)
 	default:
 		http.NotFound(w, r)
 	}

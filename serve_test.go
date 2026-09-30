@@ -43,7 +43,7 @@ func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	finished := make(chan struct{})
-	cfg := Config{RuntimeToken: "kh_live_12345678901234567890", RuntimeControlPlaneURL: "http://127.0.0.1:1"}
+	cfg := Config{RuntimeToken: "kh_live_12345678901234567890", RuntimeControlPlaneURL: "http://127.0.0.1:1", RegistryPath: "tools.yaml"}
 	go func() {
 		defer close(finished)
 		done <- runServeContext(ctx, cfg, socketPath, "127.0.0.1:0")
@@ -97,6 +97,18 @@ func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated GET /v1/models status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	// The socket serves tool authorization; with the catalog unreachable it
+	// fails closed with a deny.
+	resp, err = client.Post("http://localhost/v1/authorize", "application/json", strings.NewReader(`{"tool":"web_search"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/authorize over Unix socket: %v", err)
+	}
+	var decision toolAuthorizeResponse
+	_ = json.NewDecoder(resp.Body).Decode(&decision)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || decision.Decision != "deny" {
+		t.Fatalf("POST /v1/authorize = %d %+v, want 503 deny", resp.StatusCode, decision)
 	}
 	transport.CloseIdleConnections()
 

@@ -15,10 +15,14 @@ type AuthorizeRequest struct {
 	UserID         string `json:"user_id,omitempty"`
 	ProviderUserID string `json:"provider_user_id,omitempty"`
 	Action         string `json:"action"`
-	Resource       string `json:"resource,omitempty"`
-	Service        string `json:"service,omitempty"`
-	AgentID        string `json:"agent_id,omitempty"`
-	WorkspaceID    string `json:"workspace_id,omitempty"`
+	// Tool names the tool being invoked (HAI-271). When set, the catalog
+	// decides against the workspace tool registry scope instead of the
+	// caller's resource.
+	Tool        string `json:"tool,omitempty"`
+	Resource    string `json:"resource,omitempty"`
+	Service     string `json:"service,omitempty"`
+	AgentID     string `json:"agent_id,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 
 	InvokingSubject string   `json:"invoking_subject,omitempty"`
 	ParentSpan      string   `json:"parent_span,omitempty"`
