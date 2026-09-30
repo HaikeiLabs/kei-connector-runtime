@@ -123,7 +123,7 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 	if !ok {
 		return exec, deny("descriptor_invalid", "capability is not declared on the connector")
 	}
-	if capability.Action != contract.ActionRead {
+	if capability.Action != contract.ActionRead && meta.Provider != contract.ProviderCRM {
 		return exec, deny("capability_not_supported", "only read capabilities are executed")
 	}
 	if meta.AccountModel == contract.AccountModelDomainDelegation {

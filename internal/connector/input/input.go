@@ -119,6 +119,10 @@ type NotionDatabaseQuery struct {
 // contract's (providers.InvestorListPayload.Validate).
 type CRMInvestorList = providers.InvestorListPayload
 
+// CRMInvestorUpdate is the crm/investor.update input. Its bounds are the
+// contract's (providers.InvestorUpdatePayload.Validate).
+type CRMInvestorUpdate = providers.InvestorUpdatePayload
+
 // HTTPRequest is the http_api/http.get and http.head input. Method comes from
 // the capability, never from the input.
 type HTTPRequest struct {
@@ -189,6 +193,12 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 		return in, nil
 	case "crm/investor.list":
 		var in CRMInvestorList
+		if strict(raw, &in) != nil || in.Validate() != nil {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "crm/investor.update":
+		var in CRMInvestorUpdate
 		if strict(raw, &in) != nil || in.Validate() != nil {
 			return nil, ErrInvalid
 		}

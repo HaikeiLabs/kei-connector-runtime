@@ -154,12 +154,12 @@ var investorConfig = map[string]any{"base_url": "https://crm.example.com", "asse
 
 // worker records the one request body the Worker receives and answers with
 // response.
-func worker(t *testing.T, r *connectortest.Routes, key *ecdsa.PrivateKey, capability, resource, response string) *string {
+func worker(t *testing.T, r *connectortest.Routes, key *ecdsa.PrivateKey, capability, resource, action, response string) *string {
 	t.Helper()
 	var body string
 	r.Handle("crm.example.com", func(w http.ResponseWriter, req *http.Request) {
 		_, claims := verify(t, strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), &key.PublicKey)
-		if claims["capability"] != capability || claims["resource"] != resource || claims["action"] != "read" {
+		if claims["capability"] != capability || claims["resource"] != resource || claims["action"] != action {
 			t.Errorf("claims = %v", claims)
 		}
 		raw, _ := io.ReadAll(req.Body)
@@ -169,8 +169,8 @@ func worker(t *testing.T, r *connectortest.Routes, key *ecdsa.PrivateKey, capabi
 	return &body
 }
 
-func investorCall(r *connectortest.Routes, capability, resource string, in any) connector.Call {
-	call := connectortest.Call(r, contract.ProviderCRM, capability, contract.ActionRead, resource, in, apiKey)
+func investorCall(r *connectortest.Routes, capability, resource string, action contract.Action, in any) connector.Call {
+	call := connectortest.Call(r, contract.ProviderCRM, capability, action, resource, in, apiKey)
 	call.Meta.Config = investorConfig
 	return call
 }
@@ -178,7 +178,7 @@ func investorCall(r *connectortest.Routes, capability, resource string, in any) 
 func TestLeadReadSendsAnEmptyBody(t *testing.T) {
 	key, st := newKey(t)
 	r := connectortest.NewRoutes()
-	body := worker(t, r, key, "lead.read", "leads", `{"success":true,"data":{"records":[]}}`)
+	body := worker(t, r, key, "lead.read", "leads", "read", `{"success":true,"data":{"records":[]}}`)
 	if _, err := (Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}).Execute(context.Background(), crmCall(r, validConfig)); err != nil {
 		t.Fatal(err)
 	}
@@ -190,10 +190,10 @@ func TestLeadReadSendsAnEmptyBody(t *testing.T) {
 func TestInvestorListSendsItsInputAsDataAndProjects(t *testing.T) {
 	key, st := newKey(t)
 	r := connectortest.NewRoutes()
-	body := worker(t, r, key, "investor.list", "investors",
+	body := worker(t, r, key, "investor.list", "investors", "read",
 		`{"success":true,"data":{"records":[{"id":7,"name":"Grace","firm":"Compiler Ventures","email":"g@example.com","stage":"diligence","created_at":"c","updated_at":"u","notes":"PRIVATE"}],"next_cursor":"eyJpZCI6N30","has_more":true}}`)
 	in := input.CRMInvestorList{Stage: "diligence", Limit: 5}
-	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.list", "investors", in))
+	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.list", "investors", contract.ActionRead, in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,8 +210,8 @@ func TestInvestorListSendsItsInputAsDataAndProjects(t *testing.T) {
 func TestInvestorListLastPageHasANullCursor(t *testing.T) {
 	key, st := newKey(t)
 	r := connectortest.NewRoutes()
-	body := worker(t, r, key, "investor.list", "investors", `{"success":true,"data":{"records":[],"next_cursor":null,"has_more":false}}`)
-	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.list", "investors", input.CRMInvestorList{}))
+	body := worker(t, r, key, "investor.list", "investors", "read", `{"success":true,"data":{"records":[],"next_cursor":null,"has_more":false}}`)
+	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.list", "investors", contract.ActionRead, input.CRMInvestorList{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,9 +226,9 @@ func TestInvestorListLastPageHasANullCursor(t *testing.T) {
 func TestInvestorReadSendsAnEmptyBodyAndProjects(t *testing.T) {
 	key, st := newKey(t)
 	r := connectortest.NewRoutes()
-	body := worker(t, r, key, "investor.read", "investors/7",
+	body := worker(t, r, key, "investor.read", "investors/7", "read",
 		`{"success":true,"data":{"record":{"id":7,"name":"Grace","firm":"Compiler Ventures","email":"g@example.com","stage":"diligence","created_at":"c","updated_at":"u","notes":"PRIVATE"}}}`)
-	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.read", "investors/7", input.Empty{}))
+	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.read", "investors/7", contract.ActionRead, input.Empty{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,11 +254,20 @@ func TestInvestorCallsFailClosedBeforeCallingTheWorker(t *testing.T) {
 		{"list with empty input type", "investor.list", "investors", input.Empty{}},
 		{"read with list input", "investor.read", "investors/7", input.CRMInvestorList{}},
 		{"lead read with list input", "lead.read", "leads", input.CRMInvestorList{}},
+		{"update on the collection", "investor.update", "investors", input.CRMInvestorUpdate{Stage: &[]string{"committed"}[0]}},
+		{"update on a nested path", "investor.update", "investors/7/notes", input.CRMInvestorUpdate{Stage: &[]string{"committed"}[0]}},
+		{"update on a lead", "investor.update", "leads/7", input.CRMInvestorUpdate{Stage: &[]string{"committed"}[0]}},
+		{"update with empty input", "investor.update", "investors/7", input.Empty{}},
+		{"update with list input", "investor.update", "investors/7", input.CRMInvestorList{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := connectortest.NewRoutes()
-			_, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, tc.capability, tc.resource, tc.in))
+			action := contract.ActionRead
+			if tc.capability == "investor.update" {
+				action = contract.ActionUpdate
+			}
+			_, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, tc.capability, tc.resource, action, tc.in))
 			if !errors.Is(err, connector.ErrInput) {
 				t.Fatalf("err = %v, want ErrInput", err)
 			}
@@ -266,5 +275,24 @@ func TestInvestorCallsFailClosedBeforeCallingTheWorker(t *testing.T) {
 				t.Fatal("the Worker was called")
 			}
 		})
+	}
+}
+
+func TestInvestorUpdateSendsThePayloadAndProjects(t *testing.T) {
+	key, st := newKey(t)
+	r := connectortest.NewRoutes()
+	stage := "committed"
+	body := worker(t, r, key, "investor.update", "investors/7", "update",
+		`{"success":true,"data":{"record":{"id":7,"name":"Grace","firm":"Compiler Ventures","email":"g@example.com","stage":"committed","created_at":"c","updated_at":"u","notes":"PRIVATE"}}}`)
+	got, err := Connector{Store: st, Key: KeyConfig{Backend: backend, Ref: keyRef, KID: kid}}.Execute(context.Background(), investorCall(r, "investor.update", "investors/7", contract.ActionUpdate, input.CRMInvestorUpdate{Stage: &stage}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *body != `{"data":{"stage":"committed"}}` {
+		t.Fatalf("investor.update body = %s", *body)
+	}
+	raw, _ := json.Marshal(got)
+	if !strings.Contains(string(raw), `"stage":"committed"`) || strings.Contains(string(raw), "PRIVATE") {
+		t.Fatalf("result = %s", raw)
 	}
 }
