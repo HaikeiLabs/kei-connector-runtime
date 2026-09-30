@@ -36,6 +36,16 @@ and releases publish to the `kei-proxy/` S3 prefix with `install.sh`,
 service was renamed, the artifact was deliberately not. CI asserts the binary
 name.
 
+The same binary supports two modes. **CLI commands** (`authorize`, `connector`,
+`collector`, `credential`, `model`, `runtime`, `identity`, `init`, `org`) each
+perform one governed action and exit. **`kei-proxy serve`** is a long-running
+daemon that exposes a local HTTP/1.1 API on a Unix socket (default
+`/run/kei-proxy/runtime.sock`, mode `0600`) and an optional TCP listener
+(`KEI_PROXY_LISTEN_ADDR`, default `:8085`). The socket API currently serves
+health, readiness, model profile, and chat-completion routes. Governed tool
+authorization over the socket is not yet available — harnesses call the
+`authorize` CLI subprocess for each tool decision.
+
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
 
@@ -287,12 +297,14 @@ maximum length of 512 bytes.
 ### Local daemon socket
 
 `kei-proxy serve` is a long-running local daemon. Harnesses on the same host
-connect to its existing HTTP/1.1 API through a Unix domain socket. Local IPC
-keeps communication fast, avoids managing a local TCP port for harnesses, and
-uses the operating system's socket permissions to limit access to the runtime's
-OS user. The runtime and harness should run as the same OS user. HTTP bearer
+connect to its local HTTP/1.1 API over a Unix domain socket. Local IPC keeps
+communication fast, avoids managing a local TCP port for harnesses, and uses
+the operating system's socket permissions to limit access to the runtime's OS
+user. The runtime and harness should run as the same OS user. HTTP bearer
 authentication and model authorization still apply to requests made through
-the socket.
+the socket. The socket serves health, readiness, model profile, and
+chat-completion routes; governed tool authorization is served by the
+`authorize` CLI subprocess and is not yet available over the socket.
 
 The default socket is `/run/kei-proxy/runtime.sock`; set
 `KEI_RUNTIME_SOCKET_PATH` to use another path. The runtime creates the socket
@@ -301,8 +313,8 @@ be writable by the runtime user; on service installations, provision
 `/run/kei-proxy` for that user. The existing TCP listener remains available
 through `KEI_PROXY_LISTEN_ADDR` (default `:8085`) for the current Docker
 same-container OpenWebUI setup. See [docs/unix-socket.md](docs/unix-socket.md)
-for why the runtime uses a Unix socket and how to share it with a sidecar
-harness.
+for why the runtime uses a Unix socket and how to run the optional same-pod
+companion container.
 
 When `KEI_PROXY_AUDIT` is set, `serve` also owns the polling audit collector.
 It ships the existing bounded JSONL decision and lifecycle spool while running

@@ -12,11 +12,11 @@ There are three reasons for this design.
 
 ## 1. Speed
 
-A harness calls kei-proxy before every governed tool call, so each call's
-latency adds up over an agent run. Traffic on a Unix socket stays inside the
-kernel. There is no TCP handshake, no loopback routing, no TLS negotiation,
-and no Nagle or congestion-control behavior. Each request costs one local IPC
-round trip.
+A harness talks to the runtime frequently — readiness probes, model profile
+lookups, and chat requests — so per-request latency adds up over an agent run.
+Traffic on a Unix socket stays inside the kernel. There is no TCP handshake,
+no loopback routing, no TLS negotiation, and no Nagle or congestion-control
+behavior. Each request costs one local IPC round trip.
 
 ## 2. Simplicity
 
@@ -32,8 +32,9 @@ and disappears when it stops.
 
 `kei-proxy serve` is a long-running daemon that exposes its HTTP/1.1 API on a
 Unix domain socket. Harness processes on the same host connect to that socket
-to make governed tool calls. The daemon and the harness run independently: the
-daemon provides the local API, the harness connects to it.
+to reach the local API: health, readiness, model profile, and chat-completion
+routes. The daemon and the harness run independently: the daemon provides the
+local API, the harness connects to it.
 
 This daemon-socket model brings three benefits:
 
@@ -45,6 +46,17 @@ This daemon-socket model brings three benefits:
   runtime's OS user can open it.
 - **No port management.** The address is just a file path. There is no port to
   choose, reserve, or collide on.
+
+### Current API surface and the target
+
+Today the socket serves `GET /healthz`, `GET /readyz`, `GET /v1/models`, and
+`POST /v1/chat/completions`. Governed tool authorization is not served over
+the socket: Agentware harnesses still spawn `kei-proxy authorize` as a
+subprocess for each tool decision.
+
+ADR-011's local-PDP authorization over the daemon is the target. The socket
+route proposed in the closed PR #65 was rejected because it called the catalog
+authorize endpoint per request and did not authenticate the caller.
 
 ### Same-host daemon and harness (primary deployment)
 
