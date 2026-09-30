@@ -71,10 +71,12 @@ func hasTopLevelFlags(args []string) bool {
 func usage() {
 	fmt.Fprint(os.Stderr, `kei-proxy - tenant-side runtime policy engine
 
-A CLI invoked per tool call via cmd.Run. Calls ABAC Engine for access decisions
-and serves credentials from the configured secret store. Customer-hosted runtimes
-resolve credential metadata from Kei and fetch values from the configured secret store. Emits each decision as a
-structured JSON audit event on stderr. No network listener, no local storage.
+CLI commands and a long-running serve daemon. Each CLI command performs one
+governed action (authorize, connector invoke, collector ship, or credential
+sync). The serve daemon exposes a local HTTP/1.1 API on a Unix socket and
+optional TCP listener. Customer-hosted runtimes resolve credential metadata
+from Kei and fetch values from the configured secret store. Emits each
+decision as a structured JSON audit event on stderr.
 
 Usage:
   kei-proxy <command> [flags]
