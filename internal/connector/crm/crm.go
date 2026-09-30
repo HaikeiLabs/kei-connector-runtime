@@ -144,12 +144,11 @@ func (c Connector) Execute(ctx context.Context, call connector.Call) (any, error
 }
 
 // claims maps the catalog-minted envelope and descriptor onto the Worker's
-// claimsSchema. requires_approval mirrors the Worker's fixed registry: every
-// non-read CRM capability needs an approval.
+// claimsSchema.
 func claims(s *signer, cfg config, meta contract.Metadata, inv contract.Invocation, now time.Time) map[string]any {
 	capabilities := make([]map[string]any, 0, len(meta.Capabilities))
 	for _, c := range meta.Capabilities {
-		capabilities = append(capabilities, map[string]any{"name": c.Name, "action": string(c.Action), "requires_approval": c.Action != contract.ActionRead})
+		capabilities = append(capabilities, map[string]any{"name": c.Name, "action": string(c.Action)})
 	}
 	out := map[string]any{
 		"iss": s.issuer, "aud": cfg.audience,
@@ -164,9 +163,6 @@ func claims(s *signer, cfg config, meta contract.Metadata, inv contract.Invocati
 	}
 	if inv.IdempotencyKey != "" {
 		out["idempotency_key"] = inv.IdempotencyKey
-	}
-	if inv.ApprovalID != "" {
-		out["approval_id"] = inv.ApprovalID
 	}
 	return out
 }

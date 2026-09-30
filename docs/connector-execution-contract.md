@@ -54,7 +54,7 @@ kei-proxy (tenant runtime)
   3. POST /api/v1/data-connectors/invoke  (TLS) ────────────► catalog
          (runtime token, connector, capability, resource,       decides: structure,
           subject, input_digest; never the input itself)        agent binding, policy,
-                                                                approval (consumed);
+                                                                 
                                                                 on allow for OAuth:
                                                                 GET bridge token ──► oidc-bridge
      ◄──── allow + connector descriptor                         (bridge secret stays
@@ -72,7 +72,7 @@ kei-proxy (tenant runtime)
 Rules:
 
 - The input never leaves the runtime. The catalog gets only `input_digest`, so
-  it can bind the decision (and an approval) to the exact input without seeing
+   it can bind the decision to the exact input without seeing
   the query. Validation runs in two phases, both before any credential or
   provider call. Before the catalog call, the input must be one JSON object of
   at most 16 KiB. After the descriptor names the provider, a strict
@@ -83,7 +83,7 @@ Rules:
   `reason_code` (section 7) and **no partial data**.
 - The decision stays online in this contract. When ADR-026 bundles land, the
   runtime may decide locally, but connector execution still calls the catalog:
-  the OAuth token and approval consumption (HAI-214) are online by design.
+  the OAuth token is online by design.
   This contract does not touch the bundle loader or the state-dir code
   (HAI-219).
 - The runtime holds a resolved credential only for the duration of one call.
@@ -103,7 +103,6 @@ kei-proxy connector invoke
   --user <kei user id>         invoking Kei user (or --user-id, existing alias)
   --provider-user <id>         chat-platform identity, e.g. WhatsApp E.164 (+15551234567);
                                also KEI_PROXY_PROVIDER_USER
-  --approval-id <id>           required for non-read capabilities
   --idempotency-key <key>      required for non-read capabilities
   --timeout <seconds>          whole-call deadline, default 30
 ```
@@ -192,7 +191,7 @@ account models).
 bridge and never holds `OIDC_BRIDGE_SECRET` (ADR-020).
 
 1. The catalog finishes the whole decision first: structure, agent binding,
-   ABAC policy, and approval, then `setup.ValidateMetadata` over the
+   ABAC policy, then `setup.ValidateMetadata` over the
    descriptor. Only when the final decision is `allow`, and only for a
    connector with `credential_source=oauth`, does it fetch a token, for that
    decision's (invoking Kei user, connector, capability).
@@ -513,11 +512,8 @@ The assertion:
   plus tenant, workspace, subject, agent, connector (all from the
   catalog-minted envelope, never from harness input), `provider=crm`,
   `connector_status`, `capabilities`, `policy`, `capability`, `action`,
-  `resource`, `trace_id`, and the optional `idempotency_key` and
-  `approval_id`.
-- `capabilities` must carry the Worker's fixed `requires_approval` values
-  (`lead.read` false; `lead.create` and `lead.update` true), because the
-  Worker rejects any mismatch. `policy.allowed_actions` and
+ `resource`, `trace_id`, and `idempotency_key`.
+- `policy.allowed_actions` and
   `policy.allowed_resources` come from the connector's descriptor. The Worker
   denies an empty list, so a `crm` connector must set them (section 9).
 - The runtime sends `{"data": <input.data>}` as the body. A Worker 401 or 403
@@ -549,8 +545,7 @@ The Worker must:
 - require `iss == kei-runtime:<the key's installation_id>`;
 - require the claims' tenant and workspace to equal the key's, otherwise 403,
   so one installation's key cannot assert for another tenant;
-- keep the existing `jti` replay check, the idempotency check, and the D1
-  approval gate.
+- keep the existing `jti` replay check and the idempotency check.
 
 **Rotation:** generate a new key, add it to the Worker list as `active`,
 switch the runtime to the new ref and kid, mark the old key `retiring`, and
@@ -562,7 +557,7 @@ the catalog allowed the call, because the runtime signs its own assertion.
 A compromised runtime holding both its signing key and the connector's API
 key can call the CRM within its own tenant and workspace without a catalog
 decision. The kid → tenant/workspace binding bounds that exposure, writes
-still need a Worker-side approval, and the catalog's decision record (joined
+and the catalog's decision record (joined
 on `trace_id`) makes an unaudited call detectable.
 
 ## 6. Where the provider code lives
@@ -608,15 +603,13 @@ Every row denies (exit 1) and returns no result data. "Catalog" codes arrive
 in the invoke response's `reason_code` and the runtime passes them through
 unchanged. "Runtime" codes are decided locally. A catalog deny without a
 `reason_code` (an older catalog) is classified by the runtime as
-`enrollment_required` when it carries `enrollment`, `approval_required` when
-its reason is "approval required", and `policy_deny` otherwise.
+`enrollment_required` when it carries `enrollment`, and `policy_deny` otherwise.
 
 | reason_code | Emitted by | When |
 | --- | --- | --- |
 | `input_invalid` | runtime | Input fails the capability schema, is over 16 KiB, or is not JSON |
 | `catalog_unavailable` | runtime | The catalog is unreachable, returns non-200, or returns a malformed body |
 | `policy_deny` | catalog | Structure, agent binding, or ABAC policy denies; or a per-user invoking subject is not a Kei user in the connector's workspace (no bridge call) |
-| `approval_required` | catalog | A permit policy requires an approval the call did not present |
 | `enrollment_required` | catalog | The chat identity is not linked (the catalog answers `decision: "enrollment_required"`); carries `enrollment` |
 | `descriptor_invalid` | both | Catalog: the descriptor fails `setup.ValidateMetadata`. Runtime: an allow without a descriptor or envelope, a descriptor that doesn't match the request or fails `setup.ValidateMetadata`, an `oauth` block on a non-OAuth connector (or none on an OAuth one), or a connector config the connector needs is missing (for example crm without `base_url`) |
 | `insecure_transport` | both | Catalog: the caller is not TLS, so no token is fetched. Runtime: an `oauth` block arrived over plain HTTP from a non-loopback host |
@@ -666,7 +659,7 @@ Two records per call, both metadata only (ADR-011):
    `assertion_kid` (crm only), `input_digest`,
    `result_digest`, `result_bytes`, `result_items`, `provider_status_class`
    (`2xx`/`4xx`/`5xx`/`timeout`), `decision`, `reason_code`, `duration_ms`,
-   `approval_id`, and `idempotency_key`.
+   `idempotency_key`.
 
 The record never carries the input, query, result, snippet, email address,
 token, secret, or credential reference.
@@ -741,21 +734,15 @@ How the values flow:
 
 ## 10. Writes (a later layer)
 
-Writes are approval-gated and not implemented in layer 2: Linear
-`issue.create`/`issue.update`, GitHub mutations, CRM
-`lead.create`/`lead.update`. Drive `share` is not in the capability registry
-(see the HAI-207 contract gap). Rules for that layer:
+Writes (Linear `issue.create`/`issue.update`, GitHub mutations, CRM
+`lead.create`/`lead.update`) are not implemented in layer 2. Drive `share` is
+not in the capability registry (see the HAI-207 contract gap). Rules for that
+layer (updated per ADR-027, kei #671, merged):
 
-- `--approval-id` and `--idempotency-key` are required. The catalog consumes
-  the approval atomically with the decision (HAI-214, single use) and binds it
-  to `input_digest`, so an approval cannot be reused with a different payload.
+- `--idempotency-key` is required. Per-call approval transport (`--approval-id`)
+  has been removed from the runtime by ADR-027; writes will use an alternative
+  mechanism (TBD).
 - The runtime never retries a write.
-- CRM writes currently pass **two** approval checks: the catalog's, and the
-  Worker's D1 `crm_approvals` copy. This must be reconciled before CRM writes
-  ship. With D3 the assertion is runtime-signed, so the Worker cannot take the
-  catalog's approval on trust; the likely direction is to sync the catalog's
-  approval into the Worker's store. It is tracked as a follow-up, not decided
-  here.
 
 ## 11. Catalog changes (layer 3, HAI-241)
 
@@ -859,7 +846,7 @@ Settled by the user on 2026-09-28:
 | Repo | Work |
 | --- | --- |
 | `kei` (oidc-bridge) | `account_email` column (field-encrypted) populated at connect; per-tenant HMAC digest on the relay response; shared-model rows keyed `connector:<id>`; widen the unique key to `(user_id, provider, tenant_id, workspace_id)`; persist `connector_provider` in `oauth_states` (Gmail callback bug) |
-| MarketingSite | `KEI_SERVICE_ASSERTION_PUBLIC_KEYS` key list or JWKS; kid → installation/tenant/workspace binding; `iss = kei-runtime:<installation_id>`; `revoked_kids`; later, approval sync for CRM writes |
+| MarketingSite | `KEI_SERVICE_ASSERTION_PUBLIC_KEYS` key list or JWKS; kid → installation/tenant/workspace binding; `iss = kei-runtime:<installation_id>`; `revoked_kids` |
 | `kei-policy-catalog` | Import `kei-connector-contracts` v0.2.0 and delete the in-tree `pkg/connectors` fork; stop allowing new `s3` connectors |
 | `kei-policy-catalog` (layer 3) | Done in HAI-241: descriptor, `account_model` column, token proxy on allow, `provider_user_id`, `reason_code`. Open: the `config` column (HAI-254) and storing `input_digest` |
 | `kei-connector-contracts` (HAI-216) | A Notion setup schema (shared secret, `api_token`); optionally move the Notion REST backend from the runtime into the module |

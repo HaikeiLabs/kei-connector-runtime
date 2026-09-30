@@ -38,7 +38,6 @@ type Request struct {
 	Resource        string `json:"resource"`
 	TraceID         string `json:"trace_id"`
 	IdempotencyKey  string `json:"idempotency_key,omitempty"`
-	ApprovalID      string `json:"approval_id,omitempty"`
 	InvokingSubject string `json:"invoking_subject,omitempty"`
 	UserID          string `json:"user_id,omitempty"`
 	Framework       string `json:"framework,omitempty"`
@@ -168,7 +167,6 @@ type connectorInvokeArgs struct {
 	resource        string
 	traceID         string
 	idempotencyKey  string
-	approvalID      string
 	invokingSubject string
 	userID          string
 	agentID         string
@@ -197,7 +195,6 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	resource := fs.String("resource", "", "resource/data being accessed")
 	traceID := fs.String("trace-id", envOr("KEI_PROXY_SPAN_ID", ""), "trace id for the invocation (stable dedupe key)")
 	idempotencyKey := fs.String("idempotency-key", "", "idempotency key (dedupe key, overrides trace id for audit)")
-	approvalID := fs.String("approval-id", "", "approval reference for mutating capabilities")
 	invokingSubject := fs.String("invoking-subject", envOr("KEI_PROXY_INVOKING_SUBJECT", ""), "invoking subject (defaults to --user-id)")
 	userID := fs.String("user-id", "", "user id acting (defaults to --user)")
 	user := fs.String("user", "", "alias for --user-id")
@@ -255,7 +252,6 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 			Resource:        *resource,
 			TraceID:         *traceID,
 			IdempotencyKey:  *idempotencyKey,
-			ApprovalID:      *approvalID,
 			InvokingSubject: *invokingSubject,
 			UserID:          *userID,
 			Framework:       *framework,
@@ -358,15 +354,13 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
 
 // catalogReasonCode classifies a catalog deny: its own reason code when it
-// sent a well-formed one, otherwise enrollment, approval, or policy.
+// sent a well-formed one, otherwise enrollment or policy.
 func catalogReasonCode(resp *Response) string {
 	switch {
 	case reasonCodePattern.MatchString(resp.ReasonCode):
 		return resp.ReasonCode
 	case resp.Enrollment != nil:
 		return "enrollment_required"
-	case resp.Reason == "approval required":
-		return "approval_required"
 	}
 	return "policy_deny"
 }

@@ -91,7 +91,6 @@ func runtimeInvocation() contract.Invocation {
 		Action:      contract.ActionRead,
 		Resource:    "contacts/42",
 		TraceID:     "trace-1",
-		ApprovalID:  "approval-1",
 		HTTP:        &contract.HTTPInvocation{Method: contract.HTTPMethodGet, Path: "/contacts/42", Query: map[string][]string{"limit": {"10"}}},
 	}
 }
@@ -170,7 +169,7 @@ func TestExecuteHTTPAuditLineagePreservesFullContext(t *testing.T) {
 		t.Fatalf("ExecuteHTTP: %v", err)
 	}
 	a := result.Audit
-	if a.Subject != "subject-1" || a.OrgID != "tenant-1" || a.WorkspaceID != "workspace-1" || a.AgentID != "agent-1" || a.ConnectorID != "connector-1" || a.Capability != "http.get" || a.Action != contract.ActionRead || a.Resource != "contacts/42" || a.TraceID != "trace-1" || a.ApprovalID != "approval-1" {
+	if a.Subject != "subject-1" || a.OrgID != "tenant-1" || a.WorkspaceID != "workspace-1" || a.AgentID != "agent-1" || a.ConnectorID != "connector-1" || a.Capability != "http.get" || a.Action != contract.ActionRead || a.Resource != "contacts/42" || a.TraceID != "trace-1" {
 		t.Fatalf("audit lineage not preserved: %+v", a)
 	}
 }
