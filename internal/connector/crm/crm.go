@@ -2,9 +2,10 @@
 // governed endpoint, POST <base_url>/api/crm/v1/invoke (contract section 5,
 // HAI-221). Each call carries the connector's API key (shared secret) and a
 // service assertion the runtime signs with its installation key (D3).
-// It executes lead.read, investor.list and investor.read (HAI-210). Results
-// are projected to a fixed Lead or Investor allowlist, so free text the
-// Worker returns never leaves the runtime.
+// It executes lead.read, lead.create, lead.update, investor.list,
+// investor.read (HAI-210) and investor.update (HAI-253). Results are
+// projected to a fixed Lead or Investor allowlist, so free text the Worker
+// returns never leaves the runtime.
 package crm
 
 import (
@@ -46,7 +47,7 @@ type request struct {
 
 // requestFor checks the input type and resource against the capability.
 // Empty inputs send {}; investor.list sends its input as the body's data
-// (contract section 5).
+// (contract section 5); investor.update sends the update payload as the body.
 func requestFor(inv contract.Invocation, in any) (request, error) {
 	_, empty := in.(input.Empty)
 	switch inv.Capability {
@@ -61,6 +62,14 @@ func requestFor(inv contract.Invocation, in any) (request, error) {
 	case "investor.list":
 		if list, ok := in.(input.CRMInvestorList); ok && inv.Resource == "investors" {
 			body, err := json.Marshal(map[string]any{"data": list})
+			if err != nil {
+				return request{}, connector.ErrInput
+			}
+			return request{body: body, fields: investorFields}, nil
+		}
+	case "investor.update":
+		if update, ok := in.(input.CRMInvestorUpdate); ok && investorResource.MatchString(inv.Resource) {
+			body, err := json.Marshal(map[string]any{"data": update})
 			if err != nil {
 				return request{}, connector.ErrInput
 			}
@@ -144,7 +153,7 @@ func (c Connector) Execute(ctx context.Context, call connector.Call) (any, error
 }
 
 // claims maps the catalog-minted envelope and descriptor onto the Worker's
-// claimsSchema.
+// claimsSchema. Per ADR-027, no per-call approval fields are included.
 func claims(s *signer, cfg config, meta contract.Metadata, inv contract.Invocation, now time.Time) map[string]any {
 	capabilities := make([]map[string]any, 0, len(meta.Capabilities))
 	for _, c := range meta.Capabilities {
