@@ -9,6 +9,24 @@ import (
 	"testing"
 )
 
+func TestToolNameForCatalogPreservesLegacyResourceRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		resource string
+		want     string
+	}{
+		{name: "tool-scoped request", want: "search_wiki"},
+		{name: "legacy resource request", resource: "acme/widgets"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toolNameForCatalog(authorizeParams{tool: "search_wiki", resource: tc.resource})
+			if got != tc.want {
+				t.Fatalf("catalog tool = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveRuntimeScopeHappyPath(t *testing.T) {
 	workspaceKey := "workspace-9"
 	identity := &RuntimeIdentity{ID: "installation-1", OrgID: "org-1", WorkspaceID: &workspaceKey}

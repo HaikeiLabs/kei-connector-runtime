@@ -68,10 +68,13 @@ type authorizeParams struct {
 // secret material.
 func authorizeDecision(p authorizeParams, service, resource string) (*AuthorizeResponse, error) {
 	resp, err := p.abac.Authorize(p.ctx, AuthorizeRequest{
-		HarnessToken:    p.harness,
-		UserID:          p.user,
-		ProviderUserID:  p.providerUser,
-		Action:          p.action,
+		HarnessToken:   p.harness,
+		UserID:         p.user,
+		ProviderUserID: p.providerUser,
+		Action:         p.action,
+		// Tool registry matching is only appropriate when no caller resource
+		// was supplied. Preserve the legacy action/resource API otherwise.
+		Tool:            toolNameForCatalog(p),
 		Resource:        resource,
 		Service:         service,
 		AgentID:         p.agentID,
@@ -88,6 +91,13 @@ func authorizeDecision(p authorizeParams, service, resource string) (*AuthorizeR
 		return nil, fmt.Errorf("authorization unavailable (fail closed): %w", err)
 	}
 	return resp, nil
+}
+
+func toolNameForCatalog(p authorizeParams) string {
+	if p.resource == "" {
+		return p.tool
+	}
+	return ""
 }
 
 func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {

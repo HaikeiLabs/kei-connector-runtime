@@ -15,6 +15,7 @@ type AuthorizeRequest struct {
 	UserID         string `json:"user_id,omitempty"`
 	ProviderUserID string `json:"provider_user_id,omitempty"`
 	Action         string `json:"action"`
+	Tool           string `json:"tool,omitempty"`
 	Resource       string `json:"resource,omitempty"`
 	Service        string `json:"service,omitempty"`
 	AgentID        string `json:"agent_id,omitempty"`

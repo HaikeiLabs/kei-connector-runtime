@@ -2,6 +2,7 @@ package connectorruntime
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +33,31 @@ func TestABACClientSendsAPIKeyHeader(t *testing.T) {
 	}
 	if gotAuth != "" {
 		t.Fatalf("Authorization must stay free for the transport layer, got %q", gotAuth)
+	}
+}
+
+func TestABACClientSerializesToolAndCanonicalScopeContext(t *testing.T) {
+	var body AuthorizeRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/authorize" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	}))
+	defer srv.Close()
+
+	client := NewABACClient(srv.URL, "", 5*time.Second)
+	_, err := client.Authorize(context.Background(), AuthorizeRequest{
+		Tool: "search_wiki", Action: "read", AgentID: "agent-1", WorkspaceID: "workspace-1",
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if body.Tool != "search_wiki" || body.Action != "read" || body.Resource != "" || body.AgentID != "agent-1" || body.WorkspaceID != "workspace-1" {
+		t.Fatalf("serialized authorize request = %+v", body)
 	}
 }
 
