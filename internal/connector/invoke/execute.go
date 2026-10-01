@@ -25,9 +25,11 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/discord"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/github"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/gmail"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/googledrive"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/grafana"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/httpapi"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/linear"
@@ -63,6 +65,8 @@ func (e Env) connectors() map[contract.Provider]connector.Connector {
 		contract.ProviderGitHub:  github.Connector{},
 		contract.ProviderTito:    tito.Connector{},
 		contract.ProviderNotion:  notion.Connector{},
+		contract.ProviderDiscord: discord.Connector{},
+		contract.ProviderGrafana: grafana.Connector{},
 		contract.ProviderCRM:     crm.Connector{Store: e.Store, Key: e.AssertionKey},
 		contract.ProviderHTTPAPI: httpapi.Connector{},
 	}

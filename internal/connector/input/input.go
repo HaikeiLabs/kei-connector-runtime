@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/providers"
@@ -115,6 +116,90 @@ type NotionDatabaseQuery struct {
 	PageSize int `json:"page_size,omitempty"`
 }
 
+// DiscordGuildList is the discord/guild.list input. After is the guild-id
+// cursor from a previous page's next_after.
+type DiscordGuildList struct {
+	Limit int    `json:"limit,omitempty"`
+	After string `json:"after,omitempty"`
+}
+
+// DiscordMessageList is the discord/message.list input. Before and After are
+// message-id cursors; at most one may be set (newest first when neither is).
+type DiscordMessageList struct {
+	Limit  int    `json:"limit,omitempty"`
+	Before string `json:"before,omitempty"`
+	After  string `json:"after,omitempty"`
+}
+
+// snowflake is a Discord id: 17 to 20 decimal digits.
+var snowflake = regexp.MustCompile(`^[0-9]{17,20}$`)
+
+// optionalSnowflake reports whether s is empty or a Discord id.
+func optionalSnowflake(s string) bool { return s == "" || snowflake.MatchString(s) }
+
+// GrafanaFolderList is the grafana/folder.list input. Page is 1-based.
+type GrafanaFolderList struct {
+	Limit int `json:"limit,omitempty"`
+	Page  int `json:"page,omitempty"`
+}
+
+// GrafanaDashboardSearch is the grafana/dashboard.search input. It searches
+// dashboards only; folders are listed by folder.list.
+type GrafanaDashboardSearch struct {
+	Query string   `json:"query,omitempty"`
+	Tags  []string `json:"tags,omitempty"`
+	Limit int      `json:"limit,omitempty"`
+	Page  int      `json:"page,omitempty"`
+}
+
+// GrafanaAnnotationList is the grafana/annotation.list input. From and To are
+// epoch milliseconds, set together, at most 30 days apart; when neither is
+// set the connector reads the last 24 hours.
+type GrafanaAnnotationList struct {
+	From         int64    `json:"from,omitempty"`
+	To           int64    `json:"to,omitempty"`
+	DashboardUID string   `json:"dashboard_uid,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Limit        int      `json:"limit,omitempty"`
+}
+
+// GrafanaDatasourceQuery is the grafana/datasource.query input: one query
+// expression (PromQL or LogQL), a time range in epoch milliseconds at most 7
+// days long (the last hour when neither is set), and a row cap.
+type GrafanaDatasourceQuery struct {
+	Expr    string `json:"expr"`
+	From    int64  `json:"from,omitempty"`
+	To      int64  `json:"to,omitempty"`
+	MaxRows int    `json:"max_rows,omitempty"`
+}
+
+const day = int64(24 * 60 * 60 * 1000)
+
+// grafanaUID is a Grafana uid.
+var grafanaUID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+
+// timeRange reports whether from and to are both unset, or both set with
+// from < to and a window of at most maxWindow milliseconds.
+func timeRange(from, to, maxWindow int64) bool {
+	if from == 0 && to == 0 {
+		return true
+	}
+	return from > 0 && to > from && to-from <= maxWindow
+}
+
+// tags reports whether ts has at most 10 tags of 1..64 characters.
+func tags(ts []string) bool {
+	if len(ts) > 10 {
+		return false
+	}
+	for _, t := range ts {
+		if t == "" || len(t) > 64 {
+			return false
+		}
+	}
+	return true
+}
+
 // CRMInvestorList is the crm/investor.list input. Its bounds are the
 // contract's (providers.InvestorListPayload.Validate).
 type CRMInvestorList = providers.InvestorListPayload
@@ -143,7 +228,11 @@ var emptyInput = map[string]bool{
 	"github/check.read": true, "github/workflow.read": true,
 	"tito/event.get": true, "tito/release.list": true, "tito/ticket.summary": true,
 	"crm/lead.read": true, "crm/investor.read": true,
-	"notion/page.read": true,
+	"notion/page.read":   true,
+	"discord/guild.read": true, "discord/channel.list": true, "discord/channel.read": true,
+	"discord/thread.list": true, "discord/message.read": true, "discord/role.list": true,
+	"grafana/folder.read": true, "grafana/dashboard.read": true, "grafana/datasource.list": true,
+	"grafana/datasource.read": true, "grafana/alert_rule.list": true,
 }
 
 // Decode strictly decodes a canonical input for one provider capability.
@@ -188,6 +277,44 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 	case "notion/database.query":
 		var in NotionDatabaseQuery
 		if strict(raw, &in) != nil || in.PageSize < 0 || in.PageSize > 25 {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "discord/guild.list":
+		var in DiscordGuildList
+		if strict(raw, &in) != nil || in.Limit < 0 || in.Limit > 100 || !optionalSnowflake(in.After) {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "discord/message.list":
+		var in DiscordMessageList
+		if strict(raw, &in) != nil || in.Limit < 0 || in.Limit > 100 || !optionalSnowflake(in.Before) || !optionalSnowflake(in.After) ||
+			(in.Before != "" && in.After != "") {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "grafana/folder.list":
+		var in GrafanaFolderList
+		if strict(raw, &in) != nil || in.Limit < 0 || in.Limit > 100 || in.Page < 0 {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "grafana/dashboard.search":
+		var in GrafanaDashboardSearch
+		if strict(raw, &in) != nil || len(in.Query) > 256 || !tags(in.Tags) || in.Limit < 0 || in.Limit > 100 || in.Page < 0 {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "grafana/annotation.list":
+		var in GrafanaAnnotationList
+		if strict(raw, &in) != nil || !timeRange(in.From, in.To, 30*day) || !tags(in.Tags) || in.Limit < 0 || in.Limit > 100 ||
+			(in.DashboardUID != "" && !grafanaUID.MatchString(in.DashboardUID)) {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "grafana/datasource.query":
+		var in GrafanaDatasourceQuery
+		if strict(raw, &in) != nil || in.Expr == "" || len(in.Expr) > 4096 || !timeRange(in.From, in.To, 7*day) || in.MaxRows < 0 || in.MaxRows > 1000 {
 			return nil, ErrInvalid
 		}
 		return in, nil

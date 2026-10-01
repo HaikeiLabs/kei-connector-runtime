@@ -38,6 +38,8 @@ is resolved.
 | `crm` | shared secret (path 1), plus a service assertion signed by the runtime's installation key (D3) | n/a | supported |
 | `http_api` | shared secret (path 1) | n/a | supported: a generic governed connector with one allow-listed base URL (D4) |
 | `notion` | shared secret (path 1): a Notion internal integration token | n/a | supported (HAI-216); OAuth is not offered |
+| `discord` | shared secret (path 1): a Discord bot token | n/a | supported (HAI-310); OAuth is not offered |
+| `grafana` | shared secret (path 1): a Grafana service-account token, against the connector's `grafana.base_url` (`Metadata.Grafana`) | n/a | supported (HAI-311); OAuth is not offered |
 | `s3` | n/a | n/a | **removed**: S3 is storage, not a connector. The runtime denies it; removing the provider code and the catalog CHECK value is a separate ticket. |
 | `freshbooks`, `mercury` | n/a | n/a | not supported (present in `kei-connector-contracts`, not built) |
 
@@ -439,6 +441,21 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | notion | `search` | `search` (exactly; the `search/<query>` form is refused, so the query never reaches the catalog) | `{query?: string ≤512, page_size?: 1..25 (default 10)}` | `{results: [NotionItem], has_more, next_cursor?}`; an empty query lists what the integration can see |
 | notion | `page.read` | `pages/<id>` (32 hex digits, bare or dashed) | `{}` | `NotionPage` |
 | notion | `database.query` | `databases/<id>` | `{page_size?: 1..25 (default 10)}`; filters and sorts are not accepted yet | `[NotionPage]` |
+| discord | `guild.list` | `guilds` | `{limit?: 1..100 (default 25), after?: snowflake}` | `{guilds: [{id, name, owner}], next_after?}`; `next_after` is set when the page is full |
+| discord | `guild.read` | `guilds/<snowflake>` | `{}` | `{id, name, description?, owner_id, member_count}` |
+| discord | `channel.list` / `role.list` | `guilds/<snowflake>/channels` / `guilds/<snowflake>/roles` | `{}` | `[DiscordChannel]` / `[{id, name, position, permissions, managed}]` |
+| discord | `channel.read` | `channels/<snowflake>` | `{}` | `DiscordChannel` |
+| discord | `thread.list` | `channels/<snowflake>/threads` | `{}` | `[{id, guild_id, parent_id, name, type, message_count, archived}]`: the channel's active threads |
+| discord | `message.list` | `channels/<snowflake>/messages` | `{limit?: 1..100 (default 25), before?: snowflake, after?: snowflake}` (at most one cursor) | `{messages: [DiscordMessage], next_before?, next_after?}`; the cursor is set when the page is full |
+| discord | `message.read` | `channels/<snowflake>/messages/<snowflake>` | `{}` | `DiscordMessage` |
+| grafana | `folder.list` | `folders` | `{limit?: 1..100 (default 25), page?: ≥1 (default 1)}` | `{folders: [GrafanaFolder], next_page?}`; `next_page` is set when the page is full |
+| grafana | `folder.read` | `folders/<uid>` | `{}` | `GrafanaFolder` |
+| grafana | `dashboard.search` | `search` (exactly; the query stays in the input) | `{query?: ≤256 chars, tags?: ≤10 of 1..64 chars, limit?: 1..100 (default 25), page?: ≥1}` | `{dashboards: [{uid, title, url, tags, folder_uid?, folder_title?}], next_page?}`; dashboards only |
+| grafana | `dashboard.read` | `dashboards/<uid>` | `{}` | `{uid, title, tags, folder_uid?, version, panels: [{id, title, type, datasource_uid?, queries?}]}` |
+| grafana | `datasource.list` / `datasource.read` | `datasources` / `datasources/<uid>` | `{}` | `[GrafanaDatasource]` / `GrafanaDatasource` |
+| grafana | `alert_rule.list` | `alert_rules` | `{}` | `{rules: [{uid, title, folder_uid, rule_group, labels?, paused}], truncated}`; at most 200 rules |
+| grafana | `annotation.list` | `annotations` | `{from?, to?: epoch ms, set together, to > from, ≤30 days apart (default the last 24h), dashboard_uid?: uid, tags?: ≤10, limit?: 1..100 (default 25)}` | `[{id, dashboard_uid?, panel_id?, time, time_end?, text, tags?}]` |
+| grafana | `datasource.query` | `datasources/<uid>/query` | `{expr: string 1..4096, from?, to?: epoch ms, set together, to > from, ≤7 days apart (default the last hour), max_rows?: 1..1000 (default 100)}` | `{frames: [{name?, fields: [{name, type?, labels?}], rows}], truncated}`; at most `max_rows` rows across all frames |
 | crm | `lead.read` | `leads`, `leads/<id>`, `customers`, `customers/<id>` | `{}` | `{records: [Lead]}` or `{record: Lead}` |
 | crm | `investor.list` (HAI-210) | `investors` | `{stage?: prospect \| contacted \| meeting \| diligence \| committed \| passed, q?: ≤200 chars, limit?: 1-100 (default 20), cursor?: ≤128 chars}`, sent to the Worker as `{"data": <input>}` | `{records: [Investor], next_cursor: string \| null, has_more}` |
 | crm | `investor.read` (HAI-210) | `investors/<id>` | `{}` | `{record: Investor}` |
@@ -465,6 +482,49 @@ Redaction per capability:
   `gmail_include_body`) is a contract change. The runtime calls
   `api.notion.com/v1` with `Notion-Version: 2022-06-28`, and a connector
   whose `credential_source` is not `opaque_ref` is `descriptor_invalid`.
+- **Discord:** a `DiscordMessage` is `{id, channel_id, type, content, author:
+  {id, username, bot}, timestamp, edited_at?, attachment_count,
+  reaction_count}`. Attachments (and their CDN URLs), embeds, mentions, and
+  every other user field (email, avatar, and so on) are dropped when the
+  response is decoded. A `DiscordChannel` is `{id, guild_id?, name, type,
+  position, parent_id?, topic?, last_message_id?}`; permission overwrites are
+  dropped. Guild members are not readable. A snowflake is 17 to 20 digits;
+  any other resource shape is `input_invalid` before a request. The runtime
+  calls `discord.com/api/v10` with `Authorization: Bot <token>`, and a
+  connector whose `credential_source` is not `opaque_ref` is
+  `descriptor_invalid`. `thread.list` makes two requests: the channel (for its
+  guild) and the guild's active threads, filtered to the channel.
+- **Grafana:** a `GrafanaFolder` is `{uid, title, url?, parent_uid?}` and a
+  `GrafanaDatasource` is `{uid, name, type, is_default}`: a datasource's URL,
+  user, database, JSON settings, and secure-field flags are never returned.
+  Dashboards return a panel summary only (a collapsed row's panels follow the
+  row), with at most 10 query expressions per panel; templating values,
+  links, and the rest of the dashboard model are dropped. Annotations,
+  folders, and alert rules drop who created them (logins, emails, avatars),
+  and alert rules drop their queries and annotations. A uid is 1 to 40 of
+  `[A-Za-z0-9_-]`; any other resource shape is `input_invalid` before a
+  request. The runtime sends `Authorization: Bearer <token>` to
+  `grafana.base_url`, and a connector whose
+  `credential_source` is not `opaque_ref` is `descriptor_invalid`.
+- **Grafana host (`descriptor_invalid` before any request):** `base_url` must
+  be an `https` origin, with no path, query, fragment, or userinfo
+  (`contract.GrafanaConfig.Validate`). Self-hosted Grafana is
+  usually internal, so unlike `http_api`, private, CGNAT, and loopback
+  addresses are allowed. Link-local addresses (IPv4 and IPv6), unspecified and
+  multicast addresses, the cloud metadata addresses outside link-local
+  (`fd00:ec2::254`, `100.100.100.200`), and metadata host names
+  (`metadata.google.internal` and similar) are always refused. The host is
+  checked as an IP literal or on every resolved address. Redirects are never
+  followed, so the token cannot be carried to a host the check did not see.
+- **Grafana queries:** `datasource.query` first reads the datasource and
+  runs only against `prometheus` or `loki`, whose query languages cannot
+  write. Any other type (SQL, InfluxDB, Elasticsearch, and so on) is
+  `input_invalid`, and no query is sent. The query goes to `POST /api/ds/query`
+  with `maxDataPoints = max_rows`, `intervalMs = max(range / max_rows, 1s)`,
+  and, for Loki, `maxLines = max_rows`. The runtime also enforces the row cap
+  on the response. A per-query error is `provider_error`, and its text is
+  never surfaced. The expression stays in the input, so the catalog and audit
+  see only its digest.
 - **CRM:** a Lead is `{id, company_name, contact_name, email, role, status,
   priority, source, tier, created_at, updated_at}`. Free text (`message`,
   `early_access_notes`, audit answers) is dropped even if the Worker returns
@@ -591,7 +651,8 @@ In `kei-connector-runtime`, connector code lives under `internal/connector`:
 `invoke` (the command, the catalog call, execution dispatch, and audit),
 `input` (input parsing and per-capability validation), `credentials` (the two
 credential paths), and one package per connector: `gmail`, `googledrive`,
-`linear`, `github`, `tito`, `notion` (the Notion REST backend behind the
+`linear`, `github`, `tito`, `discord` and `grafana` (HTTP clients, called
+after the contract's `providers.Guard`), `notion` (the Notion REST backend behind the
 contract's `providers.NotionBackend` seam, since the module has only an
 in-memory one), `crm` (the MarketingSite Worker client and the D3
 assertion signing), and `httpapi` (the governed HTTP executor). Each connector
@@ -633,8 +694,11 @@ unchanged. "Runtime" codes are decided locally. A catalog deny without a
 | `result_too_large` | runtime | Raw provider response over 4 MiB, or redacted result over 1 MiB |
 
 Timeouts, all inside the `--timeout` budget (default 30s): catalog 10s,
-credential resolution 5s, provider 15s. Reads are not retried in layer 2, and
-writes are never retried by the runtime (the harness retries with the same
+credential resolution 5s, provider 15s. Reads are not retried in layer 2,
+with one deliberate exception: a Discord 429 whose `Retry-After` is at most
+2s is waited out and retried, up to 3 requests in all, inside the provider
+deadline (Discord rate-limits per route and expects it). A longer or missing
+`Retry-After` is `provider_rate_limited` at once. Writes are never retried by the runtime (the harness retries with the same
 `--idempotency-key`). Errors and logs never include the credential, the
 reference, the input, the result, provider response bodies, or the account
 email.
