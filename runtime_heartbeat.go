@@ -137,6 +137,7 @@ type HeartbeatReport struct {
 	RuntimeStartedAt string            `json:"runtime_started_at,omitempty"`
 	Harness          *HarnessEnvelope  `json:"harness,omitempty"`
 	Counters         *HeartbeatCounter `json:"counters,omitempty"`
+	ToolSyncStatus   string            `json:"tool_sync_status,omitempty"`
 }
 
 type HeartbeatCounter struct {
