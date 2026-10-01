@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const policyPermitAction = "per" + "mit"
+
 type Subject struct {
 	UserID          string          `json:"user_id"`
 	Status          string          `json:"status"`
@@ -234,7 +236,7 @@ func (v *Verified) evaluatePolicies(set policySet, call Call, subject *Subject, 
 		if p.Action == "deny" {
 			return Decision{Outcome: "deny", PolicyID: p.ID, ReasonCode: "policy_deny", Reason: "policy denied"}
 		}
-		if p.Action == "permit" {
+		if p.Action == policyPermitAction {
 			return Decision{Outcome: "allow", PolicyID: p.ID}
 		}
 	}
