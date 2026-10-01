@@ -58,57 +58,77 @@ type policy struct {
 }
 
 // Evaluate resolves the registered tool's canonical action and walks the
-// catalog-ordered policy array unchanged (priority DESC, deny first, id ASC).
+// catalog-ordered policy array unchanged (priority DESC, deny before permit, id ASC).
 func (v *Verified) Evaluate(call Call, subject *Subject) Decision {
 	set, err := v.decodePolicySet()
 	if err != nil {
 		return invalidDecision()
 	}
 	if call.AgentID == "" {
-		for _, a := range set.Agents {
-			if a.Default {
-				call.AgentID = a.ID
-				break
-			}
-		}
+		call.AgentID = defaultAgent(set)
 	}
-	var registered *tool
+	var reg *tool
 	for i := range set.Tools {
 		if set.Tools[i].Name == call.Tool {
-			registered = &set.Tools[i]
+			reg = &set.Tools[i]
 			break
 		}
 	}
-	if registered == nil {
+	if reg == nil {
 		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "tool is not registered in the policy bundle"}
 	}
-	return v.evaluateRegistered(call, subject, set, *registered)
+	return v.evaluateRegistered(call, subject, set, *reg)
 }
 
-// EvaluateConnector resolves a connector invocation through the exact tool
-// registration bound to its connector/capability, then reuses the same local
-// policy evaluator. Caller-supplied action text never selects a different rule.
+// EvaluateConnector resolves a connector call through the tool registry's exact
+// connector/capability binding; it never trusts the caller's free-form action to
+// choose a policy target.
 func (v *Verified) EvaluateConnector(call Call, subject *Subject) Decision {
 	set, err := v.decodePolicySet()
 	if err != nil {
 		return invalidDecision()
 	}
 	if call.AgentID == "" {
-		for _, a := range set.Agents {
-			if a.Default {
-				call.AgentID = a.ID
-				break
-			}
-		}
+		call.AgentID = defaultAgent(set)
 	}
-	for _, registered := range set.Tools {
-		if registered.ConnectorID == call.ConnectorID && registered.Capability == call.Capability {
-			call.Tool = registered.Name
+	for _, reg := range set.Tools {
+		if reg.ConnectorID == call.ConnectorID && reg.Capability == call.Capability {
+			call.Tool = reg.Name
 			call.ConnectorInvocation = true
-			return v.evaluateRegistered(call, subject, set, registered)
+			return v.evaluateRegistered(call, subject, set, reg)
 		}
 	}
 	return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector capability is not registered in the policy bundle"}
+}
+
+// EvaluateAction evaluates a runtime-owned non-tool operation (for example the
+// registered model gateway route) against explicit action/resource candidates.
+// The caller cannot select arbitrary actions through this API.
+func (v *Verified) EvaluateAction(action, resource, agentID string, subject *Subject) Decision {
+	if action != "model:invoke" {
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "internal action is not registered"}
+	}
+	set, err := v.decodePolicySet()
+	if err != nil {
+		return invalidDecision()
+	}
+	if agentID == "" {
+		agentID = defaultAgent(set)
+	}
+	if agentID != "" {
+		assigned := false
+		for _, a := range set.Agents {
+			if a.ID == agentID {
+				assigned = true
+				break
+			}
+		}
+		if !assigned {
+			return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "agent is not assigned to this installation"}
+		}
+	}
+	call := Call{Action: action, Resource: resource, AgentID: agentID}
+	return v.evaluatePolicies(set, call, subject, tool{})
 }
 
 func (v *Verified) decodePolicySet() (policySet, error) {
@@ -118,11 +138,19 @@ func (v *Verified) decodePolicySet() (policySet, error) {
 	}
 	return set, nil
 }
+func defaultAgent(set policySet) string {
+	for _, a := range set.Agents {
+		if a.Default {
+			return a.ID
+		}
+	}
+	return ""
+}
 func invalidDecision() Decision {
 	return Decision{Outcome: "deny", ReasonCode: "policy_bundle_invalid", Reason: "policy set cannot be decoded"}
 }
-func (v *Verified) evaluateRegistered(call Call, subject *Subject, set policySet, registered tool) Decision {
-	if !call.ConnectorInvocation && call.Action != "" && call.Action != registered.Action {
+func (v *Verified) evaluateRegistered(call Call, subject *Subject, set policySet, reg tool) Decision {
+	if !call.ConnectorInvocation && call.Action != "" && call.Action != reg.Action {
 		return Decision{Outcome: "deny", ReasonCode: "tool_action_mismatch", Reason: "action does not match the registered tool"}
 	}
 	if call.AgentID != "" {
@@ -138,12 +166,12 @@ func (v *Verified) evaluateRegistered(call Call, subject *Subject, set policySet
 		}
 	}
 	if call.ConnectorID == "" {
-		call.ConnectorID = registered.ConnectorID
+		call.ConnectorID = reg.ConnectorID
 	}
 	if call.Capability == "" {
-		call.Capability = registered.Capability
+		call.Capability = reg.Capability
 	}
-	if call.ConnectorID != "" {
+	if call.ConnectorInvocation && call.ConnectorID != "" {
 		bound := false
 		var bindings []struct {
 			AgentID      string   `json:"agent_id"`
@@ -166,6 +194,12 @@ func (v *Verified) evaluateRegistered(call Call, subject *Subject, set policySet
 			return Decision{Outcome: "deny", ReasonCode: "agent_not_bound_to_connector", Reason: "agent is not bound to connector capability"}
 		}
 	}
+	return v.evaluatePolicies(set, call, subject, reg)
+}
+func (v *Verified) evaluatePolicies(set policySet, call Call, subject *Subject, reg tool) Decision {
+	if subject != nil && subject.UserID != "" && call.UserID == "" {
+		call.UserID = subject.UserID
+	}
 	if (call.UserID != "" || call.Email != "") && subject == nil {
 		return Decision{Outcome: "deny", ReasonCode: "subject_resolution_unavailable", Reason: "subject attributes are required"}
 	}
@@ -180,8 +214,7 @@ func (v *Verified) evaluateRegistered(call Call, subject *Subject, set policySet
 		}
 		return Decision{Outcome: "deny", ReasonCode: reason, Reason: subject.Status}
 	}
-	groups := []string(nil)
-	roles := []string(nil)
+	groups, roles := []string(nil), []string(nil)
 	if subject != nil {
 		groups, roles = subject.EffectiveGroups, subject.OrgRoles
 	}
@@ -189,7 +222,7 @@ func (v *Verified) evaluateRegistered(call Call, subject *Subject, set policySet
 		if p.Scope.AgentID != nil && *p.Scope.AgentID != call.AgentID {
 			continue
 		}
-		if !dstMatch(p.Dst, call, registered) {
+		if !dstMatch(p.Dst, call, reg) {
 			continue
 		}
 		if subject == nil && requiresSubject(p.Src) {

@@ -400,6 +400,8 @@ func runAuthorize(args []string) int {
 			reason = "policy_bundle_expired"
 		} else if bundleState == policybundle.Invalid {
 			reason = "policy_bundle_invalid"
+		} else if bundleState == policybundle.Unsupported {
+			reason = "policy_bundle_unsupported"
 		} else if bundleState == policybundle.Revoked {
 			reason = "installation_revoked"
 		}

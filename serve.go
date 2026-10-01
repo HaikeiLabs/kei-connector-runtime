@@ -420,18 +420,11 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 		attrs = &resolved
 	}
 	agentID := envOr("KEI_PROXY_AGENT_ID", "")
-	decision := bundle.Evaluate(policybundle.Call{Tool: "model.invoke", Action: "model:invoke", Resource: "model:" + profile.ProfileID, AgentID: agentID, UserID: subjectIDFromResolved(attrs)}, attrs)
+	decision := bundle.EvaluateAction("model:invoke", "model:"+profile.ProfileID, agentID, attrs)
 	if decision.Outcome != "allow" {
 		return fmt.Errorf("local policy denied model invocation (%s)", decision.ReasonCode)
 	}
 	return nil
-}
-
-func subjectIDFromResolved(s *policybundle.Subject) string {
-	if s == nil {
-		return ""
-	}
-	return s.UserID
 }
 
 func (h *runtimeHTTPHandler) runtimeConfigError() error {

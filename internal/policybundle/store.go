@@ -14,12 +14,13 @@ import (
 type State string
 
 const (
-	Cold    State = "cold"
-	Active  State = "active"
-	Stale   State = "stale_but_valid"
-	Expired State = "expired"
-	Invalid State = "invalid"
-	Revoked State = "revoked"
+	Cold        State = "cold"
+	Active      State = "active"
+	Stale       State = "stale_but_valid"
+	Expired     State = "expired"
+	Invalid     State = "invalid"
+	Unsupported State = "unsupported"
+	Revoked     State = "revoked"
 )
 
 type diskState struct {
@@ -180,6 +181,9 @@ func (s *Store) Activate(envelope []byte, installationID, orgID, workspaceID str
 			s.state.LastCheck = now
 			if len(s.state.Envelope) == 0 {
 				s.state.State = Invalid
+				if errors.Is(err, ErrBundleUnsupported) {
+					s.state.State = Unsupported
+				}
 			}
 			_ = s.persist()
 			return err
@@ -206,6 +210,10 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time, 
 			state = Revoked
 			return errors.New("installation revoked")
 		}
+		if s.state.State == Unsupported {
+			state = Unsupported
+			return ErrBundleUnsupported
+		}
 		if s.state.State == Invalid {
 			state = Invalid
 			return errors.New("policy bundle invalid")
@@ -219,6 +227,12 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time, 
 			return errors.New("policy bundle missing")
 		}
 		v, e := Verify(s.state.Envelope, s.state.Keys, installationID, orgID, workspaceID, s.state.Version-1, now, production)
+		if errors.Is(e, ErrBundleUnsupported) {
+			s.state.State = Unsupported
+			_ = s.persist()
+			state = Unsupported
+			return e
+		}
 		if errors.Is(e, ErrBundleExpired) {
 			s.state.State = Expired
 			_ = s.persist()

@@ -18,7 +18,10 @@ const (
 	Issuer      = "kei-policy-catalog"
 )
 
-var ErrBundleExpired = errors.New("policy bundle expired")
+var (
+	ErrBundleExpired     = errors.New("policy bundle expired")
+	ErrBundleUnsupported = errors.New("policy bundle unsupported")
+)
 
 type Envelope struct {
 	PayloadType string      `json:"payloadType"`
@@ -123,14 +126,20 @@ func Verify(envBytes []byte, keys KeySet, installationID, orgID, workspaceID str
 		return nil, errors.New("policy envelope has no signature from a trusted, active, non-revoked key")
 	}
 	if err := validatePayloadSchema(payloadBytes); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "additional properties") {
+			return nil, fmt.Errorf("%w: closed schema rejected unknown field", ErrBundleUnsupported)
+		}
 		return nil, fmt.Errorf("invalid policy bundle schema: %w", err)
 	}
 	var payload Payload
 	if err := strictJSON(payloadBytes, &payload); err != nil {
 		return nil, fmt.Errorf("decode policy payload: %w", err)
 	}
-	if payload.Schema != "kei.policy-bundle/v1" || payload.Issuer != Issuer || payload.BundleID == "" || payload.BundleVersion < 1 || payload.PolicyRevision < 1 {
-		return nil, errors.New("unsupported policy bundle identity")
+	if payload.Schema != "kei.policy-bundle/v1" {
+		return nil, ErrBundleUnsupported
+	}
+	if payload.Issuer != Issuer || payload.BundleID == "" || payload.BundleVersion < 1 || payload.PolicyRevision < 1 {
+		return nil, errors.New("invalid policy bundle identity")
 	}
 	if payload.Audience.InstallationID != installationID || payload.Audience.OrgID != orgID || payload.Audience.WorkspaceID != workspaceID {
 		return nil, errors.New("policy bundle audience mismatch")
@@ -148,7 +157,7 @@ func Verify(envBytes []byte, keys KeySet, installationID, orgID, workspaceID str
 		return nil, errors.New("invalid policy bundle validity window")
 	}
 	if payload.SubjectResolution.Mode != "online" || payload.SubjectResolution.MaxCacheSeconds > 60 {
-		return nil, errors.New("unsupported subject resolution mode")
+		return nil, ErrBundleUnsupported
 	}
 	if err := validatePolicyDialect(payload.PolicySet); err != nil {
 		return nil, err
@@ -183,7 +192,7 @@ func validatePolicyDialect(raw json.RawMessage) error {
 		return err
 	}
 	if v.MatchSemantics != "kei.match/v1" || v.Evaluation.Order != "array_order_first_match" || v.Evaluation.Default != "deny" {
-		return errors.New("unsupported policy evaluation dialect")
+		return ErrBundleUnsupported
 	}
 	return nil
 }
