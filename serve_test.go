@@ -500,6 +500,8 @@ func TestRuntimeHTTPHandlerRejectsModelOutsideAssignedProfile(t *testing.T) {
 	}
 }
 
+func stringPtr(value string) *string { return &value }
+
 func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
 	const runtimeToken = "kh_live_runtime_test_token_1234567890"
 	const subject = "env-user"
@@ -513,14 +515,12 @@ func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	abac := &fakeRuntimeABAC{}
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
 			RuntimeControlPlaneURL: "http://control-plane.test",
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
-		abac:     abac,
 		client:   &http.Client{Timeout: time.Second},
 	}
 
@@ -529,11 +529,8 @@ func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if abac.request.InvokingSubject != subject {
-		t.Fatalf("InvokingSubject = %q, want %q", abac.request.InvokingSubject, subject)
+	if response.Code != http.StatusForbidden || providerCalls != 0 {
+		t.Fatalf("cold runtime must deny locally before provider dispatch: status=%d calls=%d body=%s", response.Code, providerCalls, response.Body.String())
 	}
 }
 
@@ -549,14 +546,12 @@ func TestRuntimeHTTPHandlerInvokingSubjectHeaderPassedToABAC(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	abac := &fakeRuntimeABAC{}
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
 			RuntimeControlPlaneURL: "http://control-plane.test",
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
-		abac:     abac,
 		client:   &http.Client{Timeout: time.Second},
 	}
 
@@ -566,14 +561,8 @@ func TestRuntimeHTTPHandlerInvokingSubjectHeaderPassedToABAC(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if abac.request.InvokingSubject != headerSubject {
-		t.Fatalf("InvokingSubject = %q, want %q", abac.request.InvokingSubject, headerSubject)
-	}
-	if abac.request.UserID != headerSubject {
-		t.Fatalf("UserID = %q, want %q", abac.request.UserID, headerSubject)
+	if response.Code != http.StatusForbidden || providerCalls != 0 {
+		t.Fatalf("cold runtime must deny locally before provider dispatch: status=%d calls=%d body=%s", response.Code, providerCalls, response.Body.String())
 	}
 }
 
@@ -592,7 +581,6 @@ func TestRuntimeHTTPHandlerInvokingSubjectMalformedReturns400(t *testing.T) {
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
-		abac:     &fakeRuntimeABAC{},
 		client:   &http.Client{Timeout: time.Second},
 	}
 
@@ -635,7 +623,6 @@ func TestRuntimeHTTPHandlerInvokingSubjectWithoutTokenStill401(t *testing.T) {
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", DefaultModel: "m1", Status: "active"}},
-		abac:     &fakeRuntimeABAC{},
 		client:   &http.Client{Timeout: time.Second},
 	}
 
@@ -675,14 +662,6 @@ func (f fakeRuntimeProfiles) GetRuntimeAssignedModelProfile(context.Context) (*M
 	return f.profile, nil
 }
 
-type fakeRuntimeABAC struct {
-	request AuthorizeRequest
-}
-
-func (f *fakeRuntimeABAC) Authorize(_ context.Context, request AuthorizeRequest) (*AuthorizeResponse, error) {
-	f.request = request
-	return &AuthorizeResponse{Decision: "allow"}, nil
-}
 func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
@@ -704,7 +683,6 @@ func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	handler := &runtimeHTTPHandler{
 		cfg:      config,
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "workspace-default", Status: "active"}},
-		abac:     &fakeRuntimeABAC{},
 		client:   &http.Client{Timeout: time.Second},
 	}
 
@@ -713,8 +691,8 @@ func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cold local policy must deny before provider dispatch: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -746,6 +724,8 @@ func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *te
 	var profileCalls, authorizeCalls int
 	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/whoami":
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "install-1", OrgID: "org-1", WorkspaceID: stringPtr("workspace-1"), Platform: "discord", Status: "active", BindingStatus: "verified"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned":
 			profileCalls++
 			if r.Header.Get("Authorization") != "Bearer "+runtimeToken {
@@ -758,7 +738,16 @@ func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *te
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/authorize":
 			authorizeCalls++
-			var request AuthorizeRequest
+			var request struct {
+				HarnessToken    string   `json:"harness_token"`
+				Action          string   `json:"action"`
+				Resource        string   `json:"resource"`
+				Resources       []string `json:"resources"`
+				AgentID         string   `json:"agent_id"`
+				UserID          string   `json:"user_id"`
+				InvokingSubject string   `json:"invoking_subject"`
+				Framework       string   `json:"framework"`
+			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode authorization request: %v", err)
 			}
@@ -791,11 +780,11 @@ func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *te
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing local policy bundle should deny: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if profileCalls != 1 || authorizeCalls != 1 || providerCalls != 1 {
-		t.Fatalf("calls profile=%d authorize=%d provider=%d, want 1 each", profileCalls, authorizeCalls, providerCalls)
+	if profileCalls != 1 || authorizeCalls != 0 || providerCalls != 0 {
+		t.Fatalf("calls profile=%d authorize=%d provider=%d; local policy must avoid catalog decision", profileCalls, authorizeCalls, providerCalls)
 	}
 }
 
@@ -809,6 +798,10 @@ func TestRuntimeHTTPHandlerDeniesBeforeProviderDispatch(t *testing.T) {
 	defer provider.Close()
 	var authorizeCalls int
 	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/whoami" {
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "install-1", OrgID: "org-1", WorkspaceID: stringPtr("workspace-1"), Platform: "discord", Status: "active", BindingStatus: "verified"})
+			return
+		}
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned" {
 			if r.Header.Get("Authorization") != "Bearer "+runtimeToken {
 				t.Errorf("profile request bearer = %q, want configured runtime token", r.Header.Get("Authorization"))
@@ -821,7 +814,16 @@ func TestRuntimeHTTPHandlerDeniesBeforeProviderDispatch(t *testing.T) {
 		}
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/authorize" {
 			authorizeCalls++
-			var request AuthorizeRequest
+			var request struct {
+				HarnessToken    string   `json:"harness_token"`
+				Action          string   `json:"action"`
+				Resource        string   `json:"resource"`
+				Resources       []string `json:"resources"`
+				AgentID         string   `json:"agent_id"`
+				UserID          string   `json:"user_id"`
+				InvokingSubject string   `json:"invoking_subject"`
+				Framework       string   `json:"framework"`
+			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode authorization request: %v", err)
 			}
@@ -845,7 +847,7 @@ func TestRuntimeHTTPHandlerDeniesBeforeProviderDispatch(t *testing.T) {
 	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"model_invocation_denied"`) {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if authorizeCalls != 1 || providerCalls != 0 {
-		t.Fatalf("calls authorize=%d provider=%d, want authorize once and no provider calls", authorizeCalls, providerCalls)
+	if authorizeCalls != 0 || providerCalls != 0 {
+		t.Fatalf("calls authorize=%d provider=%d, want no catalog decision and no provider calls", authorizeCalls, providerCalls)
 	}
 }

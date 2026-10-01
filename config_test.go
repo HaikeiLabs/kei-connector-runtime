@@ -50,6 +50,7 @@ func TestRuntimeValidateAcceptsValidToken(t *testing.T) {
 }
 
 func TestConfigFromEnvSetsDefaultRuntimeStateDir(t *testing.T) {
+	t.Setenv("KEI_RUNTIME_STATE_DIR", "")
 	cfg := configFromEnv()
 	if cfg.RuntimeStateDir != DefaultRuntimeStateDir {
 		t.Fatalf("RuntimeStateDir = %q, want default %q", cfg.RuntimeStateDir, DefaultRuntimeStateDir)

@@ -1,0 +1,243 @@
+{
+  "schema": "kei.policy-bundle/v1",
+  "bundle_id": "pb-fixture-0042",
+  "bundle_version": 42,
+  "policy_revision": 17,
+  "issuer": "kei-policy-catalog",
+  "audience": {
+    "installation_id": "inst-fixture-0001",
+    "org_id": "org-fixture-0001",
+    "workspace_id": "ws-fixture-0001"
+  },
+  "issued_at": "2026-09-28T16:00:00Z",
+  "not_after": "2026-09-29T04:00:00Z",
+  "refresh": {
+    "poll_interval_seconds": 60,
+    "stale_after_seconds": 300
+  },
+  "subject_resolution": {
+    "mode": "online",
+    "max_cache_seconds": 60
+  },
+  "policy_set": {
+    "schema": "kei.policy-set/v1",
+    "org_id": "org-fixture-0001",
+    "workspace_id": "ws-fixture-0001",
+    "match_semantics": "kei.match/v1",
+    "evaluation": {
+      "order": "array_order_first_match",
+      "default": "deny"
+    },
+    "groups": [
+      {
+        "id": "grp-admins-0001",
+        "name": "admins",
+        "description": "Full access to all resources",
+        "child_group_ids": [
+          "grp-members-0001"
+        ]
+      },
+      {
+        "id": "grp-members-0001",
+        "name": "members",
+        "description": "Default organization members",
+        "child_group_ids": []
+      }
+    ],
+    "tools": [
+      {
+        "name": "github.get_issue",
+        "service": "github",
+        "action": "github:read",
+        "connector_id": "conn-github-0001",
+        "capability": "issue.get"
+      },
+      {
+        "name": "github.create_issue",
+        "service": "github",
+        "action": "github:write",
+        "connector_id": "conn-github-0001",
+        "capability": "issue.create"
+      },
+      {
+        "name": "github.delete_repo",
+        "service": "github",
+        "action": "github:admin"
+      },
+      {
+        "name": "search_wiki",
+        "service": "",
+        "action": "tool:search_wiki",
+        "description": "Search internal wikis and knowledge bases"
+      },
+      {
+        "name": "search_web",
+        "service": "",
+        "action": "tool:search_web",
+        "description": "Search the web via configured search engine"
+      }
+    ],
+    "connectors": [
+      {
+        "id": "conn-github-0001",
+        "provider": "github",
+        "capabilities": [
+          {
+            "name": "issue.get",
+            "mutating": false
+          },
+          {
+            "name": "issue.create",
+            "mutating": true
+          }
+        ]
+      }
+    ],
+    "agents": [
+      {
+        "id": "agent-fixture-0001",
+        "is_default": true
+      }
+    ],
+    "policies": [
+      {
+        "id": "pol-admin-destructive-deny",
+        "name": "github-admin-deny",
+        "src_pattern": "*",
+        "dst_pattern": "github:admin",
+        "action": "deny",
+        "priority": 100,
+        "enabled": true,
+        "approval_required": false,
+        "description": "Destructive github:admin actions are denied for everyone.",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": null
+        }
+      },
+      {
+        "id": "pol-write-admin",
+        "name": "admins-github-write",
+        "src_pattern": "group:admins",
+        "dst_pattern": "github:write",
+        "action": "permit",
+        "priority": 70,
+        "enabled": true,
+        "approval_required": false,
+        "description": "Admins may write. Outranks the member write deny, which admins also match through group nesting.",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": null
+        }
+      },
+      {
+        "id": "pol-write-member-deny",
+        "name": "members-github-write-deny",
+        "src_pattern": "group:members",
+        "dst_pattern": "github:write",
+        "action": "deny",
+        "priority": 60,
+        "enabled": true,
+        "approval_required": false,
+        "description": "Members lack github:write.",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": null
+        }
+      },
+      {
+        "id": "pol-read-all",
+        "name": "members-github-read",
+        "src_pattern": "group:members",
+        "dst_pattern": "github:read",
+        "action": "permit",
+        "priority": 50,
+        "enabled": true,
+        "approval_required": false,
+        "description": "Members, and admins through nesting, may read.",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": null
+        }
+      },
+      {
+        "id": "pol-baseline-search-wiki",
+        "name": "ws:member:tool:search_wiki",
+        "src_pattern": "group:members",
+        "dst_pattern": "tool:search_wiki",
+        "action": "permit",
+        "priority": 50,
+        "enabled": true,
+        "approval_required": false,
+        "description": "Workspace baseline (HAI-123 BootstrapWorkspaceDefaultPoliciesTx).",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": null
+        }
+      },
+      {
+        "id": "pol-baseline-search-web",
+        "name": "ws:member:tool:search_web",
+        "src_pattern": "group:members",
+        "dst_pattern": "tool:search_web",
+        "action": "permit",
+        "priority": 50,
+        "enabled": true,
+        "approval_required": false,
+        "description": "Workspace baseline (HAI-123 BootstrapWorkspaceDefaultPoliciesTx).",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": null
+        }
+      },
+      {
+        "id": "pol-connector-create-approval",
+        "name": "agent-github-issue-create-approval",
+        "src_pattern": "agent:agent-fixture-0001",
+        "dst_pattern": "capability:issue.create",
+        "action": "permit",
+        "priority": 40,
+        "enabled": true,
+        "approval_required": true,
+        "description": "The fixture agent may create issues through the GitHub connector (per ADR-027, approval_required is retained for schema compatibility only).",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": "agent-fixture-0001"
+        }
+      },
+      {
+        "id": "pol-connector-get",
+        "name": "agent-github-issue-get",
+        "src_pattern": "agent:agent-fixture-0001",
+        "dst_pattern": "capability:issue.get",
+        "action": "permit",
+        "priority": 40,
+        "enabled": true,
+        "approval_required": false,
+        "description": "The fixture agent may read issues through the GitHub connector.",
+        "scope": {
+          "org_id": "org-fixture-0001",
+          "workspace_id": "ws-fixture-0001",
+          "agent_id": "agent-fixture-0001"
+        }
+      }
+    ]
+  },
+  "agent_connector_bindings": [
+    {
+      "agent_id": "agent-fixture-0001",
+      "connector_id": "conn-github-0001",
+      "capabilities": [
+        "issue.get",
+        "issue.create"
+      ]
+    }
+  ]
+}

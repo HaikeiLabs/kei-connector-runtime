@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.haikeilabs.com/kei/policy-bundle-v1.schema.json",
+  "title": "kei.policy-bundle/v1",
+  "description": "The policy bundle a runtime installation's PEP (kei-connector-runtime) enforces (ADR-026). The root schema is the signed payload. $defs/signed_envelope is the DSSE envelope the catalog serves and the runtime persists; $defs/signing_key_set is the verification key set. The $id is an identifier, not a fetchable URL.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "bundle_id",
+    "bundle_version",
+    "policy_revision",
+    "issuer",
+    "audience",
+    "issued_at",
+    "not_after",
+    "refresh",
+    "subject_resolution",
+    "policy_set",
+    "agent_connector_bindings"
+  ],
+  "properties": {
+    "schema": { "const": "kei.policy-bundle/v1" },
+    "bundle_id": {
+      "description": "Unique per issuance.",
+      "$ref": "policy-set-v1.schema.json#/$defs/id"
+    },
+    "bundle_version": {
+      "description": "Issuance sequence for this installation. Strictly increasing, never reused; every issuance (including a re-sign with unchanged policy) takes the next value. A runtime never activates a bundle_version lower than or equal to the highest it has activated.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "policy_revision": {
+      "description": "The workspace's policy revision this bundle was built from. Increases on every policy-affecting change in the workspace; equal across installations built from the same state. Carried to audit so a decision can be tied to the policy state that produced it.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "issuer": { "const": "kei-policy-catalog" },
+    "audience": {
+      "description": "Who may enforce this bundle. The runtime rejects a bundle whose audience does not equal its own whoami identity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["installation_id", "org_id", "workspace_id"],
+      "properties": {
+        "installation_id": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+        "org_id": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+        "workspace_id": { "$ref": "policy-set-v1.schema.json#/$defs/id" }
+      }
+    },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "not_after": {
+      "description": "Hard expiry. At or after this instant the bundle decides nothing: every call is denied with policy_bundle_expired. At most 24 hours after issued_at.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "refresh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["poll_interval_seconds", "stale_after_seconds"],
+      "properties": {
+        "poll_interval_seconds": {
+          "description": "Advised polling interval. The runtime clamps it to [30, 300] and applies +/-10% jitter.",
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 300
+        },
+        "stale_after_seconds": {
+          "description": "How long after the last successful refresh check the runtime reports the stale_but_valid state. Enforcement continues until not_after.",
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 3600
+        }
+      }
+    },
+    "subject_resolution": {
+      "description": "How the PEP learns a human subject's user id, link state, effective groups and org roles. v1 is always online: the PEP asks the catalog (POST /api/v1/runtime/subject-attributes:resolve) and never reads memberships from the bundle.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "max_cache_seconds"],
+      "properties": {
+        "mode": { "const": "online" },
+        "max_cache_seconds": {
+          "description": "The longest a resolved subject may be reused in memory by a long-running PEP. Per-call subprocesses do not cache.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60
+        }
+      }
+    },
+    "policy_set": { "$ref": "policy-set-v1.schema.json" },
+    "agent_connector_bindings": {
+      "description": "Which connector capabilities each assigned agent is bound to. A connector call by an unbound agent is denied before policy is evaluated.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agent_id", "connector_id", "capabilities"],
+        "properties": {
+          "agent_id": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+          "connector_id": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+          "capabilities": {
+            "type": "array",
+            "items": { "$ref": "policy-set-v1.schema.json#/$defs/name" },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "signed_envelope": {
+      "description": "DSSE v1 envelope (https://github.com/secure-systems-lab/dsse). Each signature is Ed25519 over PAE(payloadType, payload bytes) = \"DSSEv1\" SP len(payloadType) SP payloadType SP len(payload) SP payload. The runtime verifies before it parses the payload. The bundle's content hash is sha256 over the decoded payload bytes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payloadType", "payload", "signatures"],
+      "properties": {
+        "payloadType": { "const": "application/vnd.kei.policy-bundle.v1+json" },
+        "payload": {
+          "description": "Standard base64 of the exact payload bytes.",
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 4
+        },
+        "signatures": {
+          "description": "One signature normally; two during a signing-key rotation. The runtime needs at least one valid signature from a key that is active or retiring in its pinned key set.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyid", "sig"],
+            "properties": {
+              "keyid": { "$ref": "#/$defs/key_id" },
+              "sig": { "type": "string", "contentEncoding": "base64", "minLength": 4 }
+            }
+          }
+        }
+      }
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^kei-pb-[0-9]{6}-[0-9]{2}$"
+    },
+    "signing_key_set": {
+      "description": "Served by GET /api/v1/runtime/policy-signing-keys and embedded in the runtime bootstrap response. JWKS-shaped (RFC 7517, RFC 8037 OKP keys).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keys", "revoked_key_ids"],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kty", "crv", "x", "kid", "use", "alg", "status"],
+            "properties": {
+              "kty": { "const": "OKP" },
+              "crv": { "const": "Ed25519" },
+              "x": {
+                "description": "base64url public key, no padding.",
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{43}$"
+              },
+              "kid": { "$ref": "#/$defs/key_id" },
+              "use": { "const": "sig" },
+              "alg": { "const": "EdDSA" },
+              "status": {
+                "description": "next: published ahead of use, not yet signing. active: signing new bundles. retiring: no longer signing; accepted until every bundle it signed has expired.",
+                "enum": ["next", "active", "retiring"]
+              }
+            }
+          }
+        },
+        "revoked_key_ids": {
+          "description": "Keys that must never verify anything again, even from a persisted bundle.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/key_id" },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

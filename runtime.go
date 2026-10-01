@@ -72,7 +72,14 @@ func runRuntimeBootstrap(args []string, stdout, stderr io.Writer, cfg Config, ne
 	}
 	identity, err := bootstrapRuntimeWithClient(context.Background(), cfg, *timeout, newClient)
 	if err != nil {
+		if isRuntimeRevocation(err) {
+			revokePolicyState(cfg)
+		}
 		fmt.Fprintf(stderr, "runtime bootstrap failed: %v\n", err)
+		return 1
+	}
+	if err := syncPolicyBundle(context.Background(), cfg, identity, *timeout); err != nil {
+		fmt.Fprintf(stderr, "runtime policy bundle bootstrap failed: %v\n", err)
 		return 1
 	}
 	return writeRuntimeBootstrapOutput(stdout, identity, stderr)
@@ -117,6 +124,9 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	identity, err := bootstrapRuntimeWithClient(ctx, cfg, *timeout, newClient)
 	if err != nil {
+		if isRuntimeRevocation(err) {
+			revokePolicyState(cfg)
+		}
 		if ctx.Err() != nil {
 			return heartbeatExitOK
 		}
@@ -125,6 +135,9 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	if code := writeRuntimeBootstrapOutput(stdout, identity, stderr); code != 0 {
 		return code
+	}
+	if err := syncPolicyBundle(ctx, cfg, identity, *timeout); err != nil {
+		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
 	}
 	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
 	loop := &heartbeatLoop{
@@ -140,6 +153,9 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 		},
 	}
 	if err := loop.run(ctx, false); err != nil {
+		if isRuntimeRevocation(err) {
+			revokePolicyState(cfg)
+		}
 		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
 		return heartbeatExitTransient
 	}
@@ -198,11 +214,21 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 	}
 	identity, code := loop.resolveIdentity(ctx, cfg)
 	if identity == nil {
+		if code == heartbeatExitUnauthorized {
+			revokePolicyState(cfg)
+		}
 		return code
+	}
+	if err := syncPolicyBundle(ctx, cfg, identity, timeout); err != nil {
+		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
 	}
 	events.identity(identity)
 	// The first beat is sent at once and stands in for bootstrap's heartbeat.
-	return heartbeatExitFor(loop.run(ctx, true), events)
+	err = loop.run(ctx, true)
+	if isRuntimeRevocation(err) {
+		revokePolicyState(cfg)
+	}
+	return heartbeatExitFor(err, events)
 }
 
 // resolveIdentity fetches the authoritative installation identity from whoami.

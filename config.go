@@ -114,6 +114,9 @@ func ValidateRuntimeTokenFormat(token string) error {
 // absent in an environment that requires it.
 func (c Config) Validate() error {
 	if c.IsRuntime() {
+		if _, present := os.LookupEnv("KEI_HARNESS_TOKEN"); present {
+			return errors.New("KEI_HARNESS_TOKEN is unsupported; use KEI_RUNTIME_TOKEN")
+		}
 		if err := ValidateRuntimeTokenFormat(c.RuntimeToken); err != nil {
 			return err
 		}

@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.haikeilabs.com/kei/policy-set-v1.schema.json",
+  "title": "kei.policy-set/v1",
+  "description": "The policy catalog's policy model for one workspace, in evaluation order: policies, groups, tools, connectors and agents. It mirrors kei-policy-catalog pkg/database/policies.go and connector_policy.go. It carries metadata only (ADR-011): no credentials, provider payloads, results or subject memberships. The $id is an identifier, not a fetchable URL.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "org_id",
+    "workspace_id",
+    "match_semantics",
+    "evaluation",
+    "groups",
+    "tools",
+    "connectors",
+    "agents",
+    "policies"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kei.policy-set/v1"
+    },
+    "org_id": {
+      "$ref": "#/$defs/id"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/id"
+    },
+    "match_semantics": {
+      "description": "The pattern-matching dialect every evaluator must implement byte-for-byte. kei.match/v1 is kei-policy-catalog pkg/policy.MatchesPattern plus the connector src/dst candidate lists in connector_policy.go.",
+      "const": "kei.match/v1"
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order",
+        "default"
+      ],
+      "properties": {
+        "order": {
+          "description": "policies[] is already in evaluation order. The catalog sorts at publish time (priority DESC, updated_at DESC, id ASC); evaluators walk the array and the first policy whose src and dst both match decides.",
+          "const": "array_order_first_match"
+        },
+        "default": {
+          "description": "The decision when no policy matches. Always deny (fail closed).",
+          "const": "deny"
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/group"
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tool"
+      }
+    },
+    "connectors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/connector"
+      }
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
+    },
+    "policies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/policy"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "description": "An opaque identifier. The catalog emits UUIDs; test fixtures use readable handles such as ws-fixture-0001.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"
+    },
+    "src_pattern": {
+      "description": "Who a policy applies to: user:<id>, email:<address>, agent:<id>, org:<role>, group:<name>, a *<suffix> wildcard, or *.",
+      "type": "string",
+      "pattern": "^(\\*|\\*[^\\s]+|user:[^\\s]+|email:[^\\s]+|agent:[^\\s]+|org:[a-z_]+|group:[^\\s]+)$"
+    },
+    "dst_pattern": {
+      "description": "What a policy applies to: tool:<name>, connector:<id>, capability:<name>, resource:<resource>, the legacy <action>:<resource> form, a *<suffix> wildcard, or *.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(\\*|\\*[^\\s]+|[a-z_]+:[^\\s]+)$"
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "child_group_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "description": {
+          "type": "string"
+        },
+        "child_group_ids": {
+          "description": "Containment edges (ADR-015): this group contains these groups, so a member of this group effectively belongs to them too.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "service",
+        "action"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "service": {
+          "description": "Credential-lookup service. Empty means policy-only (no credential).",
+          "type": "string"
+        },
+        "action": {
+          "description": "The action string the runtime sends to the evaluator for this tool, e.g. github:read or tool:search_wiki.",
+          "type": "string",
+          "pattern": "^[a-z_]+:[^\\s]+$"
+        },
+        "connector_id": {
+          "$ref": "#/$defs/id"
+        },
+        "capability": {
+          "$ref": "#/$defs/name"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "connector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider",
+        "capabilities"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "mutating"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/name"
+              },
+              "mutating": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "is_default"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "is_default": {
+          "type": "boolean"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "src_pattern",
+        "dst_pattern",
+        "action",
+        "priority",
+        "enabled",
+        "approval_required",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "src_pattern": {
+          "$ref": "#/$defs/src_pattern"
+        },
+        "dst_pattern": {
+          "$ref": "#/$defs/dst_pattern"
+        },
+        "action": {
+          "enum": [
+            "permit",
+            "deny"
+          ]
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "enabled": {
+          "description": "Only enabled policies are published; a disabled row never appears in a policy set.",
+          "const": true
+        },
+        "approval_required": {
+          "description": "Retained for schema compatibility. Per ADR-027, this field is no longer evaluated by the bundle PEP. Approvals grant workspace access, not per-call permission.",
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "org_id",
+            "workspace_id",
+            "agent_id"
+          ],
+          "properties": {
+            "org_id": {
+              "description": "null only for a global platform default.",
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "workspace_id": {
+              "description": "null for a global default or a legacy org-scoped policy, which applies only in the org's default workspace.",
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "agent_id": {
+              "description": "When set, the policy is eligible only for calls made by this agent.",
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
