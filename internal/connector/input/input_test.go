@@ -178,3 +178,42 @@ func TestDecodeRejectsInvalidNotionInput(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeDiscord(t *testing.T) {
+	if got, err := Decode("discord", "guild.list", []byte(`{"limit":100,"after":"223456789012345678"}`)); err != nil || got != (DiscordGuildList{Limit: 100, After: "223456789012345678"}) {
+		t.Fatalf("discord guild.list = %#v, %v", got, err)
+	}
+	if got, err := Decode("discord", "message.list", []byte(`{"limit":50,"before":"523456789012345678"}`)); err != nil || got != (DiscordMessageList{Limit: 50, Before: "523456789012345678"}) {
+		t.Fatalf("discord message.list = %#v, %v", got, err)
+	}
+	if got, err := Decode("discord", "message.list", []byte(`{"after":"523456789012345678"}`)); err != nil || got != (DiscordMessageList{After: "523456789012345678"}) {
+		t.Fatalf("discord message.list after = %#v, %v", got, err)
+	}
+	for _, capability := range []string{"guild.read", "channel.list", "channel.read", "thread.list", "message.read", "role.list"} {
+		if got, err := Decode("discord", capability, []byte(`{}`)); err != nil || got != (Empty{}) {
+			t.Fatalf("discord %s = %#v, %v", capability, got, err)
+		}
+	}
+}
+
+func TestDecodeRejectsInvalidDiscordInput(t *testing.T) {
+	cases := []struct{ capability, input string }{
+		{"guild.list", `{"limit":101}`},
+		{"guild.list", `{"limit":-1}`},
+		{"guild.list", `{"after":"abc"}`},
+		{"guild.list", `{"after":"1234"}`},
+		{"guild.list", `{"before":"223456789012345678"}`},
+		{"message.list", `{"limit":101}`},
+		{"message.list", `{"before":"x"}`},
+		{"message.list", `{"before":"523456789012345678","after":"523456789012345679"}`},
+		{"message.list", `{"around":"523456789012345678"}`},
+		{"message.read", `{"message_id":"523456789012345678"}`},
+		{"member.list", `{}`},
+		{"message.write", `{}`},
+	}
+	for _, tc := range cases {
+		if _, err := Decode("discord", tc.capability, []byte(tc.input)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Decode(discord, %s, %s) err = %v", tc.capability, tc.input, err)
+		}
+	}
+}

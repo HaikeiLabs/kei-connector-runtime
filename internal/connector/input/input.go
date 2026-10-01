@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/providers"
@@ -115,6 +116,27 @@ type NotionDatabaseQuery struct {
 	PageSize int `json:"page_size,omitempty"`
 }
 
+// DiscordGuildList is the discord/guild.list input. After is the guild-id
+// cursor from a previous page's next_after.
+type DiscordGuildList struct {
+	Limit int    `json:"limit,omitempty"`
+	After string `json:"after,omitempty"`
+}
+
+// DiscordMessageList is the discord/message.list input. Before and After are
+// message-id cursors; at most one may be set (newest first when neither is).
+type DiscordMessageList struct {
+	Limit  int    `json:"limit,omitempty"`
+	Before string `json:"before,omitempty"`
+	After  string `json:"after,omitempty"`
+}
+
+// snowflake is a Discord id: 17 to 20 decimal digits.
+var snowflake = regexp.MustCompile(`^[0-9]{17,20}$`)
+
+// optionalSnowflake reports whether s is empty or a Discord id.
+func optionalSnowflake(s string) bool { return s == "" || snowflake.MatchString(s) }
+
 // CRMInvestorList is the crm/investor.list input. Its bounds are the
 // contract's (providers.InvestorListPayload.Validate).
 type CRMInvestorList = providers.InvestorListPayload
@@ -143,7 +165,9 @@ var emptyInput = map[string]bool{
 	"github/check.read": true, "github/workflow.read": true,
 	"tito/event.get": true, "tito/release.list": true, "tito/ticket.summary": true,
 	"crm/lead.read": true, "crm/investor.read": true,
-	"notion/page.read": true,
+	"notion/page.read":   true,
+	"discord/guild.read": true, "discord/channel.list": true, "discord/channel.read": true,
+	"discord/thread.list": true, "discord/message.read": true, "discord/role.list": true,
 }
 
 // Decode strictly decodes a canonical input for one provider capability.
@@ -188,6 +212,19 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 	case "notion/database.query":
 		var in NotionDatabaseQuery
 		if strict(raw, &in) != nil || in.PageSize < 0 || in.PageSize > 25 {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "discord/guild.list":
+		var in DiscordGuildList
+		if strict(raw, &in) != nil || in.Limit < 0 || in.Limit > 100 || !optionalSnowflake(in.After) {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "discord/message.list":
+		var in DiscordMessageList
+		if strict(raw, &in) != nil || in.Limit < 0 || in.Limit > 100 || !optionalSnowflake(in.Before) || !optionalSnowflake(in.After) ||
+			(in.Before != "" && in.After != "") {
 			return nil, ErrInvalid
 		}
 		return in, nil
