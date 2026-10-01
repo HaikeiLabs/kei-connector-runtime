@@ -2,8 +2,10 @@ package input
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -214,6 +216,66 @@ func TestDecodeRejectsInvalidDiscordInput(t *testing.T) {
 	for _, tc := range cases {
 		if _, err := Decode("discord", tc.capability, []byte(tc.input)); !errors.Is(err, ErrInvalid) {
 			t.Errorf("Decode(discord, %s, %s) err = %v", tc.capability, tc.input, err)
+		}
+	}
+}
+
+func TestDecodeGrafana(t *testing.T) {
+	const day = int64(24 * 60 * 60 * 1000)
+	from := int64(1_790_000_000_000)
+	cases := []struct {
+		capability, input string
+		want              any
+	}{
+		{"folder.list", `{"limit":50,"page":2}`, GrafanaFolderList{Limit: 50, Page: 2}},
+		{"dashboard.search", `{"query":"cpu","tags":["prod"],"limit":10}`, GrafanaDashboardSearch{Query: "cpu", Tags: []string{"prod"}, Limit: 10}},
+		{"dashboard.search", `{}`, GrafanaDashboardSearch{}},
+		{"annotation.list", fmt.Sprintf(`{"from":%d,"to":%d,"dashboard_uid":"abc-123","limit":5}`, from, from+30*day), GrafanaAnnotationList{From: from, To: from + 30*day, DashboardUID: "abc-123", Limit: 5}},
+		{"annotation.list", `{}`, GrafanaAnnotationList{}},
+		{"datasource.query", fmt.Sprintf(`{"expr":"up","from":%d,"to":%d,"max_rows":1000}`, from, from+7*day), GrafanaDatasourceQuery{Expr: "up", From: from, To: from + 7*day, MaxRows: 1000}},
+		{"datasource.query", `{"expr":"rate(http_requests_total[5m])"}`, GrafanaDatasourceQuery{Expr: "rate(http_requests_total[5m])"}},
+	}
+	for _, tc := range cases {
+		got, err := Decode("grafana", tc.capability, []byte(tc.input))
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("Decode(grafana, %s, %s) = %#v, %v; want %#v", tc.capability, tc.input, got, err, tc.want)
+		}
+	}
+	for _, capability := range []string{"folder.read", "dashboard.read", "datasource.list", "datasource.read", "alert_rule.list"} {
+		if got, err := Decode("grafana", capability, []byte(`{}`)); err != nil || got != (Empty{}) {
+			t.Fatalf("grafana %s = %#v, %v", capability, got, err)
+		}
+	}
+}
+
+func TestDecodeRejectsInvalidGrafanaInput(t *testing.T) {
+	const day = int64(24 * 60 * 60 * 1000)
+	from := int64(1_790_000_000_000)
+	cases := []struct{ capability, input string }{
+		{"folder.list", `{"limit":101}`},
+		{"folder.list", `{"page":-1}`},
+		{"dashboard.search", `{"query":"` + strings.Repeat("q", 257) + `"}`},
+		{"dashboard.search", `{"tags":["a","b","c","d","e","f","g","h","i","j","k"]}`},
+		{"dashboard.search", `{"tags":[""]}`},
+		{"dashboard.search", `{"type":"dash-folder"}`},
+		{"annotation.list", fmt.Sprintf(`{"from":%d}`, from)},
+		{"annotation.list", fmt.Sprintf(`{"from":%d,"to":%d}`, from, from)},
+		{"annotation.list", fmt.Sprintf(`{"from":%d,"to":%d}`, from, from+31*day)},
+		{"annotation.list", `{"dashboard_uid":"../x"}`},
+		{"annotation.list", `{"limit":101}`},
+		{"datasource.query", `{}`},
+		{"datasource.query", `{"expr":"` + strings.Repeat("x", 4097) + `"}`},
+		{"datasource.query", fmt.Sprintf(`{"expr":"up","from":%d,"to":%d}`, from, from+7*day+1)},
+		{"datasource.query", fmt.Sprintf(`{"expr":"up","from":%d,"to":%d}`, from+1, from)},
+		{"datasource.query", `{"expr":"up","from":-5,"to":10}`},
+		{"datasource.query", `{"expr":"up","max_rows":1001}`},
+		{"datasource.query", `{"expr":"up","rawSql":"DELETE FROM users"}`},
+		{"datasource.read", `{"uid":"x"}`},
+		{"dashboard.write", `{}`},
+	}
+	for _, tc := range cases {
+		if _, err := Decode("grafana", tc.capability, []byte(tc.input)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Decode(grafana, %s, %s) err = %v", tc.capability, tc.input, err)
 		}
 	}
 }
