@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.haikeilabs.com/kei/policy-bundle-v1.schema.json",
   "title": "kei.policy-bundle/v1",
-  "description": "The policy bundle a runtime installation's PEP (kei-connector-runtime) enforces (ADR-026). The root schema is the signed payload. $defs/signed_envelope is the DSSE envelope the catalog serves and the runtime persists; $defs/signing_key_set is the verification key set. The $id is an identifier, not a fetchable URL.",
+  "description": "The policy bundle a runtime installation's PEP (kei-connector-runtime) enforces (ADR-026). The root schema is the canonical JSON object served by the catalog and validated/persisted by the runtime. Transport integrity is provided by the exact-byte SHA-256 digest and authenticated HTTPS. The $id is an identifier, not a fetchable URL.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -103,81 +103,6 @@
             "items": { "$ref": "policy-set-v1.schema.json#/$defs/name" },
             "uniqueItems": true
           }
-        }
-      }
-    }
-  },
-  "$defs": {
-    "signed_envelope": {
-      "description": "DSSE v1 envelope (https://github.com/secure-systems-lab/dsse). Each signature is Ed25519 over PAE(payloadType, payload bytes) = \"DSSEv1\" SP len(payloadType) SP payloadType SP len(payload) SP payload. The runtime verifies before it parses the payload. The bundle's content hash is sha256 over the decoded payload bytes.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["payloadType", "payload", "signatures"],
-      "properties": {
-        "payloadType": { "const": "application/vnd.kei.policy-bundle.v1+json" },
-        "payload": {
-          "description": "Standard base64 of the exact payload bytes.",
-          "type": "string",
-          "contentEncoding": "base64",
-          "minLength": 4
-        },
-        "signatures": {
-          "description": "One signature normally; two during a signing-key rotation. The runtime needs at least one valid signature from a key that is active or retiring in its pinned key set.",
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 2,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["keyid", "sig"],
-            "properties": {
-              "keyid": { "$ref": "#/$defs/key_id" },
-              "sig": { "type": "string", "contentEncoding": "base64", "minLength": 4 }
-            }
-          }
-        }
-      }
-    },
-    "key_id": {
-      "type": "string",
-      "pattern": "^kei-pb-[0-9]{6}-[0-9]{2}$"
-    },
-    "signing_key_set": {
-      "description": "Served by GET /api/v1/runtime/policy-signing-keys and embedded in the runtime bootstrap response. JWKS-shaped (RFC 7517, RFC 8037 OKP keys).",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["keys", "revoked_key_ids"],
-      "properties": {
-        "keys": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kty", "crv", "x", "kid", "use", "alg", "status"],
-            "properties": {
-              "kty": { "const": "OKP" },
-              "crv": { "const": "Ed25519" },
-              "x": {
-                "description": "base64url public key, no padding.",
-                "type": "string",
-                "pattern": "^[A-Za-z0-9_-]{43}$"
-              },
-              "kid": { "$ref": "#/$defs/key_id" },
-              "use": { "const": "sig" },
-              "alg": { "const": "EdDSA" },
-              "status": {
-                "description": "next: published ahead of use, not yet signing. active: signing new bundles. retiring: no longer signing; accepted until every bundle it signed has expired.",
-                "enum": ["next", "active", "retiring"]
-              }
-            }
-          }
-        },
-        "revoked_key_ids": {
-          "description": "Keys that must never verify anything again, even from a persisted bundle.",
-          "type": "array",
-          "items": { "$ref": "#/$defs/key_id" },
-          "uniqueItems": true
         }
       }
     }

@@ -1,80 +1,67 @@
 package connectorruntime
 
 import (
+	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-func decodePayload(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
-func encodePayload(b []byte) string          { return base64.StdEncoding.EncodeToString(b) }
-
-func TestVerifyCanonicalBundleExample(t *testing.T) {
-	env, err := os.ReadFile("docs/contracts/examples/policy-bundle-v1.envelope.example.json")
+func TestValidateUnsignedCanonicalBundleAndDigest(t *testing.T) {
+	raw, err := os.ReadFile("docs/contracts/examples/policy-bundle-v1.payload.example.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := policybundle.KeySet{Keys: []policybundle.Key{{KTY: "OKP", CRV: "Ed25519", X: "W5NclXraIJdyUtLqIHtaY7XfnhskAmqiub36Tgt_ye8", KID: "kei-pb-000000-01", Use: "sig", Alg: "EdDSA", Status: "active"}}}
-	verified, err := policybundle.Verify(env, keys, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", 41, time.Date(2026, 9, 28, 17, 0, 0, 0, time.UTC), false)
+	now := time.Date(2026, 9, 28, 17, 0, 0, 0, time.UTC)
+	verified, err := policybundle.Validate(raw, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", 41, now)
 	if err != nil {
-		t.Fatalf("verify canonical test envelope: %v", err)
+		t.Fatalf("validate unsigned canonical bundle: %v", err)
 	}
-	if verified.Payload.BundleVersion != 42 || verified.Digest != "sha256:5f3896e479429bd8dae1c204c8ecbde5aa7a0e74d77a225592bfeed0fd30f311" {
-		t.Fatalf("unexpected verified bundle: version=%d digest=%s", verified.Payload.BundleVersion, verified.Digest)
+	want := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	if verified.Payload.BundleVersion != 42 || verified.Digest != want || string(verified.PayloadBytes) != string(raw) {
+		t.Fatalf("unsigned bundle version=%d digest=%s want=%s", verified.Payload.BundleVersion, verified.Digest, want)
 	}
-
-	if _, err := policybundle.Verify(env, keys, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", 41, time.Date(2026, 9, 28, 17, 0, 0, 0, time.UTC), true); err == nil {
-		t.Fatal("production accepted public test signing key")
+	if strings.Contains(string(raw), `"signatures"`) {
+		t.Fatal("canonical JSON payload unexpectedly requires or carries signatures")
 	}
 }
 
-func TestVerifyBundleRejectsTamperingRevocationAudienceAndReplay(t *testing.T) {
-	env, err := os.ReadFile("docs/contracts/examples/policy-bundle-v1.envelope.example.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys := policybundle.KeySet{Keys: []policybundle.Key{{KTY: "OKP", CRV: "Ed25519", X: "W5NclXraIJdyUtLqIHtaY7XfnhskAmqiub36Tgt_ye8", KID: "kei-pb-000000-01", Use: "sig", Alg: "EdDSA", Status: "active"}}}
+func TestValidateUnsignedBundleRejectsAudienceRollbackExpirySchemaAndDuplicateKeys(t *testing.T) {
 	now := time.Date(2026, 9, 28, 17, 0, 0, 0, time.UTC)
-	base := func(raw []byte, k policybundle.KeySet, installation string, high int64) error {
-		_, e := policybundle.Verify(raw, k, installation, "org-fixture-0001", "ws-fixture-0001", high, now, false)
-		return e
+	base := fixtureBundlePayloadForTest(t, now)
+	validate := func(raw []byte, installation string, highest int64, at time.Time) error {
+		_, err := policybundle.Validate(raw, installation, "org-fixture-0001", "ws-fixture-0001", highest, at)
+		return err
 	}
-	if err := base(env, keys, "other-installation", 41); err == nil {
+	if err := validate(base, "other-installation", 41, now); err == nil {
 		t.Fatal("accepted mismatched audience")
 	}
-	if err := base(env, keys, "inst-fixture-0001", 42); err == nil {
+	if err := validate(base, "inst-fixture-0001", 42, now); err == nil {
 		t.Fatal("accepted equal bundle version")
 	}
-	keys.RevokedKeyIDs = []string{"kei-pb-000000-01"}
-	if err := base(env, keys, "inst-fixture-0001", 41); err == nil {
-		t.Fatal("accepted revoked key")
+	if err := validate(base, "inst-fixture-0001", 41, now.Add(12*time.Hour)); !errors.Is(err, policybundle.ErrBundleExpired) {
+		t.Fatalf("expiry error=%v", err)
 	}
-	keys.RevokedKeyIDs = nil
-	var envelope policybundle.Envelope
-	if err := json.Unmarshal(env, &envelope); err != nil {
-		t.Fatal(err)
+	unknown := append(append([]byte(nil), base[:len(base)-2]...), []byte(`,"unexpected":true}`)...)
+	if err := validate(unknown, "inst-fixture-0001", 41, now); err == nil {
+		t.Fatal("accepted unknown schema field")
 	}
-	payload, err := decodePayload(envelope.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload[len(payload)-2] ^= 1
-	envelope.Payload = encodePayload(payload)
-	tampered, _ := json.Marshal(envelope)
-	if err := base(tampered, keys, "inst-fixture-0001", 41); err == nil {
-		t.Fatal("accepted payload changed without re-signing")
+	duplicate := bytes.Replace(base, []byte(`"bundle_version": 42`), []byte(`"bundle_version": 42, "bundle_version": 43`), 1)
+	if err := validate(duplicate, "inst-fixture-0001", 41, now); err == nil {
+		t.Fatal("accepted duplicate security field")
 	}
 }
 
 func TestVendoredFixtureHashesAndCanonicalAuthorizeParity(t *testing.T) {
 	for path, want := range map[string]string{
-		"docs/contracts/policy-bundle-v1.schema.json": "405320d0f605784ba26de3daf1b8bb6411772096b952beeea6e503f48a847b29",
+		"docs/contracts/policy-bundle-v1.schema.json": "16df971e54c626e8fc5b1d20224047d589a25afbd10dff13f940e73fc19c91ab",
 		"docs/contracts/policy-set-v1.schema.json":    "0b69f38f0df1e9d873eba6bede8d0f69671c5fdc3fb2c5df95f37136bb875fd1",
 	} {
 		b, err := os.ReadFile(path)
@@ -172,6 +159,22 @@ func TestVendoredFixtureHashesAndCanonicalAuthorizeParity(t *testing.T) {
 		}
 		if tc.Expected.PolicyID != nil && got.PolicyID != *tc.Expected.PolicyID {
 			t.Errorf("%s policy=%s want=%s", tc.ID, got.PolicyID, *tc.Expected.PolicyID)
+		}
+	}
+}
+
+func TestUnsignedBundleLocallyAllowsExactSearchSelectors(t *testing.T) {
+	now := time.Now().UTC()
+	raw := fixtureBundlePayloadForTest(t, now)
+	bundle, err := policybundle.Validate(raw, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", 41, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := &policybundle.Subject{UserID: "user-member-0001", Status: "linked_approved", EffectiveGroups: []string{"members"}}
+	for _, tc := range []struct{ tool, action string }{{"web_search", "tool:web_search"}, {"search_wiki", "tool:search_wiki"}} {
+		got := bundle.Evaluate(policybundle.Call{Tool: tc.tool, Action: tc.action, UserID: subject.UserID}, subject)
+		if got.Outcome != "allow" {
+			t.Errorf("unsigned bundle action %s -> %s decision=%+v", tc.tool, tc.action, got)
 		}
 	}
 }

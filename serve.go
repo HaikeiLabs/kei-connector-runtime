@@ -391,7 +391,7 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	if err != nil {
 		return err
 	}
-	bundle, _, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC(), h.cfg.IsProduction())
+	bundle, _, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("local policy bundle unavailable: %w", err)
 	}
@@ -401,7 +401,7 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	}
 	var attrs *policybundle.Subject
 	if subject != "" || h.cfg.ProviderUserID != "" {
-		client := newPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second)
+		client := newPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
 		req := subjectResolveRequest{}
 		if subject != "" {
 			req.UserID = subject
@@ -433,6 +433,9 @@ func (h *runtimeHTTPHandler) runtimeConfigError() error {
 	}
 	if h.cfg.RuntimeControlPlaneURL == "" {
 		return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required")
+	}
+	if err := validatePolicyControlPlaneURL(h.cfg.RuntimeControlPlaneURL, !h.cfg.IsProduction()); err != nil {
+		return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
 	}
 	return nil
 }

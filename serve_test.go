@@ -206,7 +206,7 @@ func TestRuntimeHTTPHandlerHealthProbeProviderHealthy(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 		},
 		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "p1", Endpoint: provider.URL, Status: "active", AuthType: "none"}},
@@ -232,7 +232,7 @@ func TestRuntimeHTTPHandlerHealthProbeProviderUnhealthy(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 		},
 		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "p1", Endpoint: provider.URL, Status: "active", AuthType: "none"}},
@@ -256,7 +256,7 @@ func TestRuntimeHTTPHandlerHealthProbeProviderUnreachable(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 		},
 		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "p1", Endpoint: provider.URL, Status: "active", AuthType: "none"}},
@@ -277,7 +277,7 @@ func TestRuntimeHTTPHandlerHealthProbeProviderUnreachable(t *testing.T) {
 func TestRuntimeHTTPHandlerHealthProbeNoProfile(t *testing.T) {
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 		},
 		profiles: fakeRuntimeProfiles{assignedErr: errors.New("no profile assigned")},
@@ -306,7 +306,7 @@ func TestRuntimeHTTPHandlerHealthProbeSendsAuthHeader(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 		},
 		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
@@ -425,7 +425,7 @@ func TestRuntimeHTTPHandlerRejectsInvalidToken(t *testing.T) {
 
 func TestRuntimeHTTPHandlerRequiresBearerToken(t *testing.T) {
 	config := Config{
-		RuntimeControlPlaneURL: "http://control-plane.test",
+		RuntimeControlPlaneURL: "https://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 	}
 	handler := newRuntimeHTTPHandler(config)
@@ -440,7 +440,7 @@ func TestRuntimeHTTPHandlerRequiresBearerToken(t *testing.T) {
 
 func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
 	config := Config{
-		RuntimeControlPlaneURL: "http://control-plane.test",
+		RuntimeControlPlaneURL: "https://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 	}
 	handler := &runtimeHTTPHandler{
@@ -468,7 +468,7 @@ func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
 
 func TestRuntimeHTTPHandlerDoesNotFallBackToOrganizationDefaultModel(t *testing.T) {
 	config := Config{
-		RuntimeControlPlaneURL: "http://control-plane.test",
+		RuntimeControlPlaneURL: "https://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 	}
 	handler := &runtimeHTTPHandler{
@@ -517,7 +517,7 @@ func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
@@ -548,7 +548,7 @@ func TestRuntimeHTTPHandlerInvokingSubjectHeaderPassedToABAC(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
@@ -577,7 +577,7 @@ func TestRuntimeHTTPHandlerInvokingSubjectMalformedReturns400(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
@@ -619,7 +619,7 @@ func TestRuntimeHTTPHandlerInvokingSubjectWithoutTokenStill401(t *testing.T) {
 
 	handler := &runtimeHTTPHandler{
 		cfg: Config{
-			RuntimeControlPlaneURL: "http://control-plane.test",
+			RuntimeControlPlaneURL: "https://control-plane.test",
 			RuntimeToken:           runtimeToken,
 		},
 		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", DefaultModel: "m1", Status: "active"}},
@@ -677,7 +677,7 @@ func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
 	defer provider.Close()
 
 	config := Config{
-		RuntimeControlPlaneURL: "http://control-plane.test",
+		RuntimeControlPlaneURL: "https://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 	}
 	handler := &runtimeHTTPHandler{

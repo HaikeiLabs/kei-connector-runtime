@@ -26,15 +26,15 @@ const (
 type diskState struct {
 	Version     int64           `json:"highest_bundle_version"`
 	Audience    Audience        `json:"audience"`
+	Digest      string          `json:"bundle_digest,omitempty"`
 	LastCheck   time.Time       `json:"last_check,omitempty"`
 	LastSuccess time.Time       `json:"last_success,omitempty"`
 	State       State           `json:"state"`
-	Envelope    json.RawMessage `json:"-"`
-	Keys        KeySet          `json:"-"`
+	Bundle      json.RawMessage `json:"-"`
 }
 type Store struct {
-	dir, statePath, envelopePath, keysPath string
-	state                                  diskState
+	dir, statePath, bundlePath string
+	state                      diskState
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -61,15 +61,19 @@ func OpenStore(dir string) (*Store, error) {
 	if err := os.Chmod(pdir, 0700); err != nil {
 		return nil, err
 	}
-	s := &Store{dir: pdir, statePath: filepath.Join(pdir, "state.json"), envelopePath: filepath.Join(pdir, "envelope.json"), keysPath: filepath.Join(pdir, "keys.json"), state: diskState{State: Cold}}
-	if err := s.withLock(func() error { return s.reload() }); err != nil {
+	s := &Store{dir: pdir, statePath: filepath.Join(pdir, "state.json"), bundlePath: filepath.Join(pdir, "bundle.json"), state: diskState{State: Cold}}
+	if err := s.withLock(func() error {
+		if s.state.State == Invalid {
+			return s.persist()
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 func (s *Store) State() State          { return s.state.State }
 func (s *Store) HighestVersion() int64 { return s.state.Version }
-func (s *Store) PinnedKeys() KeySet    { return s.state.Keys }
 
 func (s *Store) withLock(fn func() error) error {
 	f, err := os.OpenFile(filepath.Join(s.dir, "state.lock"), os.O_CREATE|os.O_RDWR, 0600)
@@ -106,22 +110,9 @@ func readSecureBytes(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 func readSecureFile(path string, dst any) error {
-	fi, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return err
-	}
+	b, err := readSecureBytes(path)
 	if err != nil {
 		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() || fi.Mode().Perm()&0077 != 0 {
-		return errors.New("policy state file permissions or type are unsafe")
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if dst == nil {
-		return nil
 	}
 	return strictJSON(b, dst)
 }
@@ -130,56 +121,25 @@ func (s *Store) reload() error {
 	if err := readSecureFile(s.statePath, &s.state); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read policy state: %w", err)
 	}
-	var keys KeySet
-	if err := readSecureFile(s.keysPath, &keys); err == nil {
-		s.state.Keys = keys
+	bundle, err := readSecureBytes(s.bundlePath)
+	if err == nil {
+		s.state.Bundle = bundle
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read pinned policy keys: %w", err)
+		return fmt.Errorf("read persisted policy bundle: %w", err)
 	}
-	if envelope, err := readSecureBytes(s.envelopePath); err == nil {
-		s.state.Envelope = envelope
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read persisted policy envelope: %w", err)
-	}
-	if s.state.State != Cold && s.state.State != Revoked && (len(s.state.Envelope) == 0 || len(s.state.Keys.Keys) == 0) {
+	if s.state.State != Cold && s.state.State != Revoked && (len(s.state.Bundle) == 0 || s.state.Digest == "") {
 		s.state.State = Invalid
 	}
 	return nil
 }
 
-// PinKeys only accepts sets fetched over the authenticated runtime control-plane
-// channel. Revocations are sticky and cannot be undone by a later response.
-func (s *Store) PinKeys(keys KeySet) error {
-	return s.withLock(func() error {
-		seen := map[string]bool{}
-		for _, id := range s.state.Keys.RevokedKeyIDs {
-			seen[id] = true
-		}
-		for _, id := range keys.RevokedKeyIDs {
-			seen[id] = true
-		}
-		keys.RevokedKeyIDs = keys.RevokedKeyIDs[:0]
-		for id := range seen {
-			keys.RevokedKeyIDs = append(keys.RevokedKeyIDs, id)
-		}
-		s.state.Keys = keys
-		if len(s.state.Envelope) > 0 {
-			for _, sig := range envelopeKeyIDs(s.state.Envelope) {
-				if seen[sig] {
-					s.state.State = Invalid
-				}
-			}
-		}
-		return s.persist()
-	})
-}
-func (s *Store) Activate(envelope []byte, installationID, orgID, workspaceID string, now time.Time, production bool) (*Verified, error) {
+func (s *Store) Activate(bundle []byte, installationID, orgID, workspaceID string, now time.Time) (*Verified, error) {
 	var verified *Verified
 	err := s.withLock(func() error {
-		v, err := Verify(envelope, s.state.Keys, installationID, orgID, workspaceID, s.state.Version, now, production)
+		v, err := Validate(bundle, installationID, orgID, workspaceID, s.state.Version, now)
 		if err != nil {
 			s.state.LastCheck = now
-			if len(s.state.Envelope) == 0 {
+			if len(s.state.Bundle) == 0 {
 				s.state.State = Invalid
 				if errors.Is(err, ErrBundleUnsupported) {
 					s.state.State = Unsupported
@@ -190,7 +150,8 @@ func (s *Store) Activate(envelope []byte, installationID, orgID, workspaceID str
 		}
 		s.state.Version = v.Payload.BundleVersion
 		s.state.Audience = v.Payload.Audience
-		s.state.Envelope = append(json.RawMessage(nil), envelope...)
+		s.state.Digest = v.Digest
+		s.state.Bundle = append(json.RawMessage(nil), bundle...)
 		s.state.LastCheck = now
 		s.state.LastSuccess = now
 		s.state.State = Active
@@ -202,7 +163,7 @@ func (s *Store) Activate(envelope []byte, installationID, orgID, workspaceID str
 	})
 	return verified, err
 }
-func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time, production bool) (*Verified, State, error) {
+func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time) (*Verified, State, error) {
 	var verified *Verified
 	state := Cold
 	err := s.withLock(func() error {
@@ -222,11 +183,11 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time, 
 			state = Expired
 			return ErrBundleExpired
 		}
-		if len(s.state.Envelope) == 0 {
+		if len(s.state.Bundle) == 0 {
 			state = Cold
 			return errors.New("policy bundle missing")
 		}
-		v, e := Verify(s.state.Envelope, s.state.Keys, installationID, orgID, workspaceID, s.state.Version-1, now, production)
+		v, e := Validate(s.state.Bundle, installationID, orgID, workspaceID, s.state.Version-1, now)
 		if errors.Is(e, ErrBundleUnsupported) {
 			s.state.State = Unsupported
 			_ = s.persist()
@@ -239,7 +200,7 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time, 
 			state = Expired
 			return ErrBundleExpired
 		}
-		if e != nil || v.Payload.BundleVersion != s.state.Version {
+		if e != nil || v.Payload.BundleVersion != s.state.Version || v.Digest != s.state.Digest || s.state.LastSuccess.IsZero() {
 			s.state.State = Invalid
 			_ = s.persist()
 			state = Invalid
@@ -259,11 +220,25 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time, 
 func (s *Store) RefreshFailed(now time.Time) error {
 	return s.withLock(func() error { s.state.LastCheck = now; return s.persist() })
 }
+func (s *Store) RecordRejectedCandidate(now time.Time, cause error) error {
+	return s.withLock(func() error {
+		s.state.LastCheck = now
+		if len(s.state.Bundle) == 0 && s.state.State != Revoked {
+			s.state.State = Invalid
+			if errors.Is(cause, ErrBundleUnsupported) {
+				s.state.State = Unsupported
+			} else if errors.Is(cause, ErrBundleExpired) {
+				s.state.State = Expired
+			}
+		}
+		return s.persist()
+	})
+}
 func (s *Store) RefreshSucceeded(now time.Time) error {
 	return s.withLock(func() error {
 		s.state.LastCheck = now
 		s.state.LastSuccess = now
-		if s.state.State != Revoked && len(s.state.Envelope) > 0 {
+		if s.state.State != Revoked && len(s.state.Bundle) > 0 {
 			s.state.State = Active
 		}
 		return s.persist()
@@ -272,7 +247,8 @@ func (s *Store) RefreshSucceeded(now time.Time) error {
 func (s *Store) Revoke(now time.Time) error {
 	return s.withLock(func() error {
 		s.state.State = Revoked
-		s.state.Envelope = nil
+		s.state.Bundle = nil
+		s.state.Digest = ""
 		s.state.LastCheck = now
 		return s.persist()
 	})
@@ -284,17 +260,12 @@ func (s *Store) persist() error {
 	if err := os.Chmod(s.dir, 0700); err != nil {
 		return err
 	}
-	if len(s.state.Keys.Keys) > 0 {
-		if err := writeAtomic(s.keysPath, s.state.Keys); err != nil {
+	if len(s.state.Bundle) > 0 {
+		if err := writeAtomicBytes(s.bundlePath, s.state.Bundle); err != nil {
 			return err
 		}
-	}
-	if len(s.state.Envelope) > 0 {
-		if err := writeAtomic(s.envelopePath, json.RawMessage(s.state.Envelope)); err != nil {
-			return err
-		}
-	} else if s.state.State == Revoked {
-		if err := os.Remove(s.envelopePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	} else if s.state.State == Revoked || s.state.State == Invalid || s.state.State == Unsupported {
+		if err := os.Remove(s.bundlePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -308,6 +279,9 @@ func writeAtomic(path string, value any) error {
 	if err != nil {
 		return err
 	}
+	return writeAtomicBytes(path, b)
+}
+func writeAtomicBytes(path string, b []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".policy-state-*")
 	if err != nil {
@@ -339,15 +313,4 @@ func syncDirectory(dir string) error {
 	}
 	defer d.Close()
 	return d.Sync()
-}
-func envelopeKeyIDs(raw []byte) []string {
-	var e Envelope
-	if json.Unmarshal(raw, &e) != nil {
-		return nil
-	}
-	ids := make([]string, 0, len(e.Signatures))
-	for _, s := range e.Signatures {
-		ids = append(ids, s.KeyID)
-	}
-	return ids
 }

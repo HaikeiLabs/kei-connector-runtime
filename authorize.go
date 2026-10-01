@@ -393,7 +393,7 @@ func runAuthorize(args []string) int {
 	if err != nil {
 		return writePolicyStateDenial(os.Stdout, os.Stderr, "startup_config_invalid", err)
 	}
-	activeBundle, bundleState, err := store.Check(identity.ID, orgID, workspaceID, time.Now().UTC(), cfg.IsProduction())
+	activeBundle, bundleState, err := store.Check(identity.ID, orgID, workspaceID, time.Now().UTC())
 	if err != nil {
 		reason := "policy_bundle_missing"
 		if bundleState == policybundle.Expired {
@@ -413,7 +413,7 @@ func runAuthorize(args []string) int {
 	}
 	var subject *policybundle.Subject
 	if *user != "" || subjectProviderID != "" {
-		control := newPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second)
+		control := newPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
 		req := subjectResolveRequest{}
 		if *user != "" {
 			req.UserID = *user

@@ -125,11 +125,8 @@ func (c Config) Validate() error {
 		if c.RuntimeControlPlaneURL == "" {
 			return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required when KEI_RUNTIME_TOKEN is set")
 		}
-		if !strings.HasPrefix(c.RuntimeControlPlaneURL, "https://") && !strings.HasPrefix(c.RuntimeControlPlaneURL, "http://") {
-			return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL must be an absolute http(s) URL")
-		}
-		if c.IsProduction() && !strings.HasPrefix(c.RuntimeControlPlaneURL, "https://") {
-			return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL must use https in production or staging")
+		if err := validatePolicyControlPlaneURL(c.RuntimeControlPlaneURL, !c.IsProduction()); err != nil {
+			return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
 		}
 		return nil
 	}

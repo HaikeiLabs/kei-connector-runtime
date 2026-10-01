@@ -1,50 +1,23 @@
 package policybundle
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"time"
 )
 
-const (
-	PayloadType = "application/vnd.kei.policy-bundle.v1+json"
-	Issuer      = "kei-policy-catalog"
-)
+const ContentType = "application/vnd.kei.policy-bundle.v1+json"
+const Issuer = "kei-policy-catalog"
 
 var (
 	ErrBundleExpired     = errors.New("policy bundle expired")
 	ErrBundleUnsupported = errors.New("policy bundle unsupported")
 )
 
-type Envelope struct {
-	PayloadType string      `json:"payloadType"`
-	Payload     string      `json:"payload"`
-	Signatures  []Signature `json:"signatures"`
-}
-type Signature struct {
-	KeyID string `json:"keyid"`
-	Sig   string `json:"sig"`
-}
-type KeySet struct {
-	Keys          []Key    `json:"keys"`
-	RevokedKeyIDs []string `json:"revoked_key_ids"`
-}
-type Key struct {
-	KTY    string `json:"kty"`
-	CRV    string `json:"crv"`
-	X      string `json:"x"`
-	KID    string `json:"kid"`
-	Use    string `json:"use"`
-	Alg    string `json:"alg"`
-	Status string `json:"status"`
-}
 type Audience struct {
 	InstallationID string `json:"installation_id"`
 	OrgID          string `json:"org_id"`
@@ -75,68 +48,36 @@ type Verified struct {
 	Payload      Payload
 	PayloadBytes []byte
 	Digest       string
-	KeyIDs       []string
 }
 
-// Verify authenticates DSSE PAE bytes against the runtime's authenticated pinned key set
-// before parsing and strict-schema validating the payload. Public test keys are never
-// accepted by production mode.
-func Verify(envBytes []byte, keys KeySet, installationID, orgID, workspaceID string, highestVersion int64, now time.Time, production bool) (*Verified, error) {
-	if err := ValidateKeySet(keys); err != nil {
-		return nil, fmt.Errorf("invalid pinned signing keys: %w", err)
+// Validate checks an unsigned catalog bundle retrieved over the authenticated
+// HTTPS runtime-control-plane connection. The digest binds the exact received
+// bytes to the catalog ETag and persisted state; it is not a signature.
+func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, highestVersion int64, now time.Time) (*Verified, error) {
+	if len(bundleBytes) == 0 {
+		return nil, errors.New("empty policy bundle")
 	}
-	var env Envelope
-	if err := strictJSON(envBytes, &env); err != nil {
-		return nil, fmt.Errorf("decode envelope: %w", err)
+	if err := RejectDuplicateJSON(bundleBytes); err != nil {
+		return nil, err
 	}
-	if env.PayloadType != PayloadType || len(env.Signatures) == 0 || len(env.Signatures) > 2 {
-		return nil, errors.New("unsupported or malformed policy envelope")
+	var identity struct {
+		Schema string `json:"schema"`
 	}
-	payloadBytes, err := base64.StdEncoding.DecodeString(env.Payload)
-	if err != nil || len(payloadBytes) == 0 {
-		return nil, errors.New("invalid envelope payload encoding")
+	if err := json.Unmarshal(bundleBytes, &identity); err != nil {
+		return nil, fmt.Errorf("decode policy bundle identity: %w", err)
 	}
-	pae := dssePAE(env.PayloadType, payloadBytes)
-	revoked := make(map[string]bool, len(keys.RevokedKeyIDs))
-	for _, id := range keys.RevokedKeyIDs {
-		revoked[id] = true
+	if identity.Schema != "kei.policy-bundle/v1" {
+		return nil, ErrBundleUnsupported
 	}
-	byID := make(map[string]Key, len(keys.Keys))
-	for _, k := range keys.Keys {
-		byID[k.KID] = k
-	}
-	verified := false
-	validIDs := make([]string, 0, len(env.Signatures))
-	for _, sig := range env.Signatures {
-		k, ok := byID[sig.KeyID]
-		if !ok || revoked[sig.KeyID] || (k.Status != "active" && k.Status != "retiring") {
-			continue
-		}
-		if production && strings.HasPrefix(sig.KeyID, "kei-pb-000000-") {
-			continue
-		}
-		pub, e1 := base64.RawURLEncoding.DecodeString(k.X)
-		rawSig, e2 := base64.StdEncoding.DecodeString(sig.Sig)
-		if e1 == nil && e2 == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(ed25519.PublicKey(pub), pae, rawSig) {
-			verified = true
-			validIDs = append(validIDs, sig.KeyID)
-		}
-	}
-	if !verified {
-		return nil, errors.New("policy envelope has no signature from a trusted, active, non-revoked key")
-	}
-	if err := validatePayloadSchema(payloadBytes); err != nil {
+	if err := validatePayloadSchema(bundleBytes); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "additional properties") {
 			return nil, fmt.Errorf("%w: closed schema rejected unknown field", ErrBundleUnsupported)
 		}
 		return nil, fmt.Errorf("invalid policy bundle schema: %w", err)
 	}
 	var payload Payload
-	if err := strictJSON(payloadBytes, &payload); err != nil {
-		return nil, fmt.Errorf("decode policy payload: %w", err)
-	}
-	if payload.Schema != "kei.policy-bundle/v1" {
-		return nil, ErrBundleUnsupported
+	if err := strictJSON(bundleBytes, &payload); err != nil {
+		return nil, fmt.Errorf("decode policy bundle: %w", err)
 	}
 	if payload.Issuer != Issuer || payload.BundleID == "" || payload.BundleVersion < 1 || payload.PolicyRevision < 1 {
 		return nil, errors.New("invalid policy bundle identity")
@@ -162,8 +103,8 @@ func Verify(envBytes []byte, keys KeySet, installationID, orgID, workspaceID str
 	if err := validatePolicyDialect(payload.PolicySet); err != nil {
 		return nil, err
 	}
-	digest := sha256.Sum256(payloadBytes)
-	return &Verified{Payload: payload, PayloadBytes: payloadBytes, Digest: fmt.Sprintf("sha256:%x", digest), KeyIDs: validIDs}, nil
+	digest := sha256.Sum256(bundleBytes)
+	return &Verified{Payload: payload, PayloadBytes: append([]byte(nil), bundleBytes...), Digest: fmt.Sprintf("sha256:%x", digest)}, nil
 }
 
 var schemaValidator func([]byte) error
@@ -197,44 +138,6 @@ func validatePolicyDialect(raw json.RawMessage) error {
 	return nil
 }
 
-var keyIDPattern = regexp.MustCompile(`^kei-pb-[0-9]{6}-[0-9]{2}$`)
-
-func ParseKeySet(raw []byte) (KeySet, error) {
-	var keys KeySet
-	if err := strictJSON(raw, &keys); err != nil {
-		return keys, err
-	}
-	if err := ValidateKeySet(keys); err != nil {
-		return keys, err
-	}
-	return keys, nil
-}
-
-func ValidateKeySet(keys KeySet) error {
-	if len(keys.Keys) == 0 {
-		return errors.New("empty key set")
-	}
-	seen := map[string]bool{}
-	for _, k := range keys.Keys {
-		if !keyIDPattern.MatchString(k.KID) || seen[k.KID] || k.KTY != "OKP" || k.CRV != "Ed25519" || k.Use != "sig" || k.Alg != "EdDSA" || (k.Status != "next" && k.Status != "active" && k.Status != "retiring") {
-			return errors.New("invalid or duplicate signing key metadata")
-		}
-		seen[k.KID] = true
-		pub, err := base64.RawURLEncoding.DecodeString(k.X)
-		if err != nil || len(pub) != ed25519.PublicKeySize {
-			return errors.New("invalid signing public key")
-		}
-	}
-	seen = map[string]bool{}
-	for _, id := range keys.RevokedKeyIDs {
-		if !keyIDPattern.MatchString(id) || seen[id] {
-			return errors.New("invalid or duplicate revoked key id")
-		}
-		seen[id] = true
-	}
-	return nil
-}
-
 func strictJSON(raw []byte, dst any) error {
 	if err := RejectDuplicateJSON(raw); err != nil {
 		return err
@@ -254,8 +157,7 @@ func strictJSON(raw []byte, dst any) error {
 	return nil
 }
 
-// RejectDuplicateJSON rejects ambiguous duplicate object keys before any JSON
-// parser can apply last-key-wins behavior to security-sensitive signed data.
+// RejectDuplicateJSON prevents ambiguous last-key-wins parsing of bundle bytes.
 func RejectDuplicateJSON(raw []byte) error {
 	d := json.NewDecoder(strings.NewReader(string(raw)))
 	d.UseNumber()
@@ -318,8 +220,4 @@ func RejectDuplicateJSON(raw []byte) error {
 		return err
 	}
 	return nil
-}
-
-func dssePAE(payloadType string, payload []byte) []byte {
-	return []byte(fmt.Sprintf("DSSEv1 %d %s %d %s", len([]byte(payloadType)), payloadType, len(payload), payload))
 }

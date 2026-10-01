@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,9 +41,6 @@ func (c *recordingRuntimeClient) SyncTools(context.Context, string, *ToolManifes
 func newNotReadyBundleServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runtime/policy-signing-keys":
-			w.Header().Set("ETag", "keys-v1")
-			_ = json.NewEncoder(w).Encode(policybundleKeySetForTest())
 		case "/api/v1/runtime/policy-bundles/current":
 			if r.Header.Get("Accept") != "application/vnd.kei.policy-bundle.v1+json" {
 				http.Error(w, "bad accept", 400)
@@ -56,10 +52,6 @@ func newNotReadyBundleServer() *httptest.Server {
 		}
 	}))
 }
-func policybundleKeySetForTest() any {
-	return map[string]any{"keys": []any{map[string]string{"kty": "OKP", "crv": "Ed25519", "x": "W5NclXraIJdyUtLqIHtaY7XfnhskAmqiub36Tgt_ye8", "kid": "kei-pb-000000-01", "use": "sig", "alg": "EdDSA", "status": "active"}}, "revoked_key_ids": []string{}}
-}
-
 func TestRuntimeBootstrapReportsIdentityAndLeavesColdWhenCatalogNotReady(t *testing.T) {
 	workspace := "workspace-1"
 	client := &recordingRuntimeClient{identity: &RuntimeIdentity{ID: "installation-1", OrgID: "org-1", WorkspaceID: &workspace, Platform: "teams", Status: "pending", BindingStatus: "unverified"}}

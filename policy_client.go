@@ -3,11 +3,15 @@ package connectorruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -21,15 +25,51 @@ var (
 )
 
 type policyControlClient struct {
-	baseURL, token string
-	http           *http.Client
+	baseURL, token    string
+	http              *http.Client
+	allowLoopbackHTTP bool
 }
 
-func newPolicyControlClient(baseURL, token string, timeout time.Duration) *policyControlClient {
-	return &policyControlClient{strings.TrimRight(baseURL, "/"), token, &http.Client{Timeout: timeout}}
+func newPolicyControlClient(baseURL, token string, timeout time.Duration, allowLoopbackHTTP bool) *policyControlClient {
+	return &policyControlClient{strings.TrimRight(baseURL, "/"), token, &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, allowLoopbackHTTP}
+}
+func validatePolicyControlPlaneURL(raw string, allowLoopbackHTTP bool) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.EscapedPath() != "" && u.EscapedPath() != "/" {
+		return errors.New("invalid runtime control-plane URL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("runtime control-plane URL has no host")
+	}
+	port := u.Port()
+	if port != "" {
+		n, e := strconv.Atoi(port)
+		if e != nil || n < 1 || n > 65535 {
+			return errors.New("runtime control-plane URL has invalid port")
+		}
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	loopback := host == "localhost" || (ip != nil && ip.IsLoopback())
+	if u.Scheme == "http" && loopback && allowLoopbackHTTP {
+		return nil
+	}
+	return errors.New("runtime control-plane URL must use HTTPS")
+}
+func (c *policyControlClient) newRequest(ctx context.Context, method, path string, body []byte) (*http.Request, error) {
+	if err := ValidateRuntimeTokenFormat(c.token); err != nil {
+		return nil, err
+	}
+	if err := validatePolicyControlPlaneURL(c.baseURL, c.allowLoopbackHTTP); err != nil {
+		return nil, err
+	}
+	return http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
 }
 func (c *policyControlClient) request(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
+	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
 		return nil, fmt.Errorf("build runtime policy request: %w", err)
 	}
@@ -39,40 +79,15 @@ func (c *policyControlClient) request(ctx context.Context, method, path string, 
 	}
 	return c.http.Do(req)
 }
-func (c *policyControlClient) FetchKeys(ctx context.Context) (policybundle.KeySet, string, error) {
-	resp, err := c.request(ctx, http.MethodGet, "/api/v1/runtime/policy-signing-keys", nil)
-	if err != nil {
-		return policybundle.KeySet{}, "", fmt.Errorf("fetch policy signing keys: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return policybundle.KeySet{}, "", ErrPolicyInstallationRevoked
-	}
-	if resp.StatusCode != http.StatusOK {
-		return policybundle.KeySet{}, "", fmt.Errorf("policy signing keys returned status %d", resp.StatusCode)
-	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return policybundle.KeySet{}, "", err
-	}
-	keys, err := policybundle.ParseKeySet(b)
-	if err != nil {
-		return policybundle.KeySet{}, "", fmt.Errorf("invalid policy signing keys: %w", err)
-	}
-	keyETag := resp.Header.Get("ETag")
-	if keyETag == "" {
-		return keys, "", errors.New("policy signing keys response is missing ETag")
-	}
-	return keys, keyETag, nil
-}
-func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (body []byte, gotETag, keysETag string, version int64, unchanged bool, err error) {
-	req, e := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/runtime/policy-bundles/current", nil)
+func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
+	req, e := c.newRequest(ctx, http.MethodGet, "/api/v1/runtime/policy-bundles/current", nil)
 	if e != nil {
 		err = e
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", policybundle.PayloadType)
+	req.Header.Set("Accept", policybundle.ContentType)
+	req.Header.Set("Accept-Encoding", "identity")
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
 	}
@@ -82,6 +97,7 @@ func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (bod
 		return
 	}
 	defer resp.Body.Close()
+	version, _ = strconv.ParseInt(resp.Header.Get("Kei-Policy-Bundle-Version"), 10, 64)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		err = ErrPolicyInstallationRevoked
 		return
@@ -93,21 +109,29 @@ func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (bod
 	if resp.StatusCode == http.StatusNotModified {
 		unchanged = true
 		gotETag = resp.Header.Get("ETag")
-		keysETag = resp.Header.Get("Kei-Policy-Keys-ETag")
+		contentType = resp.Header.Get("Content-Type")
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("policy bundle returned status %d", resp.StatusCode)
 		return
 	}
-	body, e = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if encoding := strings.TrimSpace(strings.ToLower(resp.Header.Get("Content-Encoding"))); encoding != "" && encoding != "identity" {
+		err = errors.New("policy bundle response uses unsupported content encoding")
+		return
+	}
+	body, e = io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
 	if e != nil {
 		err = fmt.Errorf("read policy bundle: %w", e)
 		return
 	}
+	if len(body) > 8<<20 {
+		body = nil
+		err = errors.New("policy bundle exceeds 8 MiB limit")
+		return
+	}
 	gotETag = resp.Header.Get("ETag")
-	keysETag = resp.Header.Get("Kei-Policy-Keys-ETag")
-	version, _ = strconv.ParseInt(resp.Header.Get("Kei-Policy-Bundle-Version"), 10, 64)
+	contentType = resp.Header.Get("Content-Type")
 	return
 }
 
@@ -153,8 +177,8 @@ func (c *policyControlClient) ResolveSubject(ctx context.Context, req subjectRes
 	return subject, nil
 }
 
-// syncPolicyBundle obtains keys only over the authenticated control-plane channel,
-// pins revocations, and activates only a strictly newer valid bundle.
+// syncPolicyBundle fetches an unsigned canonical bundle only over a validated
+// HTTPS control-plane channel authenticated by the installation runtime token.
 func syncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity, timeout time.Duration) error {
 	if identity == nil || identity.WorkspaceID == nil {
 		return errors.New("runtime identity has no workspace audience")
@@ -163,24 +187,12 @@ func syncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity
 	if err != nil {
 		return err
 	}
-	client := newPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, timeout)
-	keys, pinnedKeysETag, err := client.FetchKeys(ctx)
-	if errors.Is(err, ErrPolicyInstallationRevoked) {
-		_ = store.Revoke(time.Now().UTC())
-		return err
-	}
-	if err != nil {
-		_ = store.RefreshFailed(time.Now().UTC())
-		return err
-	}
-	if err := store.PinKeys(keys); err != nil {
-		return err
-	}
+	client := newPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, timeout, !cfg.IsProduction())
 	etag := ""
-	if active, _, checkErr := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC(), cfg.IsProduction()); checkErr == nil && active != nil {
+	if active, _, checkErr := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); checkErr == nil && active != nil {
 		etag = active.Digest
 	}
-	body, bundleETag, responseKeysETag, headerVersion, unchanged, err := client.FetchBundle(ctx, etag)
+	body, bundleETag, contentType, headerVersion, unchanged, err := client.FetchBundle(ctx, etag)
 	if errors.Is(err, ErrPolicyBundleNotReady) {
 		return nil
 	}
@@ -192,60 +204,46 @@ func syncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity
 		_ = store.RefreshFailed(time.Now().UTC())
 		return err
 	}
-	if responseKeysETag == "" {
-		return errors.New("policy bundle response is missing Kei-Policy-Keys-ETag")
-	}
-	if responseKeysETag != pinnedKeysETag {
-		keys, pinnedKeysETag, err = client.FetchKeys(ctx)
-		if err != nil {
-			return err
-		}
-		if err := store.PinKeys(keys); err != nil {
-			return err
-		}
-		body, bundleETag, responseKeysETag, headerVersion, unchanged, err = client.FetchBundle(ctx, "")
-		if errors.Is(err, ErrPolicyInstallationRevoked) {
-			_ = store.Revoke(time.Now().UTC())
-			return err
-		}
-		if err != nil && !errors.Is(err, ErrPolicyBundleNotReady) {
-			return err
-		}
-		if errors.Is(err, ErrPolicyBundleNotReady) {
-			return nil
-		}
-		if responseKeysETag == "" || responseKeysETag != pinnedKeysETag {
-			return errors.New("policy signing keys changed during bundle fetch")
-		}
-	}
 	if unchanged {
-		if bundleETag != "" && strings.Trim(bundleETag, `"`) != etag {
+		if bundleETag != `"`+etag+`"` {
 			return errors.New("unchanged bundle ETag does not match active bundle")
 		}
-		if _, _, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC(), cfg.IsProduction()); err != nil {
-			return fmt.Errorf("unchanged response without valid active bundle: %w", err)
+		active, _, checkErr := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC())
+		if checkErr != nil {
+			return fmt.Errorf("unchanged response without valid active bundle: %w", checkErr)
+		}
+		if headerVersion < 1 || headerVersion != active.Payload.BundleVersion {
+			return errors.New("unchanged bundle version header does not match active bundle")
 		}
 		return store.RefreshSucceeded(time.Now().UTC())
 	}
+	now := time.Now().UTC()
+	reject := func(cause error) error { _ = store.RecordRejectedCandidate(now, cause); return cause }
 	if bundleETag == "" || headerVersion < 1 {
-		return errors.New("policy bundle response is missing ETag or version")
+		return reject(errors.New("policy bundle response is missing ETag or version"))
 	}
-	candidate, err := policybundle.Verify(body, store.PinnedKeys(), identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersion(), time.Now().UTC(), cfg.IsProduction())
+	mediaType, mediaParams, mediaErr := mime.ParseMediaType(contentType)
+	if mediaErr != nil || mediaType != policybundle.ContentType || len(mediaParams) != 0 {
+		return reject(errors.New("policy bundle response has an invalid content type"))
+	}
+	bodyDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
+	if bundleETag != `"`+bodyDigest+`"` {
+		return reject(errors.New("catalog ETag does not match policy bundle digest"))
+	}
+	candidate, err := policybundle.Validate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersion(), now)
 	if err != nil {
-		_ = store.RefreshFailed(time.Now().UTC())
+		_ = store.RecordRejectedCandidate(now, err)
 		return fmt.Errorf("policy bundle candidate rejected: %w", err)
 	}
-	if bundleETag != "" && strings.Trim(bundleETag, `"`) != candidate.Digest {
-		_ = store.RefreshFailed(time.Now().UTC())
-		return errors.New("catalog ETag does not match signed payload digest")
+	if candidate.Digest != bodyDigest {
+		return reject(errors.New("validated policy bundle digest differs from response digest"))
 	}
-	if headerVersion > 0 && headerVersion != candidate.Payload.BundleVersion {
-		_ = store.RefreshFailed(time.Now().UTC())
-		return errors.New("catalog bundle version header does not match signed payload")
+	if headerVersion != candidate.Payload.BundleVersion {
+		return reject(errors.New("catalog bundle version header does not match policy bundle"))
 	}
-	if _, err := store.Activate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC(), cfg.IsProduction()); err != nil {
+	if _, err := store.Activate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); err != nil {
 		_ = store.RefreshFailed(time.Now().UTC())
-		return fmt.Errorf("activate verified policy bundle: %w", err)
+		return fmt.Errorf("activate validated policy bundle: %w", err)
 	}
 	return nil
 }

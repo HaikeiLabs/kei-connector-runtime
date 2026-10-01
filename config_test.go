@@ -49,6 +49,23 @@ func TestRuntimeValidateAcceptsValidToken(t *testing.T) {
 	}
 }
 
+func TestRuntimeValidateRequiresHTTPSExceptNonProductionLoopback(t *testing.T) {
+	base := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890"}
+	for _, tc := range []struct {
+		name, url, env string
+		wantErr        bool
+	}{{"external HTTP", "http://control.example", "development", true}, {"loopback HTTP", "http://127.0.0.1:8080", "development", false}, {"production loopback HTTP", "http://127.0.0.1:8080", "production", true}, {"HTTPS", "https://control.example", "production", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.RuntimeControlPlaneURL = tc.url
+			cfg.Env = tc.env
+			if err := cfg.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() err=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestConfigFromEnvSetsDefaultRuntimeStateDir(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_STATE_DIR", "")
 	cfg := configFromEnv()
