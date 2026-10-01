@@ -7,33 +7,47 @@ import (
 	"regexp"
 )
 
-// ToolManifestSchemaV1 is the only manifest schema this build syncs. v2
-// (policy field contract, ADR-028) arrives with HAI-279.
-const ToolManifestSchemaV1 = "kei.tool-manifest/v1"
+// ToolManifestSchemaV2 is the only manifest schema this build syncs. The
+// contract is v2-only: v1 and schema-less manifests are rejected at load and
+// never translated into v2 fields. Legacy v1-producing harnesses must be
+// upgraded to export v2 before this path is enabled.
+const ToolManifestSchemaV2 = "kei.tool-manifest/v2"
 
-// ToolManifest is the agentware tool-manifest v1 shape. Harnesses export it
+// ToolManifest is the agentware tool-manifest v2 shape. Harnesses export it
 // at build time; the kei-proxy runtime syncs it into the catalog tool registry
-// at bootstrap. Schema is optional and passed through unchanged in the PUT
-// body.
+// at bootstrap. The schema is required, must be kei.tool-manifest/v2, and is
+// passed through unchanged in the PUT body.
 type ToolManifest struct {
 	Schema string           `json:"schema,omitempty"`
 	Tools  []ToolDefinition `json:"tools"`
 }
 
-// ToolDefinition is one entry in a tool manifest. Fields match the catalog
-// POST /api/v1/tools create body minus server-generated fields.
+// ToolDefinition is one entry in a tool manifest v2. Fields match the catalog
+// POST /api/v1/tools create body minus server-generated fields. v1 fields
+// (action, resources) are not parsed.
 type ToolDefinition struct {
-	Name        string   `json:"name"`
-	Service     string   `json:"service"`
-	Description string   `json:"description"`
-	Action      string   `json:"action,omitempty"`
-	Resources   []string `json:"resources,omitempty"`
-	Enabled     *bool    `json:"enabled,omitempty"`
+	Name                 string            `json:"name"`
+	Source               string            `json:"source"`
+	RequiredCapabilities []string          `json:"required_capabilities"`
+	ResourceTypes        []KeiResourceType `json:"resource_types"`
+	OperationClass       string            `json:"operation_class"`
+	Service              string            `json:"service,omitempty"`
+	Description          string            `json:"description"`
+	Enabled              *bool             `json:"enabled,omitempty"`
+}
+
+// KeiResourceType identifies a resource kind and optional parent kind.
+// Both are plain identifiers (no globs).
+type KeiResourceType struct {
+	Type       string `json:"type"`
+	ParentType string `json:"parent_type,omitempty"`
 }
 
 var (
 	toolManifestToolNameRe = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)*$`)
 	toolManifestServiceRe  = regexp.MustCompile(`^\S{1,64}$`)
+	toolManifestSourceRe   = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	operationClassValues   = map[string]bool{"read": true, "write": true}
 )
 
 // validateToolManifest checks the manifest against catalog constraints without
@@ -58,43 +72,54 @@ func validateToolManifest(m *ToolManifest) error {
 			return fmt.Errorf("%s: duplicate name %q", prefix, td.Name)
 		}
 		seen[td.Name] = true
-		if td.Service == "" {
-			return fmt.Errorf("%s: service is required", prefix)
-		}
-		if !toolManifestServiceRe.MatchString(td.Service) {
-			return fmt.Errorf("%s: invalid service", prefix)
-		}
-		if len(td.Description) > 1024 {
-			return fmt.Errorf("%s: description too long", prefix)
-		}
-		if td.Action != "" {
-			if len(td.Action) > 255 {
-				return fmt.Errorf("%s: action too long", prefix)
-			}
-			for _, b := range []byte(td.Action) {
-				if b < 0x20 || b > 0x7E {
-					return fmt.Errorf("%s: invalid action (non-printable)", prefix)
-				}
-			}
-		}
-		if len(td.Resources) > 32 {
-			return fmt.Errorf("%s: too many resources (max 32)", prefix)
-		}
-		for j, res := range td.Resources {
-			if len(res) > 255 {
-				return fmt.Errorf("%s: resources[%d]: too long", prefix, j)
-			}
-			for _, b := range []byte(res) {
-				if b < 0x20 || b > 0x7E {
-					return fmt.Errorf("%s: resources[%d]: non-printable", prefix, j)
-				}
-			}
+		if err := validateToolDefinition(td, prefix); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// LoadToolManifest reads and validates a tool-manifest v1 JSON file.
+func validateToolDefinition(td ToolDefinition, prefix string) error {
+	if td.Source == "" {
+		return fmt.Errorf("%s: source is required", prefix)
+	}
+	if !toolManifestSourceRe.MatchString(td.Source) {
+		return fmt.Errorf("%s: invalid source", prefix)
+	}
+	if len(td.RequiredCapabilities) == 0 {
+		return fmt.Errorf("%s: required_capabilities is required and must be non-empty", prefix)
+	}
+	for j, cap := range td.RequiredCapabilities {
+		if cap == "" {
+			return fmt.Errorf("%s: required_capabilities[%d] is empty", prefix, j)
+		}
+	}
+	if len(td.ResourceTypes) == 0 {
+		return fmt.Errorf("%s: resource_types is required and must be non-empty", prefix)
+	}
+	for j, rt := range td.ResourceTypes {
+		if rt.Type == "" {
+			return fmt.Errorf("%s: resource_types[%d]: type is required", prefix, j)
+		}
+	}
+	if td.OperationClass == "" {
+		return fmt.Errorf("%s: operation_class is required", prefix)
+	}
+	if !operationClassValues[td.OperationClass] {
+		return fmt.Errorf("%s: invalid operation_class %q (must be read or write)", prefix, td.OperationClass)
+	}
+	if len(td.Description) > 1024 {
+		return fmt.Errorf("%s: description too long", prefix)
+	}
+	if td.Service != "" && !toolManifestServiceRe.MatchString(td.Service) {
+		return fmt.Errorf("%s: invalid service", prefix)
+	}
+	return nil
+}
+
+// LoadToolManifest reads and validates a tool-manifest v2 JSON file. The
+// schema must be exactly kei.tool-manifest/v2; v1, schema-less, and other
+// schemas are rejected.
 func LoadToolManifest(path string) (*ToolManifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -103,6 +128,9 @@ func LoadToolManifest(path string) (*ToolManifest, error) {
 	var m ToolManifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("decode tool manifest: %w", err)
+	}
+	if m.Schema != ToolManifestSchemaV2 {
+		return nil, fmt.Errorf("unsupported manifest schema %q (expected %s)", m.Schema, ToolManifestSchemaV2)
 	}
 	if m.Tools == nil {
 		m.Tools = []ToolDefinition{}

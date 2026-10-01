@@ -326,8 +326,10 @@ func bootstrapRuntimeWithClient(ctx context.Context, cfg Config, timeout time.Du
 // credential store is configured. Runtimes without one skip it; once
 // configured, registration is idempotent.
 // syncToolManifest reads KEI_TOOL_MANIFEST and PUTs it to the catalog tool
-// registry. Failures are logged and never crash bootstrap; an unregistered
-// tool falls back to bare-name policies which already fail closed.
+// registry. The manifest must be kei.tool-manifest/v2; v1 and schema-less
+// manifests are rejected at load. Failures are logged and never crash
+// bootstrap; an unregistered tool falls back to bare-name policies which
+// already fail closed.
 func syncToolManifest(ctx context.Context, cfg Config, timeout time.Duration, newClient runtimeClientFactory, stderr io.Writer) {
 	if cfg.ToolManifestPath == "" {
 		return
@@ -335,10 +337,6 @@ func syncToolManifest(ctx context.Context, cfg Config, timeout time.Duration, ne
 	manifest, err := LoadToolManifest(cfg.ToolManifestPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "runtime bootstrap: tool manifest: %v\n", err)
-		return
-	}
-	if manifest.Schema != "" && manifest.Schema != ToolManifestSchemaV1 {
-		fmt.Fprintf(stderr, "runtime bootstrap: tool sync skipped: unsupported manifest schema %q (expected %s)\n", manifest.Schema, ToolManifestSchemaV1)
 		return
 	}
 	client := newClient(cfg.RuntimeControlPlaneURL, timeout)
