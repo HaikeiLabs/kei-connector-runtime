@@ -659,6 +659,10 @@ assertion signing), and `httpapi` (the governed HTTP executor). Each connector
 package wraps its `kei-connector-contracts/providers` client and applies that
 connector's redaction.
 
+Every adapter is compiled into every `kei-proxy` binary. That is known tech
+debt (HAI-320): see [tech-debt.md](tech-debt.md) for the measurement, the
+options, and the interim rule (no heavy SDKs in adapters; use `net/http`).
+
 ## 7. Errors and fail-closed rules
 
 Every row denies (exit 1) and returns no result data. "Catalog" codes arrive
