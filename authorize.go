@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 )
 
@@ -24,6 +26,8 @@ type CredentialResponse struct {
 
 type AuthorizeOutput struct {
 	Decision   string              `json:"decision"`
+	ReasonCode string              `json:"reason_code,omitempty"`
+	DenySource string              `json:"deny_source,omitempty"`
 	Reason     string              `json:"reason,omitempty"`
 	Service    string              `json:"service,omitempty"`
 	Credential *CredentialResponse `json:"credential,omitempty"`
@@ -39,7 +43,6 @@ type authorizeParams struct {
 	action       string
 	resource     string
 	harness      string
-	abac         ABACClient
 	// Deprecated compatibility fields; runtime authorization never uses them.
 	credentialBinding CredentialBindingClient
 	secretStore       secrets.Store
@@ -60,44 +63,9 @@ type authorizeParams struct {
 	resources       []string
 	orgID           string
 	workspaceID     string
-}
-
-// authorizeDecision is the shared policy-catalog decision path used by both
-// the authorize CLI and long-running runtime adapters. Credential resolution
-// stays outside this helper so every caller can enforce allow before touching
-// secret material.
-func authorizeDecision(p authorizeParams, service, resource string) (*AuthorizeResponse, error) {
-	resp, err := p.abac.Authorize(p.ctx, AuthorizeRequest{
-		HarnessToken:   p.harness,
-		UserID:         p.user,
-		ProviderUserID: p.providerUser,
-		Action:         p.action,
-		// Tool registry matching is only appropriate when no caller resource
-		// was supplied. Preserve the legacy action/resource API otherwise.
-		Tool:            toolNameForCatalog(p),
-		Resource:        resource,
-		Service:         service,
-		AgentID:         p.agentID,
-		WorkspaceID:     p.workspaceID,
-		InvokingSubject: p.invokingSubject,
-		ParentSpan:      p.parentSpan,
-		DelegationDepth: p.delegationDepth,
-		AgentVersion:    p.agentVersion,
-		Framework:       p.framework,
-		ToolArgsDigest:  p.toolArgsDigest,
-		Resources:       p.resources,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("authorization unavailable (fail closed): %w", err)
-	}
-	return resp, nil
-}
-
-func toolNameForCatalog(p authorizeParams) string {
-	if p.resource == "" {
-		return p.tool
-	}
-	return ""
+	policyBundle    *policybundle.Verified
+	policySubject   *policybundle.Subject
+	bundleState     string
 }
 
 func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
@@ -109,12 +77,43 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 		resource = service + ":repo:" + resource
 	}
 
-	resp, err := authorizeDecision(p, service, resource)
-	if err != nil {
-		return AuthorizeOutput{}, err
+	var resp *AuthorizeResponse
+	var localDecision *policybundle.Decision
+	if p.policyBundle != nil {
+		subjectID := p.user
+		if p.policySubject != nil && p.policySubject.UserID != "" {
+			subjectID = p.policySubject.UserID
+		}
+		decision := p.policyBundle.Evaluate(policybundle.Call{Tool: p.tool, Action: p.action, Resource: resource, AgentID: p.agentID, UserID: subjectID}, p.policySubject)
+		localDecision = &decision
+		resp = &AuthorizeResponse{Decision: decision.Outcome, Reason: decision.Reason, PolicyID: decision.PolicyID, ReasonCode: decision.ReasonCode}
+		if p.policySubject != nil && len(p.policySubject.Enrollment) > 0 {
+			enrollment := json.RawMessage(p.policySubject.Enrollment)
+			resp.Enrollment = &enrollment
+		}
+		if decision.Outcome == "deny" && decision.ReasonCode == "enrollment_required" {
+			resp.Decision = "enrollment_required"
+		}
+	} else {
+		return AuthorizeOutput{Decision: "deny", ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "no verified local policy bundle"}, nil
 	}
 
 	out := AuthorizeOutput{}
+	if localDecision != nil {
+		out.ReasonCode = localDecision.ReasonCode
+		if localDecision.ReasonCode != "" {
+			out.DenySource = "policy"
+			if localDecision.ReasonCode == "subject_resolution_unavailable" || strings.HasPrefix(localDecision.ReasonCode, "identity_") || localDecision.ReasonCode == "enrollment_required" {
+				out.DenySource = "identity"
+			}
+			if strings.HasPrefix(localDecision.ReasonCode, "policy_bundle_") {
+				out.DenySource = "runtime_state"
+			}
+			if localDecision.ReasonCode == "tool_not_registered" || localDecision.ReasonCode == "tool_action_mismatch" || strings.HasPrefix(localDecision.ReasonCode, "agent_") {
+				out.DenySource = "registry"
+			}
+		}
+	}
 	switch resp.Decision {
 	case "allow":
 		out.Decision = "allow"
@@ -236,6 +235,21 @@ func buildDecisionEvent(p authorizeParams, resp *AuthorizeResponse, out Authoriz
 	if p.toolArgsDigest != "" {
 		event.ToolArgsDigest = &p.toolArgsDigest
 	}
+	if p.policyBundle != nil {
+		version := p.policyBundle.Payload.BundleVersion
+		revision := p.policyBundle.Payload.PolicyRevision
+		digest := p.policyBundle.Digest
+		event.PolicyBundleVersion = &version
+		event.PolicyRevision = &revision
+		event.PolicyBundleDigest = &digest
+		event.BundleState = p.bundleState
+	}
+	if out.DenySource != "" {
+		event.DenySource = out.DenySource
+	}
+	if out.ReasonCode != "" {
+		event.ReasonCode = out.ReasonCode
+	}
 	if resp != nil {
 		if resp.OrgID != nil {
 			event.OrgID = resp.OrgID
@@ -271,20 +285,6 @@ func resolveRuntimeScope(identity *RuntimeIdentity) (orgID, workspaceID string, 
 		return "", "", fmt.Errorf("harness key for runtime installation %s has no workspace and must be re-minted", identity.ID)
 	}
 	return identity.OrgID, *identity.WorkspaceID, nil
-}
-
-// runtimeAuthorizeURL selects the policy catalog endpoint for runtime
-// authorization. Runtime identity and management APIs continue to use the
-// control-plane URL; deployments can route policy checks directly to their
-// in-cluster catalog with KEI_API_URL (or ABAC_URL for compatibility).
-func runtimeAuthorizeURL(cfg Config) string {
-	if u := strings.TrimSpace(os.Getenv("KEI_API_URL")); u != "" {
-		return u
-	}
-	if u := strings.TrimSpace(os.Getenv("ABAC_URL")); u != "" {
-		return u
-	}
-	return cfg.RuntimeControlPlaneURL
 }
 
 func runAuthorize(args []string) int {
@@ -336,10 +336,6 @@ func runAuthorize(args []string) int {
 		fmt.Fprintln(os.Stderr, "Error: --tool is required")
 		return 1
 	}
-	if *action == "" {
-		fmt.Fprintln(os.Stderr, "Error: --action is required")
-		return 1
-	}
 	if cfg.RuntimeToken == "" {
 		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required")
 		return 1
@@ -357,17 +353,15 @@ func runAuthorize(args []string) int {
 	}
 	identity, err := bootstrapRuntime(context.Background(), cfg, time.Duration(*timeout)*time.Second)
 	if err != nil {
+		if isRuntimeRevocation(err) {
+			revokePolicyState(cfg)
+		}
 		fmt.Fprintf(os.Stderr, "Error: runtime bootstrap failed: %v\n", err)
 		return 1
 	}
-	if cfg.IsRuntime() {
-		// Keep runtime lifecycle traffic on the control plane, but send policy
-		// checks directly to the configured policy catalog when one is available.
-		cfg.ABACURL = runtimeAuthorizeURL(cfg)
-		cfg.ABACSecret = ""
+	if identity.Status != "active" || identity.BindingStatus != "verified" {
+		return writePolicyStateDenial(os.Stdout, os.Stderr, "installation_revoked", errors.New("runtime installation is inactive or unverified"))
 	}
-
-	client := NewABACClient(cfg.ABACURL, cfg.ABACSecret, time.Duration(*timeout)*time.Second)
 	var oidcBridge OIDCBridgeClient
 	// Customer runtimes resolve static credentials from their own secret store.
 	// Do not call the internal OIDC bridge by default; an explicitly configured
@@ -395,17 +389,58 @@ func runAuthorize(args []string) int {
 		return 1
 	}
 
+	store, err := policybundle.OpenStore(cfg.RuntimeStateDir)
+	if err != nil {
+		return writePolicyStateDenial(os.Stdout, os.Stderr, "startup_config_invalid", err)
+	}
+	activeBundle, bundleState, err := store.Check(identity.ID, orgID, workspaceID, time.Now().UTC())
+	if err != nil {
+		reason := "policy_bundle_missing"
+		if bundleState == policybundle.Expired {
+			reason = "policy_bundle_expired"
+		} else if bundleState == policybundle.Invalid {
+			reason = "policy_bundle_invalid"
+		} else if bundleState == policybundle.Unsupported {
+			reason = "policy_bundle_unsupported"
+		} else if bundleState == policybundle.Revoked {
+			reason = "installation_revoked"
+		}
+		return writePolicyStateDenial(os.Stdout, os.Stderr, reason, err)
+	}
+	subjectProviderID := cfg.ProviderUserID
+	if *user == "" && subjectProviderID == "" {
+		subjectProviderID = *invokingSubject
+	}
+	var subject *policybundle.Subject
+	if *user != "" || subjectProviderID != "" {
+		control := newPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
+		req := subjectResolveRequest{}
+		if *user != "" {
+			req.UserID = *user
+		} else {
+			req.PlatformUserID = subjectProviderID
+			req.TenantID = os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")
+		}
+		resolved, resolveErr := control.ResolveSubject(context.Background(), req)
+		if errors.Is(resolveErr, ErrPolicyInstallationRevoked) {
+			_ = store.Revoke(time.Now().UTC())
+			return writePolicyStateDenial(os.Stdout, os.Stderr, "installation_revoked", resolveErr)
+		}
+		if resolveErr != nil {
+			return writePolicyStateDenial(os.Stdout, os.Stderr, "subject_resolution_unavailable", resolveErr)
+		}
+		subject = &resolved
+	}
 	resourcesList := splitCSV(*resources)
 
 	out, err := authorizeTool(authorizeParams{
 		ctx:               context.Background(),
 		user:              *user,
-		providerUser:      cfg.ProviderUserID,
+		providerUser:      subjectProviderID,
 		tool:              *tool,
 		action:            *action,
 		resource:          *resource,
 		harness:           cfg.RuntimeToken,
-		abac:              client,
 		credentialBinding: credentialBinding,
 		secretStore:       secretStore,
 		oidcBridge:        oidcBridge,
@@ -423,6 +458,9 @@ func runAuthorize(args []string) int {
 		resources:         resourcesList,
 		orgID:             orgID,
 		workspaceID:       workspaceID,
+		policyBundle:      activeBundle,
+		policySubject:     subject,
+		bundleState:       string(bundleState),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -440,90 +478,16 @@ func runAuthorize(args []string) int {
 	return 0
 }
 
-/* legacyKeyVaultLookup removed: runtime credentials are resolved exclusively
-   through credential bindings and the configured external secret store.
-func legacyKeyVaultLookup(ctx context.Context, kv KVClient, abac ABACClient, harnessToken, userID, service string) (*string, error) {
-	// Get org ID from harness token via a lightweight authorize probe
-	probeResp, err := abac.Authorize(ctx, AuthorizeRequest{
-		HarnessToken: harnessToken,
-		UserID:       userID,
-		Action:       "public:read",
-	})
-	if err != nil || probeResp.OrgID == nil {
-		return nil, fmt.Errorf("cannot resolve org: %w", err)
+func writePolicyStateDenial(stdout, stderr io.Writer, reason string, err error) int {
+	source := "runtime_state"
+	if reason == "subject_resolution_unavailable" || reason == "enrollment_required" || strings.HasPrefix(reason, "identity_") {
+		source = "identity"
 	}
-
-	orgID := *probeResp.OrgID
-
-	// Fetch service principals for this org from ABAC
-	resp, err := http.Get(fmt.Sprintf("%s/api/v1/service-principals?org_id=%s", abacURL(), orgID))
+	_ = writeJSON(stdout, AuthorizeOutput{Decision: "deny", ReasonCode: reason, DenySource: source, Reason: reason})
 	if err != nil {
-		return nil, fmt.Errorf("fetch service principals: %w", err)
+		fmt.Fprintf(stderr, "authorization denied (%s): %v\n", reason, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil
-	}
-
-	var body struct {
-		ServicePrincipals []struct {
-			RoleName     string `json:"role_name"`
-			KVVaultURL   string `json:"kv_vault_url"`
-			KVSecretName string `json:"kv_secret_name"`
-			Enabled      bool   `json:"enabled"`
-		} `json:"service_principals"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("decode service principals: %w", err)
-	}
-
-	// Get user's roles from ABAC
-	membersResp, err := http.Get(fmt.Sprintf("%s/api/v1/organizations/%s/members?user_id=%s", abacURL(), orgID, userID))
-	if err != nil || membersResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch user roles: %w", err)
-	}
-	defer membersResp.Body.Close()
-
-	var membersBody struct {
-		Members []struct {
-			Role string `json:"role"`
-		} `json:"members"`
-	}
-	if err := json.NewDecoder(membersResp.Body).Decode(&membersBody); err != nil {
-		return nil, fmt.Errorf("decode user roles: %w", err)
-	}
-
-	userRoles := make(map[string]struct{})
-	for _, m := range membersBody.Members {
-		userRoles[m.Role] = struct{}{}
-	}
-
-	// Find matching enabled service principal for a role the user has
-	for _, sp := range body.ServicePrincipals {
-		if !sp.Enabled {
-			continue
-		}
-		if _, hasRole := userRoles[sp.RoleName]; hasRole {
-			secret, err := kv.GetSecret(ctx, sp.KVVaultURL, sp.KVSecretName)
-			if err != nil {
-				return nil, fmt.Errorf("key vault fetch for role %q: %w", sp.RoleName, err)
-			}
-			if secret != nil {
-				return secret, nil
-			}
-		}
-	}
-
-	return nil, nil
-}
-*/
-
-func abacURL() string {
-	if u := os.Getenv("ABAC_URL"); u != "" {
-		return u
-	}
-	return "http://abac-engine"
+	return 1
 }
 
 func writeJSON(w interface{ Write([]byte) (int, error) }, v any) error {

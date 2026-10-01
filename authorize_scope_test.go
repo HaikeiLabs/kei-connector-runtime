@@ -4,159 +4,84 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
-	"sync"
 	"testing"
 )
-
-func TestToolNameForCatalogPreservesLegacyResourceRequests(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		resource string
-		want     string
-	}{
-		{name: "tool-scoped request", want: "search_wiki"},
-		{name: "legacy resource request", resource: "acme/widgets"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := toolNameForCatalog(authorizeParams{tool: "search_wiki", resource: tc.resource})
-			if got != tc.want {
-				t.Fatalf("catalog tool = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestResolveRuntimeScopeHappyPath(t *testing.T) {
-	workspaceKey := "workspace-9"
-	identity := &RuntimeIdentity{ID: "installation-1", OrgID: "org-1", WorkspaceID: &workspaceKey}
-
-	orgID, workspaceID, err := resolveRuntimeScope(identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if orgID != "org-1" {
-		t.Fatalf("org_id = %q, want org-1", orgID)
-	}
-	if workspaceID != "workspace-9" {
-		t.Fatalf("workspace_id = %q, want workspace-9", workspaceID)
-	}
-}
-
-func TestResolveRuntimeScopeNilWorkspaceFailsHard(t *testing.T) {
-	identity := &RuntimeIdentity{ID: "installation-1", OrgID: "org-1"}
-
-	_, _, err := resolveRuntimeScope(identity)
-	if err == nil {
-		t.Fatal("expected nil workspace to fail hard")
-	}
-	for _, want := range []string{"installation-1", "no workspace", "re-minted"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not mention %q", err.Error(), want)
-		}
-	}
-}
 
 func TestResolveRuntimeScopeMissingIdentityFails(t *testing.T) {
 	if _, _, err := resolveRuntimeScope(nil); err == nil {
 		t.Fatal("expected missing identity to fail")
 	}
 }
-
 func TestRunAuthorizeWhoAmIFailureIsFatal(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
 	defer server.Close()
-
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", server.URL)
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
-
+	t.Setenv("KEI_RUNTIME_STATE_DIR", t.TempDir())
 	if code := runAuthorize([]string{"--tool", "github.create_pr", "--action", "github:write", "--resource", "acme/widgets"}); code == 0 {
 		t.Fatal("expected whoami failure to be fatal")
 	}
 }
-
-func TestRunAuthorizeHappyPathDerivesWorkspaceFromKey(t *testing.T) {
-	workspaceKey := "workspace-key"
-	var mu sync.Mutex
-	var authorizeBody map[string]any
-
-	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestRunAuthorizeNeverCallsCatalogDecisionEndpoint(t *testing.T) {
+	workspace := "ws-1"
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
-			json.NewEncoder(w).Encode(RuntimeIdentity{
-				ID: "installation-1", OrgID: "org-1", WorkspaceID: &workspaceKey,
-				Platform: "discord", Status: "active", BindingStatus: "verified",
-			})
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "installation-1", OrgID: "org-1", WorkspaceID: &workspace, Platform: "discord", Status: "active", BindingStatus: "verified"})
 		case "/api/v1/runtime/heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		default:
-			w.WriteHeader(http.StatusNotFound)
+			http.NotFound(w, r)
 		}
 	}))
-	defer controlPlane.Close()
-
-	policyCatalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/authorize":
-			mu.Lock()
-			defer mu.Unlock()
-			authorizeBody = map[string]any{}
-			_ = json.NewDecoder(r.Body).Decode(&authorizeBody)
-			json.NewEncoder(w).Encode(AuthorizeResponse{Decision: "deny", Reason: "policy"})
-		default:
-			w.WriteHeader(http.StatusNotFound)
+	defer control.Close()
+	called := false
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/authorize" {
+			called = true
 		}
+		http.NotFound(w, r)
 	}))
-	defer policyCatalog.Close()
-
+	defer catalog.Close()
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
-	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", controlPlane.URL)
-	t.Setenv("KEI_API_URL", policyCatalog.URL)
+	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
+	t.Setenv("KEI_API_URL", catalog.URL)
 	t.Setenv("ABAC_URL", "")
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
-
-	code := runAuthorize([]string{
-		"--tool", "github.create_pr",
-		"--action", "github:write",
-		"--resource", "acme/widgets",
+	t.Setenv("KEI_RUNTIME_STATE_DIR", t.TempDir())
+	out := captureStdout(func() {
+		if code := runAuthorize([]string{"--tool", "github.create_pr", "--action", "github:write", "--resource", "acme/widgets"}); code == 0 {
+			t.Fatal("cold runtime unexpectedly authorized")
+		}
 	})
-	if code == 0 {
-		t.Fatal("expected deny to exit non-zero")
+	var result AuthorizeOutput
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("decode output: %v (%s)", err, out)
 	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if authorizeBody == nil {
-		t.Fatal("authorize request was never sent")
+	if result.ReasonCode != "policy_bundle_missing" {
+		t.Fatalf("reason_code=%q", result.ReasonCode)
 	}
-	if got, ok := authorizeBody["workspace_id"].(string); !ok || got != workspaceKey {
-		t.Fatalf("authorize request workspace_id = %v, want key value %q", authorizeBody["workspace_id"], workspaceKey)
+	if called {
+		t.Fatal("per-call /authorize called")
 	}
 }
-
 func TestRunAuthorizeNilWorkspaceIsFatal(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
-			json.NewEncoder(w).Encode(RuntimeIdentity{
-				ID: "installation-1", OrgID: "org-1",
-				Platform: "discord", Status: "active", BindingStatus: "verified",
-			})
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "installation-1", OrgID: "org-1", Platform: "discord", Status: "active", BindingStatus: "verified"})
 		case "/api/v1/runtime/heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		default:
-			w.WriteHeader(http.StatusNotFound)
+			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", server.URL)
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
-
+	t.Setenv("KEI_RUNTIME_STATE_DIR", t.TempDir())
 	if code := runAuthorize([]string{"--tool", "github.create_pr", "--action", "github:write", "--resource", "acme/widgets"}); code == 0 {
 		t.Fatal("expected nil workspace to be fatal")
 	}

@@ -11,22 +11,28 @@ import (
 // audit_records table. Its JSON shape matches ABAC's AuditRecord exactly so a
 // record forwards unchanged. It never carries credential material.
 type DecisionEvent struct {
-	SpanID           string    `json:"span_id"`
-	InvokedAt        time.Time `json:"invoked_at"`
-	InvokingSubject  string    `json:"invoking_subject"`
-	ParentSpan       *string   `json:"parent_span,omitempty"`
-	DelegationDepth  int       `json:"delegation_depth"`
-	AgentID          string    `json:"agent_id"`
-	AgentVersion     *string   `json:"agent_version,omitempty"`
-	Framework        string    `json:"framework"`
-	ToolName         string    `json:"tool_name"`
-	ToolArgsDigest   *string   `json:"tool_args_digest,omitempty"`
-	ResourcesTouched []string  `json:"resources_touched"`
-	Decision         string    `json:"decision"`
-	PolicyID         *string   `json:"policy_id,omitempty"`
-	PolicyReason     *string   `json:"policy_reason,omitempty"`
-	OrgID            *string   `json:"org_id,omitempty"`
-	WorkspaceID      *string   `json:"workspace_id,omitempty"`
+	SpanID              string    `json:"span_id"`
+	InvokedAt           time.Time `json:"invoked_at"`
+	InvokingSubject     string    `json:"invoking_subject"`
+	ParentSpan          *string   `json:"parent_span,omitempty"`
+	DelegationDepth     int       `json:"delegation_depth"`
+	AgentID             string    `json:"agent_id"`
+	AgentVersion        *string   `json:"agent_version,omitempty"`
+	Framework           string    `json:"framework"`
+	ToolName            string    `json:"tool_name"`
+	ToolArgsDigest      *string   `json:"tool_args_digest,omitempty"`
+	ResourcesTouched    []string  `json:"resources_touched"`
+	Decision            string    `json:"decision"`
+	PolicyID            *string   `json:"policy_id,omitempty"`
+	PolicyReason        *string   `json:"policy_reason,omitempty"`
+	OrgID               *string   `json:"org_id,omitempty"`
+	WorkspaceID         *string   `json:"workspace_id,omitempty"`
+	PolicyBundleVersion *int64    `json:"policy_bundle_version,omitempty"`
+	PolicyBundleDigest  *string   `json:"policy_bundle_digest,omitempty"`
+	PolicyRevision      *int64    `json:"policy_revision,omitempty"`
+	BundleState         string    `json:"bundle_state,omitempty"`
+	DenySource          string    `json:"deny_source,omitempty"`
+	ReasonCode          string    `json:"reason_code,omitempty"`
 }
 
 // appendDecisionEvent appends e as a single JSON line to the audit spool at

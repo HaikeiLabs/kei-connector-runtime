@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 )
 
@@ -104,6 +105,18 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		IdleTimeout:       2 * time.Minute,
 	}
 
+	if cfg.IsRuntime() {
+		go func() {
+			identity, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+			if err != nil || identity == nil {
+				slog.Warn("policy bundle bootstrap identity unavailable; runtime stays deny-only", "error", err)
+				return
+			}
+			if err := syncPolicyBundle(ctx, cfg, identity, 10*time.Second); err != nil {
+				slog.Warn("policy bundle bootstrap failed; runtime stays deny-only", "error", err)
+			}
+		}()
+	}
 	slog.Info("runtime_http_listener_started", "addr", addr)
 	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")
 	serveErrors := make(chan error, 2)
@@ -143,7 +156,6 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 type runtimeHTTPHandler struct {
 	cfg      Config
 	profiles ControlPlaneModelProfileClient
-	abac     ABACClient
 	client   *http.Client
 }
 
@@ -151,7 +163,6 @@ func newRuntimeHTTPHandler(cfg Config) http.Handler {
 	return &runtimeHTTPHandler{
 		cfg:      cfg,
 		profiles: NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second),
-		abac:     NewABACClient(cfg.RuntimeControlPlaneURL, "", 10*time.Second),
 		client:   &http.Client{Timeout: 2 * time.Minute},
 	}
 }
@@ -369,37 +380,49 @@ func rewriteProviderModel(body []byte, defaultModel string) ([]byte, error) {
 }
 
 func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile, invokingSubject string) error {
-	// Use the same policy-catalog /api/v1/authorize path as the authorize CLI.
-	// The per-request header takes precedence; fall back to the env var for
-	// backward compatibility with configured subjects.
+	identity, err := NewRuntimeClient(h.cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, h.cfg.RuntimeToken)
+	if err != nil {
+		return fmt.Errorf("resolve runtime identity for local policy: %w", err)
+	}
+	if identity == nil || identity.Status != "active" || identity.BindingStatus != "verified" || identity.WorkspaceID == nil {
+		return errors.New("runtime installation is inactive, unverified, or unscoped")
+	}
+	store, err := policybundle.OpenStore(h.cfg.RuntimeStateDir)
+	if err != nil {
+		return err
+	}
+	bundle, _, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("local policy bundle unavailable: %w", err)
+	}
 	subject := invokingSubject
 	if subject == "" {
 		subject = envOr("KEI_PROXY_INVOKING_SUBJECT", "")
 	}
-	resource := "model:" + profile.ProfileID
-	decision, err := authorizeDecision(authorizeParams{
-		ctx:             ctx,
-		user:            subject,
-		providerUser:    h.cfg.ProviderUserID,
-		action:          "model.invoke",
-		resource:        resource,
-		harness:         h.cfg.RuntimeToken,
-		abac:            h.abac,
-		invokingSubject: subject,
-		agentID:         envOr("KEI_PROXY_AGENT_ID", ""),
-		agentVersion:    version,
-		framework:       envOr("KEI_PROXY_FRAMEWORK", "openai-http"),
-		spanID:          envOr("KEI_PROXY_SPAN_ID", ""),
-		resources:       []string{resource},
-	}, "", resource)
-	if err != nil {
-		return err
-	}
-	if decision.Decision != "allow" {
-		if decision.Reason != "" {
-			return errors.New(decision.Reason)
+	var attrs *policybundle.Subject
+	if subject != "" || h.cfg.ProviderUserID != "" {
+		client := newPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
+		req := subjectResolveRequest{}
+		if subject != "" {
+			req.UserID = subject
+		} else {
+			req.PlatformUserID = h.cfg.ProviderUserID
+			req.TenantID = os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")
 		}
-		return errors.New("policy denied model invocation")
+		resolved, e := client.ResolveSubject(ctx, req)
+		if errors.Is(e, ErrPolicyInstallationRevoked) {
+			_ = store.Revoke(time.Now().UTC())
+			return e
+		}
+		if e != nil {
+			return fmt.Errorf("subject resolution unavailable: %w", e)
+		}
+		attrs = &resolved
+	}
+	agentID := envOr("KEI_PROXY_AGENT_ID", "")
+	decision := bundle.EvaluateAction("model:invoke", "model:"+profile.ProfileID, agentID, attrs)
+	if decision.Outcome != "allow" {
+		return fmt.Errorf("local policy denied model invocation (%s)", decision.ReasonCode)
 	}
 	return nil
 }
@@ -410,6 +433,9 @@ func (h *runtimeHTTPHandler) runtimeConfigError() error {
 	}
 	if h.cfg.RuntimeControlPlaneURL == "" {
 		return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required")
+	}
+	if err := validatePolicyControlPlaneURL(h.cfg.RuntimeControlPlaneURL, !h.cfg.IsProduction()); err != nil {
+		return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
 	}
 	return nil
 }

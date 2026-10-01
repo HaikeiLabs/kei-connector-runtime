@@ -116,17 +116,17 @@ func ValidateRuntimeTokenFormat(token string) error {
 // absent in an environment that requires it.
 func (c Config) Validate() error {
 	if c.IsRuntime() {
+		if _, present := os.LookupEnv("KEI_HARNESS_TOKEN"); present {
+			return errors.New("KEI_HARNESS_TOKEN is unsupported; use KEI_RUNTIME_TOKEN")
+		}
 		if err := ValidateRuntimeTokenFormat(c.RuntimeToken); err != nil {
 			return err
 		}
 		if c.RuntimeControlPlaneURL == "" {
 			return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required when KEI_RUNTIME_TOKEN is set")
 		}
-		if !strings.HasPrefix(c.RuntimeControlPlaneURL, "https://") && !strings.HasPrefix(c.RuntimeControlPlaneURL, "http://") {
-			return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL must be an absolute http(s) URL")
-		}
-		if c.IsProduction() && !strings.HasPrefix(c.RuntimeControlPlaneURL, "https://") {
-			return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL must use https in production or staging")
+		if err := validatePolicyControlPlaneURL(c.RuntimeControlPlaneURL, !c.IsProduction()); err != nil {
+			return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
 		}
 		return nil
 	}
