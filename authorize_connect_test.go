@@ -11,6 +11,58 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
+func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Now().UTC()
+	mustActivateTestBundle(t, stateDir, now)
+	workspace := "ws-fixture-0001"
+	subjectCalls := 0
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runtime/whoami":
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace, Platform: "cli", Status: "active", BindingStatus: "verified"})
+		case "/api/v1/runtime/heartbeat":
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/v1/runtime/subject-attributes:resolve":
+			subjectCalls++
+			var req subjectResolveRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode subject request: %v", err)
+			}
+			if req.UserID != "user-member-0001" {
+				t.Errorf("user id=%q", req.UserID)
+			}
+			if req.TenantID != "" {
+				t.Errorf("unexpected platform tenant id %q", req.TenantID)
+			}
+			_ = json.NewEncoder(w).Encode(policybundle.Subject{Status: "linked_approved", UserID: "user-member-0001", EffectiveGroups: []string{"members"}, OrgRoles: []string{"member"}, MaxAgeSeconds: 60})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer control.Close()
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
+	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
+	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
+	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
+	t.Setenv("KEI_PROXY_PLATFORM_TENANT_ID", "")
+	var code int
+	stdout := captureStdout(func() { code = runAuthorize([]string{"--tool", "web_search", "--user", "user-member-0001"}) })
+	if code != 0 {
+		t.Fatalf("local cli web_search denied: exit=%d stdout=%s", code, stdout)
+	}
+	var out AuthorizeOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &out); err != nil {
+		t.Fatalf("decode result: %v output=%s", err, stdout)
+	}
+	if out.Decision != "allow" {
+		t.Fatalf("decision=%+v", out)
+	}
+	if subjectCalls != 1 {
+		t.Fatalf("subject resolutions=%d; want 1", subjectCalls)
+	}
+}
+
 func TestAuthorizeUsesPersistedBundleAndOnlineSubjectForUserDefault(t *testing.T) {
 	stateDir := t.TempDir()
 	now := time.Now().UTC()
