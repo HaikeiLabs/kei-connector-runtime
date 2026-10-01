@@ -40,3 +40,7 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
+
+// HP-C7 (HAI-309): unreleased kei-connector-contracts PR #11. Swap for the
+// release tag (go get ...@<tag>) and drop this replace before merge.
+replace github.com/HaikeiLabs/kei-connector-contracts => github.com/HaikeiLabs/kei-connector-contracts v0.5.1-0.20261001212414-5db5eb87a049
