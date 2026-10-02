@@ -1,8 +1,8 @@
-// Package pdp is kei-proxy's local policy decision point (ADR-011, ADR-026).
-// It decides governed calls from the persisted policy bundle and the
-// in-memory session subject, with no network call per decision. The bundle
-// schema validator is registered by the kei-connector-runtime root package;
-// without it every bundle fails validation and every call is denied.
+// Package pdp is kei-proxy's Go contract / in-process policy evaluator
+// (ADR-011, ADR-026). It decides governed calls from the persisted policy
+// bundle and the in-memory session subject, with no network call per decision.
+// The bundle schema validator is registered by the kei-connector-runtime root
+// package; without it every bundle fails validation and every call is denied.
 package pdp
 
 import (
@@ -120,11 +120,12 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 type HarnessCall = policybundle.HarnessCall
 
 // HarnessResult is the kei.harness-match/v1 outcome: permit, deny, unmatched
-// or not_renderable, and the deciding policy. Renderers compile it into native
-// permissions; it carries no reason code (ADR-029 §1.5).
+// or not_renderable, the deciding policy, and a reason code for non-permit,
+// non-deny outcomes (ADR-029 §1.5 extension).
 type HarnessResult struct {
 	Outcome  string
 	PolicyID string
+	Reason   string
 }
 
 // EvaluateHarness applies kei.harness-match/v1 to a harness tool call. A bundle
@@ -134,12 +135,16 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 	if err := ctx.Err(); err != nil {
 		return HarnessResult{}, err
 	}
-	v, _, err := e.check()
+	v, state, err := e.check()
 	if err != nil {
-		return HarnessResult{Outcome: policybundle.HarnessNotRenderable}, nil
+		reason := policybundle.HarnessReasonBundleInvalid
+		if state == policybundle.Cold || state == "" {
+			// No bundle at all, not a decode error.
+		}
+		return HarnessResult{Outcome: policybundle.HarnessNotRenderable, Reason: reason}, nil
 	}
-	outcome, policyID := v.EvaluateHarness(call)
-	return HarnessResult{Outcome: outcome, PolicyID: policyID}, nil
+	outcome, policyID, reason := v.EvaluateHarness(call)
+	return HarnessResult{Outcome: outcome, PolicyID: policyID, Reason: reason}, nil
 }
 
 // ReconcileSession ends the session of a subject the active bundle no longer

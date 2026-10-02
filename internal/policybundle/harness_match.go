@@ -1,18 +1,32 @@
 package policybundle
 
 import (
+	"log/slog"
 	"path"
 	"strings"
 )
 
-// Harness kinds named by harness: sources (ADR-029 §1.3).
-var harnessKinds = map[string]bool{"claude_code": true, "codex": true, "opencode": true}
+// Harness kinds named by harness: sources (ADR-029 §1.3). Custom harnesses
+// (Kei chat harness, PDE, the assistant, customer-built) are KNOWN and
+// authorize through the local PDP Evaluate path, not rendered allowlists.
+var harnessKinds = map[string]bool{"claude_code": true, "codex": true, "opencode": true, "custom": true}
+
+// Harness reason codes (ADR-029 §1.5 extension). Every non-permit, non-deny
+// outcome carries one; permit and deny have no reason code.
+const (
+	HarnessReasonUnsupportedKind  = "unsupported_kind"
+	HarnessReasonPathNotAbsolute  = "path_not_absolute"
+	HarnessReasonBundleInvalid    = "bundle_invalid"
+	HarnessReasonHumanSource      = "human_source"
+	HarnessReasonDstNotRenderable = "dst_not_renderable"
+	HarnessReasonEvaluateViaPDP   = "evaluate_via_pdp"
+)
 
 // HarnessCall is one tool call of a pre-built harness, described by the
 // inputs kei.harness-match/v1 matches on (ADR-029 §1.2, §1.3).
 type HarnessCall struct {
 	HarnessID string   // registered harness id (UUID)
-	Kind      string   // claude_code | codex | opencode
+	Kind      string   // claude_code | codex | opencode | custom
 	AgentID   string   // agent the harness runs as, if any
 	Tool      string   // registry tool name, e.g. claude_code.edit
 	Argv      []string // shell commands only
@@ -23,7 +37,8 @@ type HarnessCall struct {
 	MCPTool   string
 }
 
-// Harness outcomes (ADR-029 §1.5). There are no reason codes on this path.
+// Harness outcomes (ADR-029 §1.5). Every non-permit, non-deny outcome carries a
+// reason code (HarnessReason*).
 const (
 	HarnessPermit        = policyPermitAction
 	HarnessDeny          = "deny"
@@ -37,16 +52,20 @@ const (
 // not_renderable. For a shell command a permit counts only when its dst is a
 // shell: argv prefix (ADR-029 §9.4). Renderers use this outcome; kei-proxy
 // does not enforce it at run time.
-func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID string) {
+func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID, reason string) {
 	if !harnessKinds[c.Kind] {
-		return HarnessNotRenderable, ""
+		slog.Warn("unsupported harness kind", "kind", c.Kind)
+		return HarnessNotRenderable, "", HarnessReasonUnsupportedKind
+	}
+	if c.Kind == "custom" {
+		return HarnessNotRenderable, "", HarnessReasonEvaluateViaPDP
 	}
 	if c.Path != "" && (!path.IsAbs(c.Path) || path.Clean(c.Path) != c.Path) {
-		return HarnessNotRenderable, ""
+		return HarnessNotRenderable, "", HarnessReasonPathNotAbsolute
 	}
 	set, err := v.decodePolicySet()
 	if err != nil {
-		return HarnessNotRenderable, ""
+		return HarnessNotRenderable, "", HarnessReasonBundleInvalid
 	}
 	shell := len(c.Argv) > 0
 	for _, p := range set.Policies {
@@ -64,17 +83,20 @@ func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID string) {
 		if !applies && !human {
 			continue
 		}
-		if human || !renderable {
-			return HarnessNotRenderable, p.ID
+		if human {
+			return HarnessNotRenderable, p.ID, HarnessReasonHumanSource
+		}
+		if !renderable {
+			return HarnessNotRenderable, p.ID, HarnessReasonDstNotRenderable
 		}
 		if p.Action == "deny" {
-			return HarnessDeny, p.ID
+			return HarnessDeny, p.ID, ""
 		}
 		if p.Action == policyPermitAction {
-			return HarnessPermit, p.ID
+			return HarnessPermit, p.ID, ""
 		}
 	}
-	return HarnessUnmatched, ""
+	return HarnessUnmatched, "", ""
 }
 
 func harnessSrcApplies(src string, c HarnessCall) (applies, human bool) {
