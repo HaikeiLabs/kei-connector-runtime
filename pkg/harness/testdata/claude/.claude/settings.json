@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": ["Read", "Glob"]
+  },
+  "mcpServers": {
+    "linear": {
+      "command": "npx",
+      "args": ["-y", "@example/linear-mcp"]
+    }
+  }
+}

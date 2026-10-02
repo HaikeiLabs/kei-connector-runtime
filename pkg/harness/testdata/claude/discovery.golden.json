@@ -1,0 +1,22 @@
+{
+  "built_ins": [
+    {"name":"claude_code.read","source":"claude_code","operation_class":"read","description":"Read files"},
+    {"name":"claude_code.glob","source":"claude_code","operation_class":"read","description":"Find files by pattern"},
+    {"name":"claude_code.grep","source":"claude_code","operation_class":"read","description":"Search file contents"},
+    {"name":"claude_code.edit","source":"claude_code","operation_class":"write","description":"Edit files"},
+    {"name":"claude_code.write","source":"claude_code","operation_class":"write","description":"Write files"},
+    {"name":"claude_code.bash","source":"claude_code","operation_class":"write","description":"Run shell commands"},
+    {"name":"claude_code.webfetch","source":"claude_code","operation_class":"read","description":"Fetch web pages"},
+    {"name":"claude_code.web_search","source":"claude_code","operation_class":"read","description":"Search the web"},
+    {"name":"claude_code.task","source":"claude_code","operation_class":"write","description":"Delegate a task"},
+    {"name":"claude_code.todo_read","source":"claude_code","operation_class":"read","description":"Read task list"},
+    {"name":"claude_code.todo_write","source":"claude_code","operation_class":"write","description":"Update task list"},
+    {"name":"claude_code.notebook_edit","source":"claude_code","operation_class":"write","description":"Edit notebook cells"}
+  ],
+  "skills": [
+    {"name":"claude_code.skill.release_notes","source":"claude_code","selector":"skill:release-notes","operation_class":"write","description":"Draft release notes from merged changes."}
+  ],
+  "mcp": [
+    {"name":"claude_code.mcp.linear","source":"mcp","selector":"mcp:linear","operation_class":"write","description":"MCP server linear"}
+  ]
+}

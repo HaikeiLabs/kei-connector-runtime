@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local/fixture",
+  "mcp": {
+    "linear": {
+      "type": "local",
+      "command": ["linear-mcp"]
+    }
+  }
+}

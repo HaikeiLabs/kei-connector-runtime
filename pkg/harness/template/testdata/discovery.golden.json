@@ -1,0 +1,12 @@
+{
+  "built_ins": [
+    {
+      "name": "example.read",
+      "source": "example",
+      "operation_class": "read",
+      "description": "Read example resources"
+    }
+  ],
+  "skills": null,
+  "mcp": null
+}

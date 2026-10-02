@@ -1,0 +1,6 @@
+model = "codex-fixture-model"
+approval_policy = "on-request"
+
+[mcp_servers.linear]
+command = "linear-mcp"
+args = []

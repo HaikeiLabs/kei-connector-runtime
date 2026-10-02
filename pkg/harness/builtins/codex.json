@@ -1,0 +1,10 @@
+{
+  "schema_version": "kei.harness-builtins/v1",
+  "harness_kind": "codex",
+  "harness_version": "0.159.3",
+  "verified_at": "2026-10-02T02:26:15Z",
+  "tools": [
+    {"name":"codex.apply_patch","source":"codex","operation_class":"write","description":"Apply a patch"},
+    {"name":"codex.shell","source":"codex","operation_class":"write","description":"Run shell commands"}
+  ]
+}

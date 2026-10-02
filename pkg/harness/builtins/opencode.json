@@ -1,0 +1,21 @@
+{
+  "schema_version": "kei.harness-builtins/v1",
+  "harness_kind": "opencode",
+  "harness_version": "1.18.34",
+  "verified_at": "2026-10-02T02:26:15Z",
+  "tools": [
+    {"name":"opencode.read","source":"opencode","operation_class":"read","description":"Read files"},
+    {"name":"opencode.glob","source":"opencode","operation_class":"read","description":"Find files"},
+    {"name":"opencode.grep","source":"opencode","operation_class":"read","description":"Search files"},
+    {"name":"opencode.edit","source":"opencode","operation_class":"write","description":"Edit files"},
+    {"name":"opencode.write","source":"opencode","operation_class":"write","description":"Write files"},
+    {"name":"opencode.bash","source":"opencode","operation_class":"write","description":"Run shell commands"},
+    {"name":"opencode.webfetch","source":"opencode","operation_class":"read","description":"Fetch web pages"},
+    {"name":"opencode.websearch","source":"opencode","operation_class":"read","description":"Search the web"},
+    {"name":"opencode.list","source":"opencode","operation_class":"read","description":"List files"},
+    {"name":"opencode.patch","source":"opencode","operation_class":"write","description":"Apply a patch"},
+    {"name":"opencode.skill","source":"opencode","operation_class":"write","description":"Invoke a skill"},
+    {"name":"opencode.task","source":"opencode","operation_class":"write","description":"Delegate a task"},
+    {"name":"opencode.todowrite","source":"opencode","operation_class":"write","description":"Update task list"}
+  ]
+}
