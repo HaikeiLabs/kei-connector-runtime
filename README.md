@@ -42,10 +42,13 @@ durable grant may affect future calls. There is no synchronous catalog
 authorisation or subject-resolution request per invocation in this flow;
 identity and grant APIs remain separate session-setup operations.
 
-**Status.** Local bundle evaluation is not yet implemented. The bundle
-trust/freshness contract, signing-key distribution, and the separate
-identity/grant session-context contract are pending (see ADR-026 and the G0
-task graph in the ADR-011 migration plan).
+**Status.** Local bundle evaluation is not yet implemented (see open PRs #78,
+#79, #80 for the implementation stack). The bundle contract is defined by
+ADR-026 (G0 decisions accepted in Kei #681, #682, #693): unsigned canonical
+JSON over authenticated HTTPS; no bundle signing, key distribution, or
+encryption. The session subject is held in runtime memory; memberships, roles,
+and grants arrive in the bundle. Identity and grant APIs remain separate
+session-setup operations. Per-call approvals are removed (ADR-027, Kei #681).
 
 - Credentials are resolved **here**, from tenant-owned secret/OAuth backends.
 - Provider payloads and results stay **here**, inside the tenant runtime.

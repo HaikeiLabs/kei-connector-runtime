@@ -53,16 +53,16 @@ This daemon-socket model brings three benefits:
 
 The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/models`, and
 `POST /v1/chat/completions`. Governed tool authorization — the PEP — is not
-served over the socket. Harnesses use the legacy `kei-proxy authorize` CLI
-subprocess instead; that legacy path delegates PDP to the remote catalog and
-is being removed.
+served over the socket. Harnesses currently use the legacy `kei-proxy authorize`
+CLI subprocess instead; that legacy path delegates PDP to the remote catalog
+and is being removed as the local PDP ships (PRs #78, #79, #80).
 
 ADR-011's local-PDP authorization over the daemon is the target. Both the PEP
 and the PDP will run in the same daemon process; the PDP evaluates policy
-locally from a signed bundle, and the PEP enforces the result on every governed
-invocation without a round trip to the catalog. The socket route proposed in
-the closed PR #65 was rejected because it called the catalog authorize endpoint
-per request and did not authenticate the caller.
+locally from an unsigned canonical JSON bundle (ADR-026), and the PEP enforces
+the result on every governed invocation without a round trip to the catalog.
+The socket route proposed in the closed PR #65 was rejected because it called
+the catalog authorize endpoint per request and did not authenticate the caller.
 
 ### Same-host daemon and harness (primary deployment)
 
