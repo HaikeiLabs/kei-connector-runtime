@@ -353,8 +353,8 @@ func runAuthorize(args []string) int {
 	}
 	identity, err := bootstrapRuntime(context.Background(), cfg, time.Duration(*timeout)*time.Second)
 	if err != nil {
-		if isRuntimeRevocation(err) {
-			revokePolicyState(cfg)
+		if IsRuntimeRevocation(err) {
+			RevokePolicyState(cfg)
 		}
 		fmt.Fprintf(os.Stderr, "Error: runtime bootstrap failed: %v\n", err)
 		return 1

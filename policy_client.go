@@ -177,9 +177,9 @@ func (c *policyControlClient) ResolveSubject(ctx context.Context, req subjectRes
 	return subject, nil
 }
 
-// syncPolicyBundle fetches an unsigned canonical bundle only over a validated
+// SyncPolicyBundle fetches an unsigned canonical bundle only over a validated
 // HTTPS control-plane channel authenticated by the installation runtime token.
-func syncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity, timeout time.Duration) error {
+func SyncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity, timeout time.Duration) error {
 	if identity == nil || identity.WorkspaceID == nil {
 		return errors.New("runtime identity has no workspace audience")
 	}
@@ -247,7 +247,7 @@ func syncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity
 	}
 	return nil
 }
-func revokePolicyState(cfg Config) {
+func RevokePolicyState(cfg Config) {
 	if strings.TrimSpace(cfg.RuntimeStateDir) == "" {
 		return
 	}
@@ -256,7 +256,7 @@ func revokePolicyState(cfg Config) {
 		_ = store.Revoke(time.Now().UTC())
 	}
 }
-func isRuntimeRevocation(err error) bool {
+func IsRuntimeRevocation(err error) bool {
 	var who *WhoamiFailure
 	if errors.As(err, &who) && who.Category == WhoamiFailureHTTPStatus && (who.StatusCode == http.StatusUnauthorized || who.StatusCode == http.StatusForbidden) {
 		return true

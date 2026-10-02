@@ -73,8 +73,8 @@ func runRuntimeBootstrap(args []string, stdout, stderr io.Writer, cfg Config, ne
 	}
 	identity, err := bootstrapRuntimeWithClient(context.Background(), cfg, *timeout, newClient)
 	if err != nil {
-		if isRuntimeRevocation(err) {
-			revokePolicyState(cfg)
+		if IsRuntimeRevocation(err) {
+			RevokePolicyState(cfg)
 		}
 		fmt.Fprintf(stderr, "runtime bootstrap failed: %v\n", err)
 		return 1
@@ -82,7 +82,7 @@ func runRuntimeBootstrap(args []string, stdout, stderr io.Writer, cfg Config, ne
 	if cfg.ToolManifestPath != "" {
 		syncToolManifest(context.Background(), cfg, *timeout, newClient, stderr)
 	}
-	if err := syncPolicyBundle(context.Background(), cfg, identity, *timeout); err != nil {
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, *timeout); err != nil {
 		fmt.Fprintf(stderr, "runtime policy bundle bootstrap failed: %v\n", err)
 		return 1
 	}
@@ -128,8 +128,8 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	identity, err := bootstrapRuntimeWithClient(ctx, cfg, *timeout, newClient)
 	if err != nil {
-		if isRuntimeRevocation(err) {
-			revokePolicyState(cfg)
+		if IsRuntimeRevocation(err) {
+			RevokePolicyState(cfg)
 		}
 		if ctx.Err() != nil {
 			return heartbeatExitOK
@@ -140,7 +140,7 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	if code := writeRuntimeBootstrapOutput(stdout, identity, stderr); code != 0 {
 		return code
 	}
-	if err := syncPolicyBundle(ctx, cfg, identity, *timeout); err != nil {
+	if err := SyncPolicyBundle(ctx, cfg, identity, *timeout); err != nil {
 		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
 	}
 	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
@@ -158,8 +158,8 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 		policyBundle: func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) },
 	}
 	if err := loop.run(ctx, false); err != nil {
-		if isRuntimeRevocation(err) {
-			revokePolicyState(cfg)
+		if IsRuntimeRevocation(err) {
+			RevokePolicyState(cfg)
 		}
 		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
 		return heartbeatExitTransient
@@ -220,19 +220,19 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 	identity, code := loop.resolveIdentity(ctx, cfg)
 	if identity == nil {
 		if code == heartbeatExitUnauthorized {
-			revokePolicyState(cfg)
+			RevokePolicyState(cfg)
 		}
 		return code
 	}
-	if err := syncPolicyBundle(ctx, cfg, identity, timeout); err != nil {
+	if err := SyncPolicyBundle(ctx, cfg, identity, timeout); err != nil {
 		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
 	}
 	loop.policyBundle = func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) }
 	events.identity(identity)
 	// The first beat is sent at once and stands in for bootstrap's heartbeat.
 	err = loop.run(ctx, true)
-	if isRuntimeRevocation(err) {
-		revokePolicyState(cfg)
+	if IsRuntimeRevocation(err) {
+		RevokePolicyState(cfg)
 	}
 	return heartbeatExitFor(err, events)
 }

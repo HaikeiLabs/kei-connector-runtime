@@ -41,7 +41,7 @@ func TestSyncPolicyBundleAcceptsUnsignedJSONWithRuntimeTokenAndDigest(t *testing
 	stateDir := t.TempDir()
 	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: server.URL, RuntimeStateDir: stateDir}
 	identity := &RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), Status: "active", BindingStatus: "verified"}
-	if err := syncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
 		t.Fatal(err)
 	}
 	store, err := policybundle.OpenStore(stateDir)
@@ -83,10 +83,10 @@ func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: server.URL, RuntimeStateDir: dir}
 	identity := &RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
-	if err := syncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := syncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
@@ -114,7 +114,7 @@ func TestSyncPolicyBundleFailsClosedOnIntegrityHeaderMismatch(t *testing.T) {
 			dir := t.TempDir()
 			cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: server.URL, RuntimeStateDir: dir}
 			identity := &RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
-			if err := syncPolicyBundle(context.Background(), cfg, identity, time.Second); err == nil {
+			if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err == nil {
 				t.Fatal("invalid response headers accepted")
 			}
 			store, err := policybundle.OpenStore(dir)
@@ -142,7 +142,7 @@ func TestPolicyBundleEndpointRevocationDeletesPersistedEnforcementState(t *testi
 	defer server.Close()
 	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: server.URL, RuntimeStateDir: stateDir}
 	identity := &RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
-	if err := syncPolicyBundle(context.Background(), cfg, identity, time.Second); err == nil {
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err == nil {
 		t.Fatal("expected revoked control-plane request to fail")
 	}
 	if _, state, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); err == nil || state != policybundle.Revoked {
