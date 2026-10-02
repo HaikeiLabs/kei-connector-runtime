@@ -21,6 +21,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 const (
@@ -80,6 +81,8 @@ func runtimeSocketPathFromEnv() string {
 }
 
 func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) int {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	unixListener, err := socket.Listen(socketPath)
 	if err != nil {
 		slog.Error("runtime_unix_listener_failed", "path", socketPath, "error", err)
@@ -104,17 +107,29 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		IdleTimeout:       2 * time.Minute,
 	}
 
+	refresherDone := make(chan struct{})
 	if cfg.IsRuntime() {
 		go func() {
-			identity, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
-			if err != nil || identity == nil {
-				slog.Warn("policy bundle bootstrap identity unavailable; runtime stays deny-only", "error", err)
-				return
-			}
-			if err := syncPolicyBundle(ctx, cfg, identity, 10*time.Second); err != nil {
-				slog.Warn("policy bundle bootstrap failed; runtime stays deny-only", "error", err)
-			}
+			defer close(refresherDone)
+			keiruntime.NewPolicyRefresher(cfg,
+				func() (*keiruntime.Identity, error) {
+					id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+					if err != nil {
+						return nil, err
+					}
+					return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
+				},
+				func(identity *keiruntime.Identity) error {
+					return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
+						ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+					}, 10*time.Second)
+				},
+				IsRuntimeRevocation,
+				func() { RevokePolicyState(cfg) },
+			).Run(ctx)
 		}()
+	} else {
+		close(refresherDone)
 	}
 	slog.Info("runtime_http_listener_started", "addr", addr)
 	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")
@@ -143,6 +158,8 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		}
 	}
 	stopCollector()
+	stop()
+	<-refresherDone
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {

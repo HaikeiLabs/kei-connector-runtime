@@ -12,6 +12,37 @@ import (
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
+// runPolicy implements `kei-proxy policy sync|show`.
+func runPolicy(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: kei-proxy policy <sync|show>")
+		return 1
+	}
+	cfg := configFromEnv()
+	switch args[0] {
+	case "sync":
+		identityFunc := func() (*keiruntime.Identity, error) {
+			identity, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 30*time.Second).WhoAmI(context.Background(), cfg.RuntimeToken)
+			if err != nil {
+				return nil, err
+			}
+			return &keiruntime.Identity{
+				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+			}, nil
+		}
+		syncBundle := func(identity *keiruntime.Identity) error {
+			return SyncPolicyBundle(context.Background(), cfg, &RuntimeIdentity{
+				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+			}, 30*time.Second)
+		}
+		return keiruntime.RunPolicySync(context.Background(), args[1:], os.Stdout, os.Stderr, cfg, identityFunc, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) })
+	case "show":
+		return keiruntime.RunPolicyShow(args[1:], os.Stdout, os.Stderr, cfg)
+	}
+	fmt.Fprintf(os.Stderr, "Error: unknown policy command %q\n", args[0])
+	return 1
+}
+
 // Main runs the kei-proxy command line with args (os.Args[1:]) and returns
 // the process exit code. buildVersion is the release version injected into
 // the cmd/kei-proxy entrypoint; it is reported by the version command and in
@@ -51,6 +82,8 @@ func Main(buildVersion string, args []string) int {
 		code = runHarness(args[1:])
 	} else if args[0] == "serve" {
 		code = runServe(args[1:])
+	} else if args[0] == "policy" {
+		code = runPolicy(args[1:])
 	} else if args[0] == "version" || args[0] == "-v" || args[0] == "--version" {
 		printVersion(os.Stdout)
 	} else if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
@@ -150,9 +183,11 @@ Commands:
   org          manage organization members (list, add, remove, update)
   init         provision a member and/or agent via canonical ABAC initialization
   runtime      report and maintain a customer runtime installation heartbeat
-	harness      discover tools from all installed harness kinds and sync metadata
-	identity link        start a platform identity claim for the current runtime
-	identity status      resolve chat identity status for the current runtime
+  harness      discover tools from all installed harness kinds and sync metadata
+  identity link        start a platform identity claim for the current runtime
+  identity status      resolve chat identity status for the current runtime
+  policy sync  fetch, validate and persist the installation's policy bundle
+  policy show  print the persisted policy bundle's version and enforcement state
   serve        start the local OpenAI-compatible HTTP listener
   help         show this help
 
@@ -167,6 +202,7 @@ Environment:
   KEI_PROXY_AUDIT           audit JSONL file path (authorize appends, collector ships)
   KEI_PROXY_AUDIT_MAX_BYTES total audit spool cap in bytes (default 104857600, 100 MiB)
   KEI_RUNTIME_SOCKET_PATH   local HTTP Unix socket (serve; default platform-dependent, see docs/unix-socket.md)
+  KEI_RUNTIME_STATE_DIR     protected policy bundle state directory (default /var/lib/kei-proxy)
   KEI_PROXY_SPAN_ID         span id for the invocation (stable dedupe key)
   KEI_PROXY_INVOKING_SUBJECT invoking subject (defaults to --user)
   KEI_PROXY_PARENT_SPAN     parent span id (delegation chain)
