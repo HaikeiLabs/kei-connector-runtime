@@ -133,7 +133,7 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
-		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete):
+		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -151,6 +151,8 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 			l.handleAuthorize(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
+		case r.Method == http.MethodGet:
+			l.handleSessionGet(w, r)
 		default:
 			l.Sessions.End()
 			w.WriteHeader(http.StatusNoContent)
@@ -169,6 +171,28 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type socketSessionResponse struct {
+	Schema string `json:"schema"`
+	UserID string `json:"user_id"`
+	Status string `json:"status"`
+}
+
+func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	subject, ok := l.Sessions.Current()
+	if !ok {
+		writeRuntimeError(w, http.StatusNotFound, "no_session", "no active session")
+		return
+	}
+	resp := socketSessionResponse{
+		Schema: sessionSchema,
+		UserID: subject.UserID,
+		Status: string(subject.Status),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {

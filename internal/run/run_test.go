@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,7 +65,7 @@ func TestDeliveredRunResolverAuthorizesThenReadsFakeBackend(t *testing.T) {
 	}
 }
 
-func TestDeliveredRunResolverFailsClosedForDenyMissingAndOAuth(t *testing.T) {
+func TestDeliveredRunResolverFailsClosedForDenyAndMissing(t *testing.T) {
 	const id = "00000000-0000-4000-8000-000000000123"
 	for _, tc := range []struct {
 		name, decision, source, reason string
@@ -70,7 +73,6 @@ func TestDeliveredRunResolverFailsClosedForDenyMissingAndOAuth(t *testing.T) {
 	}{
 		{name: "deny", decision: "deny", reason: "policy_denied", indexed: true},
 		{name: "unresolved", decision: "allow", source: "opaque_ref", reason: "unresolved_reference"},
-		{name: "oauth", decision: "allow", source: "oauth", reason: "oauth_not_supported", indexed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -94,6 +96,24 @@ func TestDeliveredRunResolverFailsClosedForDenyMissingAndOAuth(t *testing.T) {
 	}
 }
 func ptr(v string) *string { return &v }
+
+type fakeRunCredentialBinding struct {
+	backend, ref, connectURL string
+	err                      error
+}
+
+type fakeSubjectSource struct {
+	userID string
+	err    error
+}
+
+func (f *fakeSubjectSource) Subject(_ context.Context) (string, error) {
+	return f.userID, f.err
+}
+
+func (f *fakeRunCredentialBinding) Resolve(_ context.Context, _, _, _ string) (string, string, string, error) {
+	return f.backend, f.ref, f.connectURL, f.err
+}
 
 func (r testRunResolver) Resolve(context.Context, string, string) (string, string, error) {
 	return r.value, r.link, r.err
@@ -186,6 +206,256 @@ func TestRunNeverSurfacesResolvedSecretOnSuccessOrFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeliveredRunResolverResolvesOAuth(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000123"
+	secretRef := "aws-secrets-manager://region/connectors/" + id + "/api_token"
+	value := "oauth-secret-value"
+	store := &fakeRunSecretStore{value: &value}
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "api_token", CredentialSource: contract.CredentialSourceOAuth, Provider: contract.Provider("github")}, CredentialBackend: "aws-secrets-manager", CredentialSecretRef: secretRef}}}
+	binding := &fakeRunCredentialBinding{backend: "aws-secrets-manager", ref: secretRef}
+	resolver := deliveredRunResolver{cfg: Config{}, store: store, authorization: auth, credentialBinding: binding, subjectSource: &fakeSubjectSource{userID: "user-abc"}}
+	got, _, err := resolver.Resolve(context.Background(), id, "api_token")
+	if err != nil || got != value || store.reads != 1 {
+		t.Fatalf("resolve=%q err=%v reads=%d", got, err, store.reads)
+	}
+}
+
+func TestDeliveredRunResolverFailsOAuthSubjectMissing(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000123"
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "api_token", CredentialSource: contract.CredentialSourceOAuth, Provider: contract.Provider("github")}}}}
+	resolver := deliveredRunResolver{cfg: Config{}, store: &fakeRunSecretStore{}, authorization: auth, credentialBinding: &fakeRunCredentialBinding{}}
+	_, _, err := resolver.Resolve(context.Background(), id, "api_token")
+	var reason runReasonError
+	if !errors.As(err, &reason) || reason.reason != "subject_unlinked" {
+		t.Fatalf("error=%v want reason subject_unlinked", err)
+	}
+}
+
+func TestDeliveredRunResolverFailsOAuthWhenEnvVarSetButNoSubjectSource(t *testing.T) {
+	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", "env-invoker")
+	t.Setenv("KEI_PROXY_USER_ID", "env-user")
+	const id = "00000000-0000-4000-8000-000000000123"
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "api_token", CredentialSource: contract.CredentialSourceOAuth, Provider: contract.Provider("github")}}}}
+	resolver := deliveredRunResolver{cfg: Config{}, store: &fakeRunSecretStore{}, authorization: auth, credentialBinding: &fakeRunCredentialBinding{}}
+	_, _, err := resolver.Resolve(context.Background(), id, "api_token")
+	var reason runReasonError
+	if !errors.As(err, &reason) || reason.reason != "subject_unlinked" {
+		t.Fatalf("error=%v want reason subject_unlinked (env vars must have no effect on credential resolution)", err)
+	}
+}
+
+func TestDeliveredRunResolverFailsOAuthProviderMissing(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000123"
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "api_token", CredentialSource: contract.CredentialSourceOAuth}}}}
+	resolver := deliveredRunResolver{cfg: Config{}, store: &fakeRunSecretStore{}, authorization: auth, credentialBinding: &fakeRunCredentialBinding{}, subjectSource: &fakeSubjectSource{userID: "user-abc"}}
+	_, _, err := resolver.Resolve(context.Background(), id, "api_token")
+	var reason runReasonError
+	if !errors.As(err, &reason) || reason.reason != "unresolved_reference" {
+		t.Fatalf("error=%v want reason unresolved_reference", err)
+	}
+}
+
+func TestDeliveredRunResolverFailsOAuthConnectRequired(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000123"
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "api_token", CredentialSource: contract.CredentialSourceOAuth, Provider: contract.Provider("github")}}}}
+	binding := &fakeRunCredentialBinding{connectURL: "https://console.example/connect/github", err: errors.New("not found")}
+	resolver := deliveredRunResolver{cfg: Config{}, store: &fakeRunSecretStore{}, authorization: auth, credentialBinding: binding, subjectSource: &fakeSubjectSource{userID: "user-abc"}}
+	_, connectURL, err := resolver.Resolve(context.Background(), id, "api_token")
+	var reason runReasonError
+	if !errors.As(err, &reason) || reason.reason != "connect_required" {
+		t.Fatalf("error=%v want reason connect_required", err)
+	}
+	if connectURL != "https://console.example/connect/github" {
+		t.Fatalf("connectURL=%q", connectURL)
+	}
+}
+
+func TestDeliveredRunResolverFailsOAuthCredentialBindingFails(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000123"
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "api_token", CredentialSource: contract.CredentialSourceOAuth, Provider: contract.Provider("github")}}}}
+	binding := &fakeRunCredentialBinding{err: errors.New("server error")}
+	resolver := deliveredRunResolver{cfg: Config{}, store: &fakeRunSecretStore{}, authorization: auth, credentialBinding: binding, subjectSource: &fakeSubjectSource{userID: "user-abc"}}
+	_, _, err := resolver.Resolve(context.Background(), id, "api_token")
+	var reason runReasonError
+	if !errors.As(err, &reason) || reason.reason != "unresolved_reference" {
+		t.Fatalf("error=%v want reason unresolved_reference", err)
+	}
+}
+
+func TestRunInjectsOAuthOnlyMasksAndAuditsWithoutCredential(t *testing.T) {
+	const secret = "oauth-secret-do-not-leak"
+	spool := filepath.Join(t.TempDir(), "audit.jsonl")
+	var stdout, stderr bytes.Buffer
+	const reference = "kei://connectors/connector-1/api_token"
+	t.Setenv("API_TOKEN", reference)
+	parent := os.Environ()
+	code := runCommand([]string{"--connector", "connector-1", "--", "/bin/sh", "-c", "printenv API_TOKEN; printenv API_TOKEN >&2"}, &stdout, &stderr, Config{AppendAudit: func(record []byte) error { return os.WriteFile(spool, append(record, '\n'), 0600) }}, parent, testRunResolver{value: secret}, nil)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+		t.Fatal("OAuth credential leaked in child output")
+	}
+	if !strings.Contains(stdout.String(), "[REDACTED]") || !strings.Contains(stderr.String(), "[REDACTED]") {
+		t.Fatalf("output not redacted: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if os.Getenv("API_TOKEN") != reference {
+		t.Fatalf("parent environment changed: API_TOKEN=%q", os.Getenv("API_TOKEN"))
+	}
+	data, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("OAuth credential leaked into audit: %s", data)
+	}
+}
+
+func TestHTTPCredentialBindingClientResolves(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("bad auth: %s", r.Header.Get("Authorization"))
+		}
+		if !strings.HasSuffix(r.URL.Path, "/user-abc/github") {
+			t.Fatalf("bad path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"secret_backend":"aws-secrets-manager","secret_ref":"ref/to/secret"}`))
+	}))
+	defer server.Close()
+	client := newHTTPCredentialBindingClient(server.URL)
+	backend, ref, connectURL, err := client.Resolve(context.Background(), "test-token", "user-abc", "github")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if backend != "aws-secrets-manager" || ref != "ref/to/secret" || connectURL != "" {
+		t.Fatalf("backend=%q ref=%q connectURL=%q", backend, ref, connectURL)
+	}
+}
+
+func TestHTTPCredentialBindingClientReturnsConnectURLOnNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	client := newHTTPCredentialBindingClient(server.URL)
+	backend, ref, connectURL, err := client.Resolve(context.Background(), "test-token", "user-abc", "github")
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if backend != "" || ref != "" {
+		t.Fatalf("expected empty backend/ref on 404: backend=%q ref=%q", backend, ref)
+	}
+	if connectURL == "" {
+		t.Fatal("expected connect URL on 404")
+	}
+	if !strings.Contains(connectURL, "github") || !strings.Contains(connectURL, "user-abc") {
+		t.Fatalf("connect URL missing params: %q", connectURL)
+	}
+}
+
+func TestHTTPCredentialBindingClientFailsOnServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := newHTTPCredentialBindingClient(server.URL)
+	backend, ref, connectURL, err := client.Resolve(context.Background(), "test-token", "user-abc", "github")
+	if err == nil {
+		t.Fatal("expected error for 500")
+	}
+	if backend != "" || ref != "" || connectURL != "" {
+		t.Fatalf("expected empty values on 500: backend=%q ref=%q connectURL=%q", backend, ref, connectURL)
+	}
+}
+
+func TestSocketSubjectSourceReturnsUserIDWhenLinked(t *testing.T) {
+	socketPath := testSocketPath(t)
+	server := launchSessionSocket(t, socketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/v1/session" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"user_id":"user-abc","status":"linked"}`))
+	}))
+	defer server.Close()
+
+	source := NewSocketSubjectSource(socketPath, "test-token")
+	userID, err := source.Subject(context.Background())
+	if err != nil || userID != "user-abc" {
+		t.Fatalf("Subject() = %q, %v", userID, err)
+	}
+}
+
+func TestSocketSubjectSourceReturnsEmptyOn404(t *testing.T) {
+	socketPath := testSocketPath(t)
+	server := launchSessionSocket(t, socketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	source := NewSocketSubjectSource(socketPath, "test-token")
+	userID, err := source.Subject(context.Background())
+	if err != nil || userID != "" {
+		t.Fatalf("Subject() = %q, %v", userID, err)
+	}
+}
+
+func TestSocketSubjectSourceReturnsEmptyOnUnlinkedStatus(t *testing.T) {
+	socketPath := testSocketPath(t)
+	server := launchSessionSocket(t, socketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"user_id":"user-abc","status":"pending"}`))
+	}))
+	defer server.Close()
+
+	source := NewSocketSubjectSource(socketPath, "test-token")
+	userID, err := source.Subject(context.Background())
+	if err != nil || userID != "" {
+		t.Fatalf("Subject() = %q, %v", userID, err)
+	}
+}
+
+func TestSocketSubjectSourceReturnsEmptyOnDaemonUnreachable(t *testing.T) {
+	source := NewSocketSubjectSource("/nonexistent/socket", "test-token")
+	userID, err := source.Subject(context.Background())
+	if err != nil || userID != "" {
+		t.Fatalf("Subject() = %q, %v", userID, err)
+	}
+}
+
+// testSocketPath returns a short Unix socket path for testing.
+func testSocketPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("/tmp", fmt.Sprintf("kei-session-test-%d.sock", os.Getpid()))
+	t.Cleanup(func() { os.Remove(path) })
+	return path
+}
+
+// launchSessionSocket starts an HTTP server on a Unix socket at the given path.
+// The caller must close the returned server.
+func launchSessionSocket(t *testing.T, socketPath string, handler http.Handler) *http.Server {
+	t.Helper()
+	server := &http.Server{Handler: handler}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen %s: %v", socketPath, err)
+	}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		server.Close()
+		os.Remove(socketPath)
+	})
+	return server
 }
 
 func TestRedactingWriterMasksSecretAcrossWrites(t *testing.T) {
