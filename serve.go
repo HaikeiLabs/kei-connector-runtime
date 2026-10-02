@@ -99,34 +99,49 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		slog.Error("runtime_http_listener_failed", "addr", addr, "error", err)
 		return 1
 	}
-	server := &http.Server{
-		Handler:           newRuntimeHTTPHandler(cfg),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      2 * time.Minute,
-		IdleTimeout:       2 * time.Minute,
+	newServer := func(h http.Handler) *http.Server {
+		return &http.Server{
+			Handler:           h,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      2 * time.Minute,
+			IdleTimeout:       2 * time.Minute,
+		}
 	}
+	base := newRuntimeHTTPHandler(cfg).(*runtimeHTTPHandler)
+	emitFunc := func(data json.RawMessage) {
+		if cfg.AuditPath == "" {
+			return
+		}
+		_ = newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append("decision", data)
+	}
+	local := keiruntime.NewLocalPDP(cfg, emitFunc)
+	server := newServer(base)
+	socketServer := newServer(local.NewHandler(base, base.runtimeConfigError, base.authorized))
 
 	refresherDone := make(chan struct{})
 	if cfg.IsRuntime() {
+		refresher := keiruntime.NewPolicyRefresher(cfg,
+			func() (*keiruntime.Identity, error) {
+				id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+				if err != nil {
+					return nil, err
+				}
+				return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
+			},
+			func(identity *keiruntime.Identity) error {
+				return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
+					ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+				}, 10*time.Second)
+			},
+			IsRuntimeRevocation,
+			func() { RevokePolicyState(cfg) },
+		)
+		refresher.OnIdentity = local.SetIdentity
+		refresher.AfterSync = local.AfterSync
 		go func() {
 			defer close(refresherDone)
-			keiruntime.NewPolicyRefresher(cfg,
-				func() (*keiruntime.Identity, error) {
-					id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
-					if err != nil {
-						return nil, err
-					}
-					return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
-				},
-				func(identity *keiruntime.Identity) error {
-					return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
-						ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
-					}, 10*time.Second)
-				},
-				IsRuntimeRevocation,
-				func() { RevokePolicyState(cfg) },
-			).Run(ctx)
+			refresher.Run(ctx)
 		}()
 	} else {
 		close(refresherDone)
@@ -135,7 +150,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")
 	serveErrors := make(chan error, 2)
 	go func() { serveErrors <- server.Serve(tcpListener) }()
-	go func() { serveErrors <- server.Serve(unixListener) }()
+	go func() { serveErrors <- socketServer.Serve(unixListener) }()
 	stopCollector := func() {}
 	if cfg.AuditPath != "" {
 		audit := NewCollector(cfg.AuditPath, NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
@@ -162,9 +177,11 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	<-refresherDone
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("runtime_http_shutdown_incomplete", "error", err)
-		_ = server.Close()
+	for _, srv := range []*http.Server{server, socketServer} {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("runtime_http_shutdown_incomplete", "error", err)
+			_ = srv.Close()
+		}
 	}
 	return exitCode
 }

@@ -81,9 +81,11 @@ func configFromEnv() Config {
 	}
 }
 
-func (c Config) PolicyStateDir() string  { return c.RuntimeStateDir }
-func (c Config) Token() string           { return c.RuntimeToken }
-func (c Config) ControlPlaneURL() string { return c.RuntimeControlPlaneURL }
+func (c Config) PolicyStateDir() string     { return c.RuntimeStateDir }
+func (c Config) Token() string              { return c.RuntimeToken }
+func (c Config) ControlPlaneURL() string    { return c.RuntimeControlPlaneURL }
+func (c Config) PolicyAuditPath() string    { return c.AuditPath }
+func (c Config) PolicyAuditMaxBytes() int64 { return c.AuditMaxBytes }
 
 // IsRuntime identifies the customer-hosted installation path.
 func (c Config) IsRuntime() bool {
