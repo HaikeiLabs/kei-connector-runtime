@@ -1,11 +1,15 @@
 package connectorruntime
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/hooks"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 // Main runs the kei-proxy command line with args (os.Args[1:]) and returns
@@ -43,6 +47,8 @@ func Main(buildVersion string, args []string) int {
 		code = runIdentity(args[1:])
 	} else if args[0] == "runtime" {
 		code = runRuntime(args[1:])
+	} else if args[0] == "harness" {
+		code = runHarness(args[1:])
 	} else if args[0] == "serve" {
 		code = runServe(args[1:])
 	} else if args[0] == "version" || args[0] == "-v" || args[0] == "--version" {
@@ -78,6 +84,31 @@ func runProxyRun(args []string) int {
 			return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
 		},
 	})
+}
+
+// runHarness is CLI wiring; discovery and sync behavior live in pkg/harness.
+func runHarness(args []string) int {
+	if len(args) < 2 || args[0] != "tools" || args[1] != "sync" {
+		fmt.Fprintln(os.Stderr, "usage: kei-proxy harness tools sync")
+		return 2
+	}
+	cfg := configFromEnv()
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "harness tools sync configuration invalid: %v\n", err)
+		return 1
+	}
+	client := runtimeToolRegistryClient{client: NewRuntimeClient(cfg.RuntimeControlPlaneURL, 15*time.Second)}
+	return keiruntime.RunHarnessToolsSync(args[2:], os.Stderr, cfg.RuntimeToken, client)
+}
+
+type runtimeToolRegistryClient struct{ client RuntimeClient }
+
+func (c runtimeToolRegistryClient) SyncTools(ctx context.Context, token string, manifest []byte) error {
+	var clientManifest ToolManifest
+	if err := json.Unmarshal(manifest, &clientManifest); err != nil {
+		return fmt.Errorf("decode discovered tool manifest")
+	}
+	return c.client.SyncTools(ctx, token, &clientManifest)
 }
 
 func runModel(args []string) int {
@@ -119,8 +150,9 @@ Commands:
   org          manage organization members (list, add, remove, update)
   init         provision a member and/or agent via canonical ABAC initialization
   runtime      report and maintain a customer runtime installation heartbeat
-	  identity link        start a platform identity claim for the current runtime
-  identity status      resolve chat identity status for the current runtime
+	harness      discover tools from all installed harness kinds and sync metadata
+	identity link        start a platform identity claim for the current runtime
+	identity status      resolve chat identity status for the current runtime
   serve        start the local OpenAI-compatible HTTP listener
   help         show this help
 
@@ -143,7 +175,7 @@ Environment:
                             assigned agent from whoami (heartbeat identity event)
   KEI_PROXY_AGENT_VERSION   agent version
   KEI_PROXY_FRAMEWORK       agent framework (e.g. claude, codex)
-  KEI_TOOL_MANIFEST        path to the agentware tool-manifest v1 JSON file to sync at bootstrap
+  KEI_TOOL_MANIFEST        path to the agentware tool-manifest v2 JSON file to sync at bootstrap
 
 Examples:
   kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets
@@ -151,7 +183,7 @@ Examples:
   kei-proxy init --member --user U1234ABCD --org 9f2c...
   kei-proxy init --agent --org 9f2c... --name researcher --tools search_wiki,search_web --scopes wiki:read
   kei-proxy runtime bootstrap
-	  kei-proxy identity link --platform discord --platform-user-id 123456789
+	kei-proxy identity link --platform discord --platform-user-id 123456789
   kei-proxy identity status --platform-user-id 123456789 --tenant-id guild-id
   echo '{"request":{...}}' | KEI_RUNTIME_TOKEN=$KEI_RUNTIME_TOKEN kei-proxy model invoke
   kei-proxy model profile [--profile-id PROFILE_ID]
