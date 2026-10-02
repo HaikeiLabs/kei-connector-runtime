@@ -16,6 +16,8 @@ type PolicyConfig interface {
 	IsProduction() bool
 	Validate() error
 	IsRuntime() bool
+	PolicyAuditPath() string
+	PolicyAuditMaxBytes() int64
 }
 
 // Identity is the subset of RuntimeIdentity needed for policy operations.
