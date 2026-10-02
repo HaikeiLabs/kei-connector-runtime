@@ -81,7 +81,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		if cfg.AuditPath == "" {
 			return
 		}
-		_ = newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append("decision", data)
+		_ = keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
@@ -122,8 +122,8 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	go func() { serveErrors <- socketServer.Serve(unixListener) }()
 	stopCollector := func() {}
 	if cfg.AuditPath != "" {
-		audit := NewCollector(cfg.AuditPath, NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
-		audit.lifecycle = NewLifecycleFlushClientFromConfig(cfg, shutdownFlushTimeout)
+		audit := keiruntime.NewCollector(cfg.AuditPath, keiruntime.NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
+		audit.LifecycleClient = keiruntime.NewLifecycleFlushClientFromConfig(cfg, shutdownFlushTimeout)
 		stopCollector = collector.Service{
 			Flusher:           audit,
 			Path:              cfg.AuditPath,

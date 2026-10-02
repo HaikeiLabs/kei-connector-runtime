@@ -7,6 +7,17 @@ import "errors"
 // revoked or is inactive. Callers should clear local policy state.
 var ErrInstallationRevoked = errors.New("runtime installation is revoked or inactive")
 
+// CollectorConfig is the subset of the root Config that the collector
+// flush-client factories need, abstracted so runtime/ never imports the root
+// package.
+type CollectorConfig interface {
+	IsRuntime() bool
+	Token() string
+	ControlPlaneURL() string
+	FlushURL() string
+	FlushSecret() string
+}
+
 // PolicyConfig is the subset of the root Config that the runtime policy
 // package needs, abstracted so runtime/ never imports the root package.
 type PolicyConfig interface {

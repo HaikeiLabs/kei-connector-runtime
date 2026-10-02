@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 // TestServeDaemonOverUnixSocket runs the released binary as a daemon on a
@@ -40,7 +40,7 @@ func TestServeDaemonOverUnixSocket(t *testing.T) {
 
 	auditDir := t.TempDir()
 	auditPath := filepath.Join(auditDir, "audit.jsonl")
-	line, err := json.Marshal(connectorruntime.DecisionEvent{
+	line, err := json.Marshal(keiruntime.DecisionEvent{
 		SpanID: "hai201-daemon-retained", InvokingSubject: "user-1", AgentID: "agent-1",
 		Framework: "claude", ToolName: "web_search", Decision: "allow",
 	})

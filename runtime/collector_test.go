@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bytes"
@@ -14,14 +14,7 @@ import (
 	"time"
 )
 
-// fakeFlushClient records the batches it receives so tests can assert on
-// batching, ordering, and re-send behavior.
-type fakeFlushClient struct {
-	batches [][]DecisionEvent
-	err     error
-	called  chan struct{}
-}
-
+// retryFlushClient accepts remainingFailures failures before succeeding.
 type retryFlushClient struct {
 	remainingFailures int
 	calls             int
@@ -43,45 +36,14 @@ func (f *retryFlushClient) Flush(ctx context.Context, records []DecisionEvent) (
 	return len(records), nil
 }
 
-func (f *fakeFlushClient) Flush(ctx context.Context, records []DecisionEvent) (int, error) {
-	if f.err != nil {
-		return 0, f.err
-	}
-	f.batches = append(f.batches, records)
-	if f.called != nil {
-		select {
-		case f.called <- struct{}{}:
-		default:
-		}
-	}
-	return len(records), nil
-}
-
+// total returns the total number of events flushed across all batches.
+// fakeFlushClient is defined in spool_test.go.
 func (f *fakeFlushClient) total() int {
 	n := 0
 	for _, b := range f.batches {
 		n += len(b)
 	}
 	return n
-}
-
-func writeJSONL(t *testing.T, path string, events []DecisionEvent) {
-	t.Helper()
-	var data []byte
-	for _, e := range events {
-		line, err := json.Marshal(e)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		data = append(data, append(line, '\n')...)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write jsonl: %v", err)
-	}
-}
-
-func ev(spanID string) DecisionEvent {
-	return DecisionEvent{SpanID: spanID, InvokingSubject: "user-1", AgentID: "agent-1", Framework: "claude", ToolName: "web_search", Decision: "allow"}
 }
 
 func TestCollectorFlushesAllPending(t *testing.T) {
@@ -107,16 +69,27 @@ func TestCollectorFlushesAllPending(t *testing.T) {
 func TestCollectorSuccessfulFlushLogsCountsAndPayloadBytes(t *testing.T) {
 	var logs bytes.Buffer
 	c := NewCollector(filepath.Join(t.TempDir(), "audit.jsonl"), &fakeFlushClient{}, 100)
-	c.lifecycle = &fakeLifecycleClient{}
+	c.LifecycleClient = &fakeLifecycleClient{}
+	c.HarnessToolClient = &fakeHarnessToolClient{}
+	c.CredentialClient = &fakeCredentialClient{}
 	c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	decision := ev("decision-1")
 	lifecycle := json.RawMessage(`{"event_class":"lifecycle","event_type":"heartbeat"}`)
-	batch := parsedBatch{decisions: []DecisionEvent{decision}, lifecycle: []json.RawMessage{lifecycle}}
+	harnessTool := json.RawMessage(`{"event_class":"harness_tool","tool":"web_search"}`)
+	credential := json.RawMessage(`{"event_class":"credential","credential_id":"c1"}`)
+	batch := parsedBatch{
+		decisions:   []DecisionEvent{decision},
+		lifecycle:   []json.RawMessage{lifecycle},
+		harnessTool: []json.RawMessage{harnessTool},
+		credential:  []json.RawMessage{credential},
+	}
 	if _, err := c.flushBatch(context.Background(), batch, &skippedRecords{}); err != nil {
 		t.Fatalf("flushBatch: %v", err)
 	}
 	decisionPayload, _ := json.Marshal(map[string][]DecisionEvent{"records": {decision}})
 	lifecyclePayload, _ := json.Marshal(map[string][]json.RawMessage{"records": {lifecycle}})
+	harnessToolPayload, _ := json.Marshal(map[string][]json.RawMessage{"records": {harnessTool}})
+	credentialPayload, _ := json.Marshal(map[string][]json.RawMessage{"records": {credential}})
 	for _, want := range [][]byte{
 		[]byte(`"event_class":"decision"`),
 		[]byte(`"records_sent":1`),
@@ -124,6 +97,12 @@ func TestCollectorSuccessfulFlushLogsCountsAndPayloadBytes(t *testing.T) {
 		[]byte(`"event_class":"lifecycle"`),
 		[]byte(`"events_sent":1`),
 		[]byte(`"payload_bytes":` + strconv.Itoa(len(lifecyclePayload))),
+		[]byte(`"event_class":"harness_tool"`),
+		[]byte(`"events_sent":1`),
+		[]byte(`"payload_bytes":` + strconv.Itoa(len(harnessToolPayload))),
+		[]byte(`"event_class":"credential"`),
+		[]byte(`"events_sent":1`),
+		[]byte(`"payload_bytes":` + strconv.Itoa(len(credentialPayload))),
 	} {
 		if !bytes.Contains(logs.Bytes(), want) {
 			t.Errorf("successful flush logs missing %s: %s", want, logs.String())
@@ -200,7 +179,7 @@ func TestCollectorResumable(t *testing.T) {
 
 	// Append two more records and re-run: only the new ones are sent.
 	for _, e := range []DecisionEvent{ev("s4"), ev("s5")} {
-		if err := appendDecisionEvent(path, 0, e); err != nil {
+		if err := AppendDecisionEvent(path, 0, e); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -397,6 +376,26 @@ func (f *fakeLifecycleClient) FlushLifecycle(ctx context.Context, records []json
 	return len(records), nil
 }
 
+// fakeHarnessToolClient records harness_tool batches handed to the seam.
+type fakeHarnessToolClient struct {
+	records []json.RawMessage
+}
+
+func (f *fakeHarnessToolClient) FlushHarnessTool(ctx context.Context, records []json.RawMessage) (int, error) {
+	f.records = append(f.records, records...)
+	return len(records), nil
+}
+
+// fakeCredentialClient records credential batches handed to the seam.
+type fakeCredentialClient struct {
+	records []json.RawMessage
+}
+
+func (f *fakeCredentialClient) FlushCredential(ctx context.Context, records []json.RawMessage) (int, error) {
+	f.records = append(f.records, records...)
+	return len(records), nil
+}
+
 type mixedLifecycleClient struct {
 	calls    []string
 	statuses []int
@@ -425,7 +424,7 @@ func TestCollectorRetainsFailedLifecycleBatchAndResumesAfterAcceptedBatch(t *tes
 	}
 	fake := &mixedLifecycleClient{statuses: []int{http.StatusOK, http.StatusTooManyRequests, http.StatusOK}}
 	collector := NewCollector(path, &retryFlushClient{}, 1)
-	collector.lifecycle = fake
+	collector.LifecycleClient = fake
 	if _, err := collector.Run(context.Background()); err == nil {
 		t.Fatal("first run succeeded; want synthetic 429")
 	}
@@ -459,6 +458,8 @@ func TestParseBatchSplitsByEventClass(t *testing.T) {
 		`{"span_id":"legacy-1","decision":"allow"}`,
 		`{"event_class":"decision","span_id":"dec-1","decision":"deny"}`,
 		`{"event_class":"lifecycle","event_type":"runtime.started","outcome":"ok"}`,
+		`{"event_class":"harness_tool","tool":"web_search","action":"allow"}`,
+		`{"event_class":"credential","credential_id":"c1"}`,
 		`{"event_class":"telemetry","span_id":"not-a-decision"}`,
 		`{"event_class":"","span_id":"empty-class"}`,
 		`{"event_class":7,"span_id":"bad-class-type"}`,
@@ -474,6 +475,12 @@ func TestParseBatchSplitsByEventClass(t *testing.T) {
 	if len(b.lifecycle) != 1 || !bytes.Contains(b.lifecycle[0], []byte("runtime.started")) {
 		t.Fatalf("lifecycle = %q, want the one lifecycle line", b.lifecycle)
 	}
+	if len(b.harnessTool) != 1 || !bytes.Contains(b.harnessTool[0], []byte("web_search")) {
+		t.Fatalf("harnessTool = %q, want the one harness_tool line", b.harnessTool)
+	}
+	if len(b.credential) != 1 || !bytes.Contains(b.credential[0], []byte("c1")) {
+		t.Fatalf("credential = %q, want the one credential line", b.credential)
+	}
 	if b.unknown != 2 {
 		t.Errorf("unknown = %d, want 2 (telemetry and empty class)", b.unknown)
 	}
@@ -482,14 +489,17 @@ func TestParseBatchSplitsByEventClass(t *testing.T) {
 	}
 }
 
-// TestCollectorNeverFlushesLifecycleAsDecision verifies lifecycle and unknown
-// records are counted and logged as skipped while no lifecycle route exists,
-// and that they never reach the decision flush endpoint.
-func TestCollectorNeverFlushesLifecycleAsDecision(t *testing.T) {
+// TestCollectorNeverFlushesNonDecisionAsDecision verifies that lifecycle,
+// harness_tool, credential, and unknown records are counted and logged as
+// skipped while no flush route exists, and that they never reach the decision
+// flush endpoint.
+func TestCollectorNeverFlushesNonDecisionAsDecision(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 	data := jsonMarshal(t, ev("s1")) + "\n" +
 		`{"event_class":"lifecycle","event_type":"runtime.degraded"}` + "\n" +
+		`{"event_class":"harness_tool","tool":"web_search"}` + "\n" +
+		`{"event_class":"credential","credential_id":"c1"}` + "\n" +
 		`{"event_class":"mystery"}` + "\n" +
 		jsonMarshal(t, ev("s2")) + "\n"
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
@@ -516,6 +526,12 @@ func TestCollectorNeverFlushesLifecycleAsDecision(t *testing.T) {
 	if !bytes.Contains(logs.Bytes(), []byte("skipped lifecycle records")) {
 		t.Errorf("missing lifecycle skip log: %s", logs.String())
 	}
+	if !bytes.Contains(logs.Bytes(), []byte("skipped harness_tool records")) {
+		t.Errorf("missing harness_tool skip log: %s", logs.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("skipped credential records")) {
+		t.Errorf("missing credential skip log: %s", logs.String())
+	}
 	if !bytes.Contains(logs.Bytes(), []byte("unknown event_class")) {
 		t.Errorf("missing unknown class skip log: %s", logs.String())
 	}
@@ -537,12 +553,54 @@ func TestCollectorRoutesLifecycleThroughSeam(t *testing.T) {
 	fake := &fakeFlushClient{}
 	lifecycle := &fakeLifecycleClient{}
 	c := NewCollector(path, fake, 100)
-	c.lifecycle = lifecycle
+	c.LifecycleClient = lifecycle
 
 	if _, err := c.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if fake.total() != 1 || len(lifecycle.records) != 1 {
 		t.Fatalf("decisions = %d lifecycle = %d, want 1/1", fake.total(), len(lifecycle.records))
+	}
+}
+
+func TestCollectorRoutesHarnessToolThroughSeam(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	data := jsonMarshal(t, ev("s1")) + "\n" + `{"event_class":"harness_tool","tool":"web_search"}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	fake := &fakeFlushClient{}
+	harnessTool := &fakeHarnessToolClient{}
+	c := NewCollector(path, fake, 100)
+	c.HarnessToolClient = harnessTool
+
+	if _, err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fake.total() != 1 || len(harnessTool.records) != 1 {
+		t.Fatalf("decisions = %d harness_tool = %d, want 1/1", fake.total(), len(harnessTool.records))
+	}
+}
+
+func TestCollectorRoutesCredentialThroughSeam(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	data := jsonMarshal(t, ev("s1")) + "\n" + `{"event_class":"credential","credential_id":"c1"}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	fake := &fakeFlushClient{}
+	credential := &fakeCredentialClient{}
+	c := NewCollector(path, fake, 100)
+	c.CredentialClient = credential
+
+	if _, err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fake.total() != 1 || len(credential.records) != 1 {
+		t.Fatalf("decisions = %d credential = %d, want 1/1", fake.total(), len(credential.records))
 	}
 }

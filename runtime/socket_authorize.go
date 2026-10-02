@@ -65,7 +65,7 @@ type socketSessionRequest struct {
 
 type EmitAuditFunc func(json.RawMessage)
 
-type DecisionEvent struct {
+type socketDecisionEvent struct {
 	SpanID              string   `json:"span_id"`
 	InvokedAt           string   `json:"invoked_at"`
 	DelegationDepth     int      `json:"delegation_depth"`
@@ -241,7 +241,7 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, d pdp.Decision)
 	if req.Connector != nil {
 		toolName = "connector:" + req.Connector.ConnectorID + "/" + req.Connector.Capability
 	}
-	e := DecisionEvent{
+	e := socketDecisionEvent{
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: d.ReasonCode,

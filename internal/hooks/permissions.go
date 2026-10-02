@@ -14,6 +14,7 @@ import (
 
 type permissionEvent struct {
 	Schema            string    `json:"schema"`
+	EventClass        string    `json:"event_class"`
 	HarnessID         string    `json:"harness_id"`
 	HarnessKind       string    `json:"harness_kind"`
 	HarnessRegistered bool      `json:"harness_registered"`
@@ -70,7 +71,7 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 		decision = "unknown"
 	}
 	tool, argv0 := reportedTool(in.ToolName, in.ToolInput)
-	event := permissionEvent{Schema: "kei.harness-tool-event/v1", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, ArgsDigest: "sha256:" + hex.EncodeToString(digest[:]), NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
+	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, ArgsDigest: "sha256:" + hex.EncodeToString(digest[:]), NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {
 		WriteAudit(cfg, data)

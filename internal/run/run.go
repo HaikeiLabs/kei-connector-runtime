@@ -169,6 +169,7 @@ func (e runReasonError) Error() string { return e.reason }
 
 type runAuditEvent struct {
 	Schema       string    `json:"schema"`
+	EventClass   string    `json:"event_class"`
 	ObservedAt   time.Time `json:"observed_at"`
 	ConnectorIDs []string  `json:"connector_ids,omitempty"`
 	Fields       []string  `json:"fields,omitempty"`
@@ -220,7 +221,7 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 		fields = appendUnique(fields, ref.field)
 		if *connectorID != "" && *connectorID != ref.connectorID {
 			fmt.Fprintf(stderr, "Connector credential %s/%s does not match --connector.\n", ref.connectorID, ref.field)
-			appendRunAudit(cfg, connectorIDs, fields, "", childArgs, "credential_reference_mismatch", 1)
+			appendRunAudit(stderr, cfg, connectorIDs, fields, "", childArgs, "credential_reference_mismatch", 1)
 			return 1
 		}
 		secret, connectURL, err := resolver.Resolve(context.Background(), ref.connectorID, ref.field)
@@ -240,7 +241,7 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 			if errors.As(err, &coded) {
 				reason = coded.reason
 			}
-			appendRunAudit(cfg, connectorIDs, fields, childArgs[0], childArgs, reason, 1)
+			appendRunAudit(stderr, cfg, connectorIDs, fields, childArgs[0], childArgs, reason, 1)
 			return 1
 		}
 		childEnv = append(childEnv, key+"="+secret)
@@ -248,7 +249,7 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 	}
 	if len(secretsToMask) == 0 {
 		fmt.Fprintln(stderr, "run requires at least one kei://connectors/<id>/<field> environment reference")
-		appendRunAudit(cfg, nil, nil, childArgs[0], childArgs, "credential_reference_missing", 2)
+		appendRunAudit(stderr, cfg, nil, nil, childArgs[0], childArgs, "credential_reference_missing", 2)
 		return 2
 	}
 	redactOut, redactErr := newRedactingWriter(stdout, secretsToMask), newRedactingWriter(stderr, secretsToMask)
@@ -274,7 +275,7 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 	if exitCode != 0 {
 		outcome = "failure"
 	}
-	appendRunAudit(cfg, connectorIDs, fields, childArgs[0], childArgs, outcome, exitCode)
+	appendRunAudit(stderr, cfg, connectorIDs, fields, childArgs[0], childArgs, outcome, exitCode)
 	return exitCode
 }
 
@@ -301,12 +302,22 @@ func Run(args []string, stdout, stderr io.Writer, cfg Config) int {
 	return runCommand(args, stdout, stderr, cfg, os.Environ(), resolver, nil)
 }
 
-func appendRunAudit(cfg Config, connectorIDs, fields []string, command string, argv []string, outcome string, exitCode int) {
-	argvBytes, _ := json.Marshal(argv)
+func appendRunAudit(stderr io.Writer, cfg Config, connectorIDs, fields []string, command string, argv []string, outcome string, exitCode int) {
+	argvBytes, err := json.Marshal(argv)
+	if err != nil {
+		fmt.Fprintf(stderr, "audit: failed to marshal argv for run audit event: %v\n", err)
+		return
+	}
 	argsDigest := sha256.Sum256(argvBytes)
-	event, _ := json.Marshal(runAuditEvent{Schema: "kei.proxy-run-event/v1", ObservedAt: time.Now().UTC(), ConnectorIDs: connectorIDs, Fields: fields, Command: command, ArgsDigest: "sha256:" + hex.EncodeToString(argsDigest[:]), Outcome: outcome, ExitCode: exitCode})
+	event, err := json.Marshal(runAuditEvent{Schema: "kei.proxy-run-event/v1", EventClass: "credential", ObservedAt: time.Now().UTC(), ConnectorIDs: connectorIDs, Fields: fields, Command: command, ArgsDigest: "sha256:" + hex.EncodeToString(argsDigest[:]), Outcome: outcome, ExitCode: exitCode})
+	if err != nil {
+		fmt.Fprintf(stderr, "audit: failed to marshal run audit event: %v\n", err)
+		return
+	}
 	if cfg.AppendAudit != nil {
-		_ = cfg.AppendAudit(event)
+		if err := cfg.AppendAudit(event); err != nil {
+			fmt.Fprintf(stderr, "audit: failed to append credential audit record: %v\n", err)
+		}
 	}
 }
 

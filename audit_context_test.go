@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"testing"
+
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 func TestBuildDecisionEventPreservesCanonicalContext(t *testing.T) {
@@ -54,8 +56,8 @@ func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
 	root := t.TempDir()
 	path := root + "/kei-proxy/audit/events.jsonl"
 
-	if err := appendDecisionEvent(path, 0, event); err != nil {
-		t.Fatalf("appendDecisionEvent: %v", err)
+	if err := keiruntime.AppendDecisionEvent(path, 0, event); err != nil {
+		t.Fatalf("keiruntime.AppendDecisionEvent: %v", err)
 	}
 
 	data, err := os.ReadFile(path)
@@ -66,7 +68,7 @@ func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
 		t.Fatalf("expected a trailing newline, got %q", data)
 	}
 
-	if err := appendDecisionEvent(path, 0, event); err != nil {
+	if err := keiruntime.AppendDecisionEvent(path, 0, event); err != nil {
 		t.Fatalf("second append: %v", err)
 	}
 	data, err = os.ReadFile(path)
@@ -79,7 +81,7 @@ func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
 }
 
 func TestAppendDecisionEventEmptyPathIsNoop(t *testing.T) {
-	if err := appendDecisionEvent("", 0, buildDecisionEvent(authorizeParams{}, &AuthorizeResponse{}, AuthorizeOutput{}, "")); err != nil {
+	if err := keiruntime.AppendDecisionEvent("", 0, buildDecisionEvent(authorizeParams{}, &AuthorizeResponse{}, AuthorizeOutput{}, "")); err != nil {
 		t.Fatalf("empty path should be a no-op, got: %v", err)
 	}
 }

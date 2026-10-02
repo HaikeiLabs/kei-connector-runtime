@@ -81,3 +81,23 @@ func TestConfigFromEnvReadsRuntimeStateDirFromEnv(t *testing.T) {
 		t.Fatalf("RuntimeStateDir = %q, want /custom/state", cfg.RuntimeStateDir)
 	}
 }
+
+func TestAuditMaxBytesFromEnv(t *testing.T) {
+	cases := map[string]int64{
+		"":         defaultAuditMaxBytes,
+		"5242880":  5242880,
+		"0":        defaultAuditMaxBytes,
+		"-1":       defaultAuditMaxBytes,
+		"100MB":    defaultAuditMaxBytes,
+		" 123456 ": 123456,
+	}
+	for in, want := range cases {
+		t.Setenv("KEI_PROXY_AUDIT_MAX_BYTES", in)
+		if got := configFromEnv().AuditMaxBytes; got != want {
+			t.Errorf("KEI_PROXY_AUDIT_MAX_BYTES=%q -> %d, want %d", in, got, want)
+		}
+	}
+	if defaultAuditMaxBytes != 100<<20 {
+		t.Errorf("default cap = %d, want 100 MiB", defaultAuditMaxBytes)
+	}
+}

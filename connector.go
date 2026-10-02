@@ -9,6 +9,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 // runConnector dispatches the connector subcommand.
@@ -35,7 +36,7 @@ func runConnector(args []string) int {
 				if cfg.AuditPath == "" {
 					return nil
 				}
-				return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
+				return keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, record)
 			},
 		}
 		if cfg.IsRuntime() {

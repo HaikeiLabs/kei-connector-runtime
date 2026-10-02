@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
@@ -158,7 +160,7 @@ type contextBlockingFlushClient struct {
 	started chan struct{}
 }
 
-func (f *contextBlockingFlushClient) Flush(ctx context.Context, _ []DecisionEvent) (int, error) {
+func (f *contextBlockingFlushClient) Flush(ctx context.Context, _ []keiruntime.DecisionEvent) (int, error) {
 	f.calls.Add(1)
 	select {
 	case f.started <- struct{}{}:
@@ -170,9 +172,9 @@ func (f *contextBlockingFlushClient) Flush(ctx context.Context, _ []DecisionEven
 
 func TestCollectorServiceFinalFlushIsBoundedAndRetainsSpool(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	writeJSONL(t, path, []DecisionEvent{ev("shutdown-1")})
+	writeJSONL(t, path, []keiruntime.DecisionEvent{ev("shutdown-1")})
 	fake := &contextBlockingFlushClient{started: make(chan struct{}, 2)}
-	audit := NewCollector(path, fake, 100)
+	audit := keiruntime.NewCollector(path, fake, 100)
 	stop := collector.Service{
 		Flusher:           audit,
 		Path:              path,
@@ -201,13 +203,49 @@ func TestCollectorServiceFinalFlushIsBoundedAndRetainsSpool(t *testing.T) {
 	if got := fake.calls.Load(); got != 2 {
 		t.Fatalf("flush calls = %d, want polling attempt plus one final attempt", got)
 	}
-	segments, err := audit.spool.segments()
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(segments) != 1 {
-		t.Fatalf("pending segments after failed final flush = %d, want 1", len(segments))
+	prefix := filepath.Base(path) + "."
+	const segDigits = 10
+	var segments []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		suffix := e.Name()[len(prefix):]
+		if len(suffix) != segDigits {
+			continue
+		}
+		if _, err := strconv.ParseUint(suffix, 10, 64); err != nil {
+			continue
+		}
+		segments = append(segments, e.Name())
 	}
+	if len(segments) != 1 {
+		t.Fatalf("pending segments after failed final flush = %d, want 1; got %v", len(segments), segments)
+	}
+}
+
+func writeJSONL(t *testing.T, path string, events []keiruntime.DecisionEvent) {
+	t.Helper()
+	var data []byte
+	for _, e := range events {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		data = append(data, append(line, '\n')...)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+}
+
+func ev(spanID string) keiruntime.DecisionEvent {
+	return keiruntime.DecisionEvent{SpanID: spanID, InvokingSubject: "user-1", AgentID: "agent-1", Framework: "claude", ToolName: "web_search", Decision: "allow"}
 }
 
 func TestRuntimeHTTPHandlerHealthProbeProviderHealthy(t *testing.T) {

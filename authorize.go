@@ -17,6 +17,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 // CredentialResponse carries only the secret value. Injection is decided by the
@@ -189,7 +190,7 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 		out.Connect = resp.Connect
 	}
 
-	emitDecision(p.auditPath, p.auditMaxBytes, buildDecisionEvent(p, resp, out, resource))
+	keiruntime.EmitDecision(p.auditPath, p.auditMaxBytes, buildDecisionEvent(p, resp, out, resource))
 
 	return out, nil
 }
@@ -198,7 +199,7 @@ func authorizeTool(p authorizeParams) (AuthorizeOutput, error) {
 // decision. The span_id is taken from the harness (stable across re-flushes);
 // if absent, a fresh UUID is minted so every decision is individually
 // dedupable. org_id and policy_id come from the ABAC response.
-func buildDecisionEvent(p authorizeParams, resp *AuthorizeResponse, out AuthorizeOutput, resource string) DecisionEvent {
+func buildDecisionEvent(p authorizeParams, resp *AuthorizeResponse, out AuthorizeOutput, resource string) keiruntime.DecisionEvent {
 	spanID := p.spanID
 	if spanID == "" {
 		spanID = uuid.NewString()
@@ -216,7 +217,7 @@ func buildDecisionEvent(p authorizeParams, resp *AuthorizeResponse, out Authoriz
 		resources = []string{resource}
 	}
 
-	event := DecisionEvent{
+	event := keiruntime.DecisionEvent{
 		SpanID:           spanID,
 		InvokedAt:        time.Now().UTC(),
 		InvokingSubject:  subject,

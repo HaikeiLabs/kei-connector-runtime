@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -15,6 +16,28 @@ import (
 	"sync"
 	"testing"
 )
+
+// fakeFlushClient records the batches it receives so tests can assert on
+// batching, ordering, and re-send behavior.
+type fakeFlushClient struct {
+	batches [][]DecisionEvent
+	err     error
+	called  chan struct{}
+}
+
+func (f *fakeFlushClient) Flush(ctx context.Context, records []DecisionEvent) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	f.batches = append(f.batches, records)
+	if f.called != nil {
+		select {
+		case f.called <- struct{}{}:
+		default:
+		}
+	}
+	return len(records), nil
+}
 
 // failAfterFlushClient accepts okBatches batches and then fails, simulating a
 // collector crash or outage part way through a segment. -1 never fails.
@@ -64,9 +87,17 @@ func lifecycleRecord(t *testing.T, size int) []byte {
 	return sizedRecord(t, `"event_class":"lifecycle"`, size)
 }
 
+func harnessToolRecord(t *testing.T, size int) []byte {
+	return sizedRecord(t, `"event_class":"harness_tool"`, size)
+}
+
+func credentialRecord(t *testing.T, size int) []byte {
+	return sizedRecord(t, `"event_class":"credential"`, size)
+}
+
 // spoolTotal measures the whole spool under its lock, so it is consistent
 // with concurrent writers.
-func spoolTotal(t *testing.T, s *auditSpool) int64 {
+func spoolTotal(t *testing.T, s *AuditSpool) int64 {
 	t.Helper()
 	var total int64
 	err := s.withLock(func() error {
@@ -88,7 +119,7 @@ func spoolTotal(t *testing.T, s *auditSpool) int64 {
 }
 
 // spoolLines returns every line left in the spool, oldest first.
-func spoolLines(t *testing.T, s *auditSpool) []string {
+func spoolLines(t *testing.T, s *AuditSpool) []string {
 	t.Helper()
 	segs, err := s.segments()
 	if err != nil {
@@ -117,12 +148,31 @@ func segPaths(segs []spoolSegment) []string {
 	return out
 }
 
+func ev(spanID string) DecisionEvent {
+	return DecisionEvent{SpanID: spanID, InvokingSubject: "user-1", AgentID: "agent-1", Framework: "claude", ToolName: "web_search", Decision: "allow"}
+}
+
+func writeJSONL(t *testing.T, path string, events []DecisionEvent) {
+	t.Helper()
+	var data []byte
+	for _, e := range events {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		data = append(data, append(line, '\n')...)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+}
+
 func TestSpoolRotatesAtSegmentSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	s := newAuditSpool(path, 1000) // segments of 100 bytes
+	s := NewAuditSpool(path, 1000) // segments of 100 bytes
 
 	for i := 0; i < 5; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("s%d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("s%d", i), 50)); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -155,11 +205,11 @@ func TestSpoolRotatesAtSegmentSize(t *testing.T) {
 // dropped record is counted and reported by the collector exactly once.
 func TestSpoolEvictsOldestUnsentAndCountsLoss(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	s := newAuditSpool(path, 1000)
+	s := NewAuditSpool(path, 1000)
 
 	const n = 30
 	for i := 0; i < n; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("s%02d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("s%02d", i), 50)); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 		if total := spoolTotal(t, s); total > 1000 {
@@ -210,9 +260,9 @@ func TestSpoolEvictsOldestUnsentAndCountsLoss(t *testing.T) {
 // acknowledged in an evicted segment are not reported as lost.
 func TestSpoolEvictionCountsOnlyUnsentLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	s := newAuditSpool(path, 1000)
+	s := NewAuditSpool(path, 1000)
 	for i := 0; i < 4; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("a%d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("a%d", i), 50)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -222,7 +272,7 @@ func TestSpoolEvictionCountsOnlyUnsentLines(t *testing.T) {
 		t.Fatal("expected the collector to stop part way")
 	}
 	for i := 0; i < 20; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("b%02d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("b%02d", i), 50)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -236,19 +286,19 @@ func TestSpoolEvictionCountsOnlyUnsentLines(t *testing.T) {
 
 func TestSpoolRefusesLifecycleNearCap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	s := newAuditSpool(path, 1000) // lifecycle ceiling is 900 bytes
+	s := NewAuditSpool(path, 1000) // lifecycle ceiling is 900 bytes
 
 	for i := 0; i < 17; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("s%02d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("s%02d", i), 50)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
 	// 850 + 50 reaches the ceiling exactly and is allowed.
-	if err := s.Append(eventClassLifecycle, lifecycleRecord(t, 50)); err != nil {
+	if err := s.Append(EventClassLifecycle, lifecycleRecord(t, 50)); err != nil {
 		t.Fatalf("lifecycle append under the ceiling: %v", err)
 	}
 	// At 900 bytes the spool is at 90% of its cap: lifecycle is refused.
-	if err := s.Append(eventClassLifecycle, lifecycleRecord(t, 50)); !errors.Is(err, errLifecycleBudget) {
+	if err := s.Append(EventClassLifecycle, lifecycleRecord(t, 50)); !errors.Is(err, errLifecycleBudget) {
 		t.Fatalf("lifecycle append at 90%% = %v, want errLifecycleBudget", err)
 	}
 	if total := spoolTotal(t, s); total != 900 {
@@ -257,7 +307,7 @@ func TestSpoolRefusesLifecycleNearCap(t *testing.T) {
 	// Decisions still fit in the reserved space, and fill the spool without
 	// evicting anything.
 	for i := 0; i < 2; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("r%d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("r%d", i), 50)); err != nil {
 			t.Fatalf("decision append in reserved space: %v", err)
 		}
 	}
@@ -277,21 +327,105 @@ func TestSpoolRefusesLifecycleNearCap(t *testing.T) {
 	}
 }
 
+func TestSpoolRefusesHarnessToolNearCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	s := NewAuditSpool(path, 1000)
+
+	for i := 0; i < 17; i++ {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("s%02d", i), 50)); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	// 850 + 50 reaches the ceiling exactly and is allowed.
+	if err := s.Append(EventClassHarnessTool, harnessToolRecord(t, 50)); err != nil {
+		t.Fatalf("harness_tool append under the ceiling: %v", err)
+	}
+	// At 900 bytes the spool is at 90% of its cap: harness_tool is refused.
+	if err := s.Append(EventClassHarnessTool, harnessToolRecord(t, 50)); !errors.Is(err, errLifecycleBudget) {
+		t.Fatalf("harness_tool append at 90%% = %v, want errLifecycleBudget", err)
+	}
+	if total := spoolTotal(t, s); total != 900 {
+		t.Fatalf("spool = %d bytes, want 900 (refused record not written)", total)
+	}
+	// Decisions still fit in the reserved space.
+	for i := 0; i < 2; i++ {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("r%d", i), 50)); err != nil {
+			t.Fatalf("decision append in reserved space: %v", err)
+		}
+	}
+	loss := s.readMeta().Loss
+	if loss.HarnessToolRefused != 1 || loss.EvictedSegments != 0 {
+		t.Fatalf("loss = %+v, want 1 harness_tool refusal and no evictions", loss)
+	}
+
+	var logs bytes.Buffer
+	c := NewCollector(path, &fakeFlushClient{}, 100)
+	c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	if _, err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("refused harness_tool records")) {
+		t.Fatalf("missing harness_tool refusal warning: %s", logs.String())
+	}
+}
+
+func TestSpoolRefusesCredentialNearCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	s := NewAuditSpool(path, 1000)
+
+	for i := 0; i < 17; i++ {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("s%02d", i), 50)); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	// 850 + 50 reaches the ceiling exactly and is allowed.
+	if err := s.Append(EventClassCredential, credentialRecord(t, 50)); err != nil {
+		t.Fatalf("credential append under the ceiling: %v", err)
+	}
+	// At 900 bytes the spool is at 90% of its cap: credential is refused.
+	if err := s.Append(EventClassCredential, credentialRecord(t, 50)); !errors.Is(err, errLifecycleBudget) {
+		t.Fatalf("credential append at 90%% = %v, want errLifecycleBudget", err)
+	}
+	if total := spoolTotal(t, s); total != 900 {
+		t.Fatalf("spool = %d bytes, want 900 (refused record not written)", total)
+	}
+	// Decisions still fit in the reserved space.
+	for i := 0; i < 2; i++ {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("r%d", i), 50)); err != nil {
+			t.Fatalf("decision append in reserved space: %v", err)
+		}
+	}
+	loss := s.readMeta().Loss
+	if loss.CredentialRefused != 1 || loss.EvictedSegments != 0 {
+		t.Fatalf("loss = %+v, want 1 credential refusal and no evictions", loss)
+	}
+
+	var logs bytes.Buffer
+	c := NewCollector(path, &fakeFlushClient{}, 100)
+	c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	if _, err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("refused credential records")) {
+		t.Fatalf("missing credential refusal warning: %s", logs.String())
+	}
+}
+
 func TestSpoolRejectsMislabelledAndOversizeRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	s := newAuditSpool(path, 1000)
+	s := NewAuditSpool(path, 1000)
 
 	// A lifecycle record without its class would be read back as a decision.
-	if err := s.Append(eventClassLifecycle, []byte(`{"event_type":"runtime.started"}`)); err == nil {
+	if err := s.Append(EventClassLifecycle, []byte(`{"event_type":"runtime.started"}`)); err == nil {
 		t.Fatal("lifecycle record without event_class was accepted")
 	}
 	if err := s.Append("telemetry", []byte(`{}`)); err == nil {
 		t.Fatal("unknown event class was accepted")
 	}
-	if err := s.Append(eventClassDecision, []byte("{\"span_id\":\"a\"}\n{}")); err == nil {
+	if err := s.Append(EventClassDecision, []byte("{\"span_id\":\"a\"}\n{}")); err == nil {
 		t.Fatal("record with an embedded newline was accepted")
 	}
-	if err := s.Append(eventClassDecision, decisionRecord(t, "big", 1001)); !errors.Is(err, errRecordTooLarge) {
+	if err := s.Append(EventClassDecision, decisionRecord(t, "big", 1001)); !errors.Is(err, errRecordTooLarge) {
 		t.Fatalf("oversize append = %v, want errRecordTooLarge", err)
 	}
 	if got := s.readMeta().Loss.OversizeRefused; got != 1 {
@@ -316,9 +450,9 @@ func TestSpoolConcurrentWritersStayUnderCap(t *testing.T) {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			s := newAuditSpool(path, maxBytes)
+			s := NewAuditSpool(path, maxBytes)
 			for i := 0; i < each; i++ {
-				if err := appendDecisionEvent(path, maxBytes, ev(fmt.Sprintf("w%d-%d", w, i))); err != nil {
+				if err := AppendDecisionEvent(path, maxBytes, ev(fmt.Sprintf("w%d-%d", w, i))); err != nil {
 					errs <- err
 					return
 				}
@@ -336,7 +470,7 @@ func TestSpoolConcurrentWritersStayUnderCap(t *testing.T) {
 	for err := range errs {
 		t.Fatal(err)
 	}
-	assertSpoolAccountsFor(t, newAuditSpool(path, maxBytes), writers*each)
+	assertSpoolAccountsFor(t, NewAuditSpool(path, maxBytes), writers*each)
 }
 
 // TestSpoolConcurrentProcessesStayUnderCap runs writers as separate
@@ -377,7 +511,7 @@ func TestSpoolConcurrentProcessesStayUnderCap(t *testing.T) {
 			t.Fatalf("helper failed: %v", err)
 		}
 	}
-	assertSpoolAccountsFor(t, newAuditSpool(path, maxBytes), procs*each)
+	assertSpoolAccountsFor(t, NewAuditSpool(path, maxBytes), procs*each)
 }
 
 // TestSpoolHelperProcess is the subprocess body for the test above.
@@ -389,9 +523,9 @@ func TestSpoolHelperProcess(t *testing.T) {
 	maxBytes, _ := strconv.ParseInt(os.Getenv("KEI_SPOOL_HELPER_MAX"), 10, 64)
 	count, _ := strconv.Atoi(os.Getenv("KEI_SPOOL_HELPER_COUNT"))
 	id := os.Getenv("KEI_SPOOL_HELPER_ID")
-	s := newAuditSpool(path, maxBytes)
+	s := NewAuditSpool(path, maxBytes)
 	for i := 0; i < count; i++ {
-		if err := appendDecisionEvent(path, maxBytes, ev(fmt.Sprintf("p%s-%d", id, i))); err != nil {
+		if err := AppendDecisionEvent(path, maxBytes, ev(fmt.Sprintf("p%s-%d", id, i))); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 		_ = s.withLock(func() error {
@@ -403,7 +537,7 @@ func TestSpoolHelperProcess(t *testing.T) {
 	}
 }
 
-func spoolTotalLocked(s *auditSpool) int64 {
+func spoolTotalLocked(s *AuditSpool) int64 {
 	segs, _ := s.segments()
 	total, _ := fileSize(s.path)
 	for _, seg := range segs {
@@ -414,7 +548,7 @@ func spoolTotalLocked(s *auditSpool) int64 {
 
 // assertSpoolAccountsFor checks every surviving line is a whole record and
 // that kept plus counted-as-evicted equals everything appended.
-func assertSpoolAccountsFor(t *testing.T, s *auditSpool, appended int) {
+func assertSpoolAccountsFor(t *testing.T, s *AuditSpool, appended int) {
 	t.Helper()
 	if total := spoolTotal(t, s); total > s.maxBytes {
 		t.Fatalf("final spool is %d bytes, cap %d", total, s.maxBytes)
@@ -500,7 +634,7 @@ func TestCollectorMigratesLegacyOffset(t *testing.T) {
 		}
 		// The legacy file is larger than a segment, so the first capped
 		// append seals it as segment 1.
-		if err := appendDecisionEvent(path, 1000, ev("s4")); err != nil {
+		if err := AppendDecisionEvent(path, 1000, ev("s4")); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 		fake := &failAfterFlushClient{okBatches: -1}
@@ -518,9 +652,9 @@ func TestCollectorMigratesLegacyOffset(t *testing.T) {
 		if err := os.WriteFile(path+".offset", []byte("2"), 0o644); err != nil {
 			t.Fatalf("write offset: %v", err)
 		}
-		s := newAuditSpool(path, 1000)
+		s := NewAuditSpool(path, 1000)
 		for i := 0; i < 20; i++ {
-			if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("n%02d", i), 50)); err != nil {
+			if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("n%02d", i), 50)); err != nil {
 				t.Fatalf("append: %v", err)
 			}
 		}
@@ -544,9 +678,9 @@ func TestCollectorMigratesLegacyOffset(t *testing.T) {
 // segment is shipped from its first line.
 func TestCollectorRecoversWhenStateSegmentEvicted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	s := newAuditSpool(path, 1000)
+	s := NewAuditSpool(path, 1000)
 	for i := 0; i < 2; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("a%d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("a%d", i), 50)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -560,7 +694,7 @@ func TestCollectorRecoversWhenStateSegmentEvicted(t *testing.T) {
 	}
 
 	for i := 0; i < 20; i++ {
-		if err := s.Append(eventClassDecision, decisionRecord(t, fmt.Sprintf("b%02d", i), 50)); err != nil {
+		if err := s.Append(EventClassDecision, decisionRecord(t, fmt.Sprintf("b%02d", i), 50)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -585,7 +719,7 @@ func TestCollectorRecoversWhenStateSegmentEvicted(t *testing.T) {
 func TestCollectorDoesNotRereadSpool(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	for _, e := range []DecisionEvent{ev("s1"), ev("s2")} {
-		if err := appendDecisionEvent(path, 0, e); err != nil {
+		if err := AppendDecisionEvent(path, 0, e); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -606,7 +740,7 @@ func TestCollectorDoesNotRereadSpool(t *testing.T) {
 		t.Fatalf("opened = %v, want the one sealed segment and never the active file", opened)
 	}
 
-	if err := appendDecisionEvent(path, 0, ev("s3")); err != nil {
+	if err := AppendDecisionEvent(path, 0, ev("s3")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if _, err := c.Run(context.Background()); err != nil {
@@ -617,37 +751,36 @@ func TestCollectorDoesNotRereadSpool(t *testing.T) {
 	}
 }
 
-func TestAuditMaxBytesFromEnv(t *testing.T) {
-	cases := map[string]int64{
-		"":         defaultAuditMaxBytes,
-		"5242880":  5242880,
-		"0":        defaultAuditMaxBytes,
-		"-1":       defaultAuditMaxBytes,
-		"100MB":    defaultAuditMaxBytes,
-		" 123456 ": 123456,
-	}
-	for in, want := range cases {
-		t.Setenv("KEI_PROXY_AUDIT_MAX_BYTES", in)
-		if got := configFromEnv().AuditMaxBytes; got != want {
-			t.Errorf("KEI_PROXY_AUDIT_MAX_BYTES=%q -> %d, want %d", in, got, want)
-		}
-	}
-	if defaultAuditMaxBytes != 100<<20 {
-		t.Errorf("default cap = %d, want 100 MiB", defaultAuditMaxBytes)
-	}
-}
-
-// TestEmitDecisionIgnoresSpoolFailure keeps the audit write best-effort: an
-// unwritable spool returns an error internally but never panics or blocks.
-func TestEmitDecisionIgnoresSpoolFailure(t *testing.T) {
+// TestEmitDecisionLogsSpoolFailure verifies that EmitDecision writes the
+// append error to stderr instead of silently dropping it.
+func TestEmitDecisionLogsSpoolFailure(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	path := filepath.Join(blocker, "audit.jsonl")
-	if err := appendDecisionEvent(path, 0, ev("s1")); err == nil {
+	if err := AppendDecisionEvent(path, 0, ev("s1")); err == nil {
 		t.Fatal("expected the append to fail under a file")
 	}
-	emitDecision(path, 0, ev("s1"))
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+
+	EmitDecision(path, 0, ev("s1"))
+	w.Close()
+	os.Stderr = origStderr
+
+	captured, _ := io.ReadAll(r)
+	r.Close()
+	if len(captured) == 0 {
+		t.Fatal("expected an error on stderr")
+	}
+	if !strings.Contains(string(captured), "audit: failed to append decision event") {
+		t.Fatalf("stderr = %q, want audit failure message", string(captured))
+	}
 }
