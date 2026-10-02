@@ -113,6 +113,19 @@ The existing identity-propagation flags and variables (`--trace-id` /
 `KEI_PROXY_SPAN_ID`, `--invoking-subject`, `--framework`) are unchanged.
 `KEI_RUNTIME_TOKEN` comes from the environment only.
 
+### Secrets never leave the runtime via the CLI
+
+No `kei-proxy` command, flag, or log prints, echoes, exports, or returns a
+resolved credential value. There is no `--show`, `--reveal`, or `--debug` dump
+option and no `credential get` command. With `kei-proxy run`, a resolved value
+is injected only into the child process environment, and values in the child's
+stdout and stderr are masked before they reach the caller. Audit records and
+credential errors contain connector/reference identifiers and field names,
+never values.
+
+Debugging inside the harness is the harness developer's responsibility. Keep
+credential values out of harness transcripts and logs.
+
 ### stdout
 
 Allow, exit 0:
