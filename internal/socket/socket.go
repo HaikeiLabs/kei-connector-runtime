@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -14,6 +15,26 @@ import (
 // staleProbeTimeout bounds the dial used to tell a live socket from one left
 // behind by a crashed process.
 const staleProbeTimeout = 100 * time.Millisecond
+
+// DefaultPath returns the default Unix socket path for goos.
+//   - linux: /run/kei-proxy/runtime.sock
+//   - darwin: $TMPDIR/kei-proxy/runtime.sock (falls back to os.TempDir())
+//   - everything else: same as linux
+//
+// KEI_RUNTIME_SOCKET_PATH at the call site always overrides this value.
+func DefaultPath(goos string) string {
+	switch goos {
+	case "darwin":
+		return filepath.Join(os.TempDir(), "kei-proxy", "runtime.sock")
+	default:
+		return "/run/kei-proxy/runtime.sock"
+	}
+}
+
+// DefaultPathOS is DefaultPath(runtime.GOOS).
+func DefaultPathOS() string {
+	return DefaultPath(runtime.GOOS)
+}
 
 // Listen creates an owner-only (0600) Unix socket at path, creating its parent
 // directory (0700) if needed. It replaces a stale socket file left behind by a

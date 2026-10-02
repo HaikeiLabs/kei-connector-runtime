@@ -1,12 +1,14 @@
 # Why kei-proxy serves over a Unix socket
 
-`kei-proxy serve` exposes its HTTP/1.1 API on a Unix domain socket, by default
-`/run/kei-proxy/runtime.sock` (override with `KEI_RUNTIME_SOCKET_PATH`). The
-runtime creates the socket with mode `0600`, refuses to replace an active
-socket or a regular file, replaces a stale socket left behind by a crash, and
-removes the socket on graceful shutdown. Requests over the socket still go
-through bearer authentication and model authorization. The socket changes how
-the harness reaches the proxy, not what the harness is allowed to do.
+`kei-proxy serve` exposes its HTTP/1.1 API on a Unix domain socket. The default
+path depends on the operating system: `/run/kei-proxy/runtime.sock` on Linux,
+`$TMPDIR/kei-proxy/runtime.sock` on macOS (falls back to `os.TempDir()`).
+Override with `KEI_RUNTIME_SOCKET_PATH`. The runtime creates the socket with
+mode `0600`, refuses to replace an active socket or a regular file, replaces a
+stale socket left behind by a crash, and removes the socket on graceful
+shutdown. Requests over the socket still go through bearer authentication and
+model authorization. The socket changes how the harness reaches the proxy, not
+what the harness is allowed to do.
 
 There are three reasons for this design.
 

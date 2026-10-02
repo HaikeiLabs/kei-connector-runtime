@@ -306,10 +306,11 @@ the socket. The socket serves health, readiness, model profile, and
 chat-completion routes; governed tool authorization is served by the
 `authorize` CLI subprocess and is not yet available over the socket.
 
-The default socket is `/run/kei-proxy/runtime.sock`; set
+The default socket is `/run/kei-proxy/runtime.sock` on Linux or
+`$TMPDIR/kei-proxy/runtime.sock` on macOS (falls back to `os.TempDir()`); set
 `KEI_RUNTIME_SOCKET_PATH` to use another path. The runtime creates the socket
 with mode `0600` and removes it on graceful shutdown. The parent directory must
-be writable by the runtime user; on service installations, provision
+be writable by the runtime user; on Linux service installations, provision
 `/run/kei-proxy` for that user. The existing TCP listener remains available
 through `KEI_PROXY_LISTEN_ADDR` (default `:8085`) for the current Docker
 same-container OpenWebUI setup. See [docs/unix-socket.md](docs/unix-socket.md)

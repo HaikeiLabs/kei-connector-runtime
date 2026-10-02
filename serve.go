@@ -24,13 +24,12 @@ import (
 )
 
 const (
-	invokingSubjectHeader    = "X-Kei-Invoking-Subject"
-	defaultListenAddr        = ":8085"
-	defaultRuntimeSocketPath = "/run/kei-proxy/runtime.sock"
-	maxModelRequest          = 4 << 20
-	shutdownFlushTimeout     = 5 * time.Second
-	collectorPollInterval    = time.Minute
-	maxInvokingSubjectLen    = 512
+	invokingSubjectHeader = "X-Kei-Invoking-Subject"
+	defaultListenAddr     = ":8085"
+	maxModelRequest       = 4 << 20
+	shutdownFlushTimeout  = 5 * time.Second
+	collectorPollInterval = time.Minute
+	maxInvokingSubjectLen = 512
 )
 
 var (
@@ -77,7 +76,7 @@ func runServe(args []string) int {
 }
 
 func runtimeSocketPathFromEnv() string {
-	return envOr("KEI_RUNTIME_SOCKET_PATH", defaultRuntimeSocketPath)
+	return envOr("KEI_RUNTIME_SOCKET_PATH", socket.DefaultPathOS())
 }
 
 func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) int {

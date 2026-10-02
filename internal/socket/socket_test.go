@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -126,6 +127,31 @@ func TestListenReplacesStaleSocket(t *testing.T) {
 		t.Fatalf("dial recovered socket: %v", err)
 	}
 	_ = conn.Close()
+}
+
+func TestDefaultPath(t *testing.T) {
+	tests := []struct {
+		goos string
+		want string
+	}{
+		{goos: "linux", want: "/run/kei-proxy/runtime.sock"},
+		{goos: "android", want: "/run/kei-proxy/runtime.sock"},
+		{goos: "freebsd", want: "/run/kei-proxy/runtime.sock"},
+		{goos: "darwin", want: filepath.Join(os.TempDir(), "kei-proxy", "runtime.sock")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos, func(t *testing.T) {
+			if got := DefaultPath(tt.goos); got != tt.want {
+				t.Fatalf("DefaultPath(%q) = %q, want %q", tt.goos, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultPathOS(t *testing.T) {
+	if got := DefaultPathOS(); got != DefaultPath(runtime.GOOS) {
+		t.Fatalf("DefaultPathOS() = %q, DefaultPath(runtime.GOOS) = %q", got, DefaultPath(runtime.GOOS))
+	}
 }
 
 func TestListenFailsWhenDirectoryIsNotWritable(t *testing.T) {
