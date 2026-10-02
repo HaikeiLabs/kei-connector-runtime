@@ -3,6 +3,8 @@ package connectorruntime
 import (
 	"fmt"
 	"os"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/hooks"
 )
 
 // Main runs the kei-proxy command line with args (os.Args[1:]) and returns
@@ -20,6 +22,8 @@ func Main(buildVersion string, args []string) int {
 	var code int
 	if args[0] == "authorize" {
 		code = runAuthorize(args[1:])
+	} else if args[0] == "hook" {
+		code = runHook(args[1:])
 	} else if args[0] == "connector" {
 		code = runConnector(args[1:])
 	} else if args[0] == "collector" {
@@ -50,6 +54,16 @@ func Main(buildVersion string, args []string) int {
 		code = 1
 	}
 	return code
+}
+
+func runHook(args []string) int {
+	cfg := configFromEnv()
+	return hooks.Run(args, os.Stdin, os.Stdout, hooks.Config{
+		RuntimeStateDir: cfg.RuntimeStateDir,
+		AppendAudit: func(record []byte) error {
+			return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
+		},
+	})
 }
 
 func runModel(args []string) int {

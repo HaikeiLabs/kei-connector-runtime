@@ -1,0 +1,1 @@
+{"tool_name":"exec_command","tool_input":{"cmd":"git status --short","workdir":"/tmp/project"},"cwd":"/tmp/project","session_id":"codex-session-1","tool_use_id":"tool-2","hook_event_name":"PreToolUse","native_decision":"allow"}

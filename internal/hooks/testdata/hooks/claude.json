@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git status --short"},"cwd":"/tmp/project","permission_mode":"default","session_id":"claude-session-1","tool_use_id":"tool-1","hook_event_name":"PreToolUse","native_decision":"ask"}
