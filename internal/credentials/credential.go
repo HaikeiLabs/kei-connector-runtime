@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -30,6 +31,9 @@ type Config struct {
 	PrivateKey string
 	// Timeout bounds each control-plane request.
 	Timeout time.Duration
+	// ConnectorIndexPath is the private runtime-local map from connector fields
+	// to their already delivered secret-store references.
+	ConnectorIndexPath string
 }
 
 // InstallationResolver returns the runtime installation the runtime token
@@ -306,6 +310,22 @@ func Sync(ctx context.Context, cfg Config, store secrets.Store, installation Ins
 			Error:       "validation_error", // redacted
 			ProcessedAt: time.Now().UTC().Format(time.RFC3339),
 		}, nil
+	}
+	if delivery.OperationKind == operationKindConnectorSecret {
+		if cfg.ConnectorIndexPath == "" {
+			stateDir := os.Getenv("KEI_RUNTIME_STATE_DIR")
+			if stateDir == "" {
+				stateDir = "/var/lib/kei-proxy"
+			}
+			cfg.ConnectorIndexPath = filepath.Join(stateDir, "connector-credentials.json")
+		}
+		if err := WriteConnectorReference(cfg.ConnectorIndexPath, ConnectorReference{
+			ConnectorID: delivery.ConnectorID, Field: delivery.Field,
+			SecretBackend: delivery.SecretBackend, SecretRef: delivery.SecretRef,
+			Generation: delivery.Generation,
+		}); err != nil {
+			return nil, fmt.Errorf("persist connector credential reference failed")
+		}
 	}
 
 	// Step 7: Acknowledge success

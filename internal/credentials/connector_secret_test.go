@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -55,7 +56,9 @@ func TestCredentialSyncWritesAConnectorSecret(t *testing.T) {
 	server, ack := newDeliveryControlPlane(t, "runtime-1", connectorDelivery(t, plaintext, "runtime-1", "key-1", ref, privKey))
 	store := &fakeStore{value: plaintext}
 
-	out, err := Sync(context.Background(), syncConfig(server.URL, privKey, "key-1"), store, fixedInstallation("runtime-1"))
+	cfg := syncConfig(server.URL, privKey, "key-1")
+	cfg.ConnectorIndexPath = filepath.Join(t.TempDir(), "runtime", "connector-credentials.json")
+	out, err := Sync(context.Background(), cfg, store, fixedInstallation("runtime-1"))
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -64,6 +67,10 @@ func TestCredentialSyncWritesAConnectorSecret(t *testing.T) {
 	}
 	if out.OperationKind != operationKindConnectorSecret || out.ConnectorID != syncConnectorID || out.Field != "api_token" {
 		t.Fatalf("output does not name the connector field: %+v", out)
+	}
+	indexed, err := ReadConnectorReference(cfg.ConnectorIndexPath, syncConnectorID, "api_token")
+	if err != nil || indexed.SecretBackend != "aws-secrets-manager" || indexed.SecretRef != ref || indexed.Generation != 2 {
+		t.Fatalf("connector reference index = %+v err=%v", indexed, err)
 	}
 	if !ack.Success || ack.OperationID != "op-1" || ack.RecipientID != "rec-1" {
 		t.Fatalf("ack = %+v", ack)

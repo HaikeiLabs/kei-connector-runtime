@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/hooks"
+	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 )
 
 // Main runs the kei-proxy command line with args (os.Args[1:]) and returns
@@ -32,6 +33,8 @@ func Main(buildVersion string, args []string) int {
 		code = runModel(args[1:])
 	} else if args[0] == "credential" {
 		code = runCredential(args[1:])
+	} else if args[0] == "run" {
+		code = runProxyRun(args[1:])
 	} else if args[0] == "org" {
 		code = runOrg(args[1:], os.Stdout, os.Stderr)
 	} else if args[0] == "init" {
@@ -60,6 +63,17 @@ func runHook(args []string) int {
 	cfg := configFromEnv()
 	return hooks.Run(args, os.Stdin, os.Stdout, hooks.Config{
 		RuntimeStateDir: cfg.RuntimeStateDir,
+		AppendAudit: func(record []byte) error {
+			return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
+		},
+	})
+}
+
+func runProxyRun(args []string) int {
+	cfg := configFromEnv()
+	return runcommand.Run(args, os.Stdout, os.Stderr, runcommand.Config{
+		ABACURL: cfg.ABACURL, ABACSecret: cfg.ABACSecret, RuntimeToken: cfg.RuntimeToken,
+		RuntimeStateDir: cfg.RuntimeStateDir, ProviderUserID: cfg.ProviderUserID,
 		AppendAudit: func(record []byte) error {
 			return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
 		},
@@ -100,6 +114,7 @@ Commands:
   connector    invoke a governed data connector through the control plane
   collector    ship pending audit JSONL records to ABAC (idempotent, resumable)
   credential   manage credential sync (see: kei-proxy credential --help)
+  run          run a child process with governed connector credentials
   model        model profile and invocation commands (see: kei-proxy model --help)
   org          manage organization members (list, add, remove, update)
   init         provision a member and/or agent via canonical ABAC initialization
