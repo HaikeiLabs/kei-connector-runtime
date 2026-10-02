@@ -6,11 +6,12 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets v1.5.0
-	github.com/HaikeiLabs/kei-connector-contracts v0.5.0
+	github.com/HaikeiLabs/kei-connector-contracts v0.6.0
 	github.com/aws/aws-sdk-go-v2 v1.45.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.1
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.46.1
 	github.com/google/uuid v1.6.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260921070245-7a4a4d6beae2
 	golang.org/x/sync v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -35,13 +36,8 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
-
-// HP-C7 (HAI-309): unreleased kei-connector-contracts PR #11. Swap for the
-// release tag (go get ...@<tag>) and drop this replace before merge.
-replace github.com/HaikeiLabs/kei-connector-contracts => github.com/HaikeiLabs/kei-connector-contracts v0.5.1-0.20261001212414-5db5eb87a049
