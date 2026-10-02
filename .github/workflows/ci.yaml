@@ -72,8 +72,13 @@ jobs:
         # writes policies or groups or returns a default permit. Keep this guard
         # even after later stacks add bundle loading so the boundary stays
         # explicit between the runtime and the policy catalog.
+        # pkg/harness/ is excluded because it compares bundle decision values
+        # against the "permit" keyword (e.g. p.Action == "permit") — these are
+        # legitimate policy decision comparisons, not default-permit code paths.
         run: |
-          matches=$(grep -rlE --include='*.go' --exclude='*_test.go' "(POST|PUT|PATCH|DELETE).*(policies|groups)|[\"']permit[\"']" . || true)
+          matches=$(git grep -lE \
+            '(POST|PUT|PATCH|DELETE).*(policies|groups)|["'"'"']permit["'"'"']' \
+            -- '*.go' ':(exclude)*_test.go' ':(exclude)pkg/harness/*' 2>/dev/null || true)
           if [ -n "$matches" ]; then
             echo "ADR-026 B1 violation: found policy/group write routes or default permit in production code"
             echo "$matches"
