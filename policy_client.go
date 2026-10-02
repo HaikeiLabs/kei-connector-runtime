@@ -194,7 +194,7 @@ func syncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity
 	}
 	body, bundleETag, contentType, headerVersion, unchanged, err := client.FetchBundle(ctx, etag)
 	if errors.Is(err, ErrPolicyBundleNotReady) {
-		return nil
+		return store.RefreshFailed(time.Now().UTC())
 	}
 	if errors.Is(err, ErrPolicyInstallationRevoked) {
 		_ = store.Revoke(time.Now().UTC())

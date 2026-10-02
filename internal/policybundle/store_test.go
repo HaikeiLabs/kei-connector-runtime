@@ -2,6 +2,7 @@ package policybundle
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,6 +22,44 @@ func fixtureBundle(t *testing.T) []byte {
 func fixtureNow() time.Time { return time.Date(2026, 9, 28, 17, 0, 0, 0, time.UTC) }
 func audience() (string, string, string) {
 	return "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001"
+}
+
+func TestHealthReportContainsOnlyApprovedMetadata(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, org, ws := audience()
+	cold, err := store.HealthReport(inst, org, ws, fixtureNow())
+	if err != nil || cold.State != "cold" || cold.BundleVersion != nil || cold.ReasonCode != nil {
+		t.Fatalf("cold report=%+v err=%v", cold, err)
+	}
+	if err := store.RefreshFailed(fixtureNow()); err != nil {
+		t.Fatal(err)
+	}
+	checkedCold, err := store.HealthReport(inst, org, ws, fixtureNow())
+	if err != nil || checkedCold.CheckedAt == nil || checkedCold.ReasonCode == nil || *checkedCold.ReasonCode != "bundle_missing" {
+		t.Fatalf("checked cold report=%+v err=%v", checkedCold, err)
+	}
+	if _, err := store.Activate(fixtureBundle(t), inst, org, ws, fixtureNow()); err != nil {
+		t.Fatal(err)
+	}
+	health, err := store.HealthReport(inst, org, ws, fixtureNow().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.State != "active" || health.BundleVersion == nil || *health.BundleVersion != 42 || health.PolicyRevision == nil || *health.PolicyRevision != 17 || health.AcceptedAt == nil || health.ExpiresAt == nil || health.ReasonCode != nil {
+		t.Fatalf("health report=%+v", health)
+	}
+	encoded, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"audience", "installation_id", "policy_set", "policy_count", "credential"} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Errorf("report includes forbidden field %q: %s", forbidden, encoded)
+		}
+	}
 }
 
 func TestStoreSecurePersistenceReloadAndRevocation(t *testing.T) {

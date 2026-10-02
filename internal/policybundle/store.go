@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 )
 
 type State string
@@ -24,13 +26,17 @@ const (
 )
 
 type diskState struct {
-	Version     int64           `json:"highest_bundle_version"`
-	Audience    Audience        `json:"audience"`
-	Digest      string          `json:"bundle_digest,omitempty"`
-	LastCheck   time.Time       `json:"last_check,omitempty"`
-	LastSuccess time.Time       `json:"last_success,omitempty"`
-	State       State           `json:"state"`
-	Bundle      json.RawMessage `json:"-"`
+	Version        int64           `json:"highest_bundle_version"`
+	PolicyRevision int64           `json:"policy_revision,omitempty"`
+	Audience       Audience        `json:"audience"`
+	Digest         string          `json:"bundle_digest,omitempty"`
+	AcceptedAt     time.Time       `json:"accepted_at,omitempty"`
+	ExpiresAt      time.Time       `json:"expires_at,omitempty"`
+	ReasonCode     string          `json:"reason_code,omitempty"`
+	LastCheck      time.Time       `json:"last_check,omitempty"`
+	LastSuccess    time.Time       `json:"last_success,omitempty"`
+	State          State           `json:"state"`
+	Bundle         json.RawMessage `json:"-"`
 }
 type Store struct {
 	dir, statePath, bundlePath string
@@ -139,6 +145,7 @@ func (s *Store) Activate(bundle []byte, installationID, orgID, workspaceID strin
 		v, err := Validate(bundle, installationID, orgID, workspaceID, s.state.Version, now)
 		if err != nil {
 			s.state.LastCheck = now
+			s.state.ReasonCode = healthReasonForError(err)
 			if len(s.state.Bundle) == 0 {
 				s.state.State = Invalid
 				if errors.Is(err, ErrBundleUnsupported) {
@@ -149,8 +156,12 @@ func (s *Store) Activate(bundle []byte, installationID, orgID, workspaceID strin
 			return err
 		}
 		s.state.Version = v.Payload.BundleVersion
+		s.state.PolicyRevision = v.Payload.PolicyRevision
 		s.state.Audience = v.Payload.Audience
 		s.state.Digest = v.Digest
+		s.state.AcceptedAt = now.UTC()
+		s.state.ExpiresAt = v.Payload.NotAfter.UTC()
+		s.state.ReasonCode = ""
 		s.state.Bundle = append(json.RawMessage(nil), bundle...)
 		s.state.LastCheck = now
 		s.state.LastSuccess = now
@@ -202,6 +213,7 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time) 
 		}
 		if e != nil || v.Payload.BundleVersion != s.state.Version || v.Digest != s.state.Digest || s.state.LastSuccess.IsZero() {
 			s.state.State = Invalid
+			s.state.ReasonCode = healthReasonForError(e)
 			_ = s.persist()
 			state = Invalid
 			return errors.New("persisted policy bundle invalid")
@@ -218,11 +230,16 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time) 
 	return verified, state, err
 }
 func (s *Store) RefreshFailed(now time.Time) error {
-	return s.withLock(func() error { s.state.LastCheck = now; return s.persist() })
+	return s.withLock(func() error {
+		s.state.LastCheck = now
+		s.state.ReasonCode = string(policybundlehealth.ReasonRefreshFailed)
+		return s.persist()
+	})
 }
 func (s *Store) RecordRejectedCandidate(now time.Time, cause error) error {
 	return s.withLock(func() error {
 		s.state.LastCheck = now
+		s.state.ReasonCode = healthReasonForError(cause)
 		if len(s.state.Bundle) == 0 && s.state.State != Revoked {
 			s.state.State = Invalid
 			if errors.Is(cause, ErrBundleUnsupported) {
@@ -238,6 +255,7 @@ func (s *Store) RefreshSucceeded(now time.Time) error {
 	return s.withLock(func() error {
 		s.state.LastCheck = now
 		s.state.LastSuccess = now
+		s.state.ReasonCode = ""
 		if s.state.State != Revoked && len(s.state.Bundle) > 0 {
 			s.state.State = Active
 		}
@@ -247,12 +265,79 @@ func (s *Store) RefreshSucceeded(now time.Time) error {
 func (s *Store) Revoke(now time.Time) error {
 	return s.withLock(func() error {
 		s.state.State = Revoked
+		s.state.ReasonCode = string(policybundlehealth.ReasonRuntimeRevoked)
 		s.state.Bundle = nil
-		s.state.Digest = ""
 		s.state.LastCheck = now
 		return s.persist()
 	})
 }
+func healthReasonForError(err error) string {
+	switch {
+	case errors.Is(err, ErrBundleUnsupported):
+		return string(policybundlehealth.ReasonSchemaUnsupported)
+	case errors.Is(err, ErrBundleExpired):
+		return string(policybundlehealth.ReasonRefreshFailed)
+	default:
+		return string(policybundlehealth.ReasonIntegrityRejected)
+	}
+}
+
+// HealthReport returns only the approved metadata snapshot. Audience and bundle
+// bytes are read locally for validation but are never copied into the report.
+func (s *Store) HealthReport(installationID, orgID, workspaceID string, now time.Time) (*policybundlehealth.Health, error) {
+	_, state, _ := s.Check(installationID, orgID, workspaceID, now)
+	var snapshot diskState
+	if err := s.withLock(func() error { snapshot = s.state; return nil }); err != nil {
+		return nil, err
+	}
+	if !snapshot.ExpiresAt.IsZero() && !now.Before(snapshot.ExpiresAt) && state != Revoked {
+		state = Expired
+	}
+	h := &policybundlehealth.Health{SchemaVersion: 1, State: policybundlehealth.State(state)}
+	if snapshot.LastCheck.IsZero() {
+		h.CheckedAt = nil
+	} else {
+		checked := snapshot.LastCheck.UTC()
+		h.CheckedAt = &checked
+	}
+	if snapshot.Version > 0 && snapshot.PolicyRevision > 0 && snapshot.Digest != "" && !snapshot.AcceptedAt.IsZero() && !snapshot.ExpiresAt.IsZero() {
+		version, revision, digest := snapshot.Version, snapshot.PolicyRevision, snapshot.Digest
+		accepted, expires := snapshot.AcceptedAt.UTC(), snapshot.ExpiresAt.UTC()
+		h.BundleVersion, h.PolicyRevision, h.BundleDigest = &version, &revision, &digest
+		h.AcceptedAt, h.ExpiresAt = &accepted, &expires
+	}
+	var reason *policybundlehealth.Reason
+	switch state {
+	case Cold:
+		if h.CheckedAt != nil {
+			reason = reasonPtr(policybundlehealth.ReasonBundleMissing)
+		}
+	case Active:
+	case Stale:
+		reason = reasonPtr(policybundlehealth.ReasonBundleStale)
+	case Expired:
+		reason = reasonPtr(policybundlehealth.ReasonBundleExpired)
+	case Unsupported:
+		reason = reasonPtr(policybundlehealth.ReasonSchemaUnsupported)
+	case Revoked:
+		reason = reasonPtr(policybundlehealth.ReasonRuntimeRevoked)
+	case Invalid:
+		code := snapshot.ReasonCode
+		if code == "" {
+			code = string(policybundlehealth.ReasonRefreshFailed)
+		}
+		parsed := policybundlehealth.Reason(code)
+		reason = &parsed
+	}
+	h.ReasonCode = reason
+	if err := h.Validate(false); err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+func reasonPtr(reason policybundlehealth.Reason) *policybundlehealth.Reason { return &reason }
+
 func (s *Store) persist() error {
 	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return err
