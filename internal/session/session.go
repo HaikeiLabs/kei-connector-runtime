@@ -1,4 +1,10 @@
-package run
+// Package session resolves the authenticated subject for a Kei runtime session.
+// The subject lives only in the runtime's per-session memory, set through
+// authenticated session routes (HAI-338). It is obtained either from an in-memory
+// Sessions struct (for the serve daemon) or by calling GET /v1/session on the
+// serve daemon's Unix socket (for one-shot commands like connector invoke and
+// authorize).
+package session
 
 import (
 	"context"
@@ -7,6 +13,11 @@ import (
 	"net/http"
 	"time"
 )
+
+// SubjectSource resolves the authenticated subject for the current runtime session.
+type SubjectSource interface {
+	Subject(context.Context) (string, error)
+}
 
 // socketSubjectSource resolves the authenticated subject by calling
 // GET /v1/session on the kei-proxy serve daemon's Unix socket.

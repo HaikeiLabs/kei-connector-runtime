@@ -12,9 +12,22 @@ import (
 	"time"
 )
 
+func TestParseConnectorInvokeArgsRejectsInvokingSubjectFlag(t *testing.T) {
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_token_1234567890")
+	_, err := parseConnectorInvokeArgs([]string{
+		"--connector", "conn-1",
+		"--capability", "lead.read",
+		"--action", "read",
+		"--resource", "leads/42",
+		"--invoking-subject", "victim",
+	}, testEnv())
+	if err == nil {
+		t.Fatal("--invoking-subject must be rejected as an unknown flag")
+	}
+}
+
 func TestParseConnectorInvokeArgsPropagatesContext(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_harness_token_1234567890")
-	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", "human-1")
 	t.Setenv("KEI_PROXY_AGENT_ID", "agent-9")
 	t.Setenv("KEI_PROXY_FRAMEWORK", "claude")
 
@@ -43,9 +56,10 @@ func TestParseConnectorInvokeArgsPropagatesContext(t *testing.T) {
 	if req.TraceID != "trace-1" || req.IdempotencyKey != "idem-1" {
 		t.Fatalf("trace/idempotency = %+v", req)
 	}
-	if req.InvokingSubject != "human-1" || req.UserID != "u-1" || req.AgentID != "agent-9" || req.Framework != "claude" {
+	if req.UserID != "u-1" || req.AgentID != "agent-9" || req.Framework != "claude" {
 		t.Fatalf("propagation context = %+v", req)
 	}
+	// InvokingSubject is resolved from the session at Run time, not at parse time.
 }
 
 func TestParseConnectorInvokeArgsMintsTraceAndRequiresFields(t *testing.T) {
@@ -280,5 +294,73 @@ func TestRunRejectsInvalidInputBeforeTheCatalog(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("catalog called %d times with invalid input", calls)
+	}
+}
+
+type fixedSubjectSource struct {
+	subject string
+	err     error
+}
+
+func (s *fixedSubjectSource) Subject(context.Context) (string, error) {
+	return s.subject, s.err
+}
+
+func TestRunIgnoresInvokingSubjectEnvVar(t *testing.T) {
+	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", "victim")
+
+	var got Request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"decision":"deny","reason":"no matching policy"}`))
+	}))
+	defer server.Close()
+
+	env := Env{
+		RuntimeToken:           "kh_live_runtime_token_1234567890",
+		RuntimeControlPlaneURL: server.URL,
+		SubjectSource:          &fixedSubjectSource{subject: "session-user"},
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"--connector", "conn-1",
+		"--capability", "lead.read",
+		"--action", "read",
+		"--resource", "leads/42",
+	}, env, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (deny)", code)
+	}
+	if got.InvokingSubject != "session-user" {
+		t.Fatalf("InvokingSubject = %q, want session-user (not victim)", got.InvokingSubject)
+	}
+}
+
+func TestRunWithoutSubjectSourceLeavesInvokingSubjectEmpty(t *testing.T) {
+	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", "victim")
+
+	var got Request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"decision":"deny","reason":"no matching policy"}`))
+	}))
+	defer server.Close()
+
+	env := Env{
+		RuntimeToken:           "kh_live_runtime_token_1234567890",
+		RuntimeControlPlaneURL: server.URL,
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"--connector", "conn-1",
+		"--capability", "lead.read",
+		"--action", "read",
+		"--resource", "leads/42",
+	}, env, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (deny)", code)
+	}
+	if got.InvokingSubject != "" {
+		t.Fatalf("InvokingSubject = %q, want empty (no session, victim ignored)", got.InvokingSubject)
 	}
 }

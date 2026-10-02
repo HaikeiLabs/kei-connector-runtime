@@ -16,6 +16,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 // CredentialResponse carries only the secret value. Injection is decided by the
@@ -300,7 +301,6 @@ func runAuthorize(args []string) int {
 
 	// Identity-propagation context (default to env, then to sensible fallbacks).
 	spanID := fs.String("span-id", envOr("KEI_PROXY_SPAN_ID", ""), "span id for this invocation (stable dedupe key)")
-	invokingSubject := fs.String("invoking-subject", envOr("KEI_PROXY_INVOKING_SUBJECT", ""), "invoking subject (defaults to --user)")
 	parentSpan := fs.String("parent-span", envOr("KEI_PROXY_PARENT_SPAN", ""), "parent span id (delegation chain)")
 	delegationDepth := fs.Int("delegation-depth", envIntOr("KEI_PROXY_DELEGATION_DEPTH", 0), "delegation depth (0 = direct)")
 	agentID := fs.String("agent-id", envOr("KEI_PROXY_AGENT_ID", ""), "agent id making the call")
@@ -407,10 +407,15 @@ func runAuthorize(args []string) int {
 		}
 		return writePolicyStateDenial(os.Stdout, os.Stderr, reason, err)
 	}
-	subjectProviderID := cfg.ProviderUserID
-	if *user == "" && subjectProviderID == "" {
-		subjectProviderID = *invokingSubject
+	// Resolve the invoking subject from the runtime session (G0: never from env/argv).
+	invokingSubject := ""
+	if cfg.IsRuntime() {
+		if s, err := session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken).Subject(context.Background()); err == nil {
+			invokingSubject = s
+		}
 	}
+
+	subjectProviderID := cfg.ProviderUserID
 	var subject *policybundle.Subject
 	if *user != "" || subjectProviderID != "" {
 		control := newPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
@@ -448,7 +453,7 @@ func runAuthorize(args []string) int {
 		auditMaxBytes:     cfg.AuditMaxBytes,
 		registry:          reg,
 		spanID:            *spanID,
-		invokingSubject:   *invokingSubject,
+		invokingSubject:   invokingSubject,
 		parentSpan:        *parentSpan,
 		delegationDepth:   *delegationDepth,
 		agentID:           *agentID,

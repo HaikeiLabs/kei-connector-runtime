@@ -110,7 +110,9 @@ kei-proxy connector invoke
 ```
 
 The existing identity-propagation flags and variables (`--trace-id` /
-`KEI_PROXY_SPAN_ID`, `--invoking-subject`, `--framework`) are unchanged.
+`KEI_PROXY_SPAN_ID`, `--framework`) are unchanged.
+`--invoking-subject` has been removed — subject is obtained from the
+runtime session only.
 `KEI_RUNTIME_TOKEN` comes from the environment only.
 
 ### Secrets never leave the runtime via the CLI

@@ -12,54 +12,23 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 const (
-	invokingSubjectHeader = "X-Kei-Invoking-Subject"
 	defaultListenAddr     = ":8085"
 	maxModelRequest       = 4 << 20
 	shutdownFlushTimeout  = 5 * time.Second
 	collectorPollInterval = time.Minute
-	maxInvokingSubjectLen = 512
 )
-
-var (
-	validInvokingSubject = regexp.MustCompile(`^[a-zA-Z0-9@:/\-_.~]+$`)
-)
-
-// extractInvokingSubject reads and validates the optional end-user subject
-// header. An absent header is valid (empty string). A malformed value returns
-// an error with a fixed code; the value is never echoed in the response.
-func extractInvokingSubject(r *http.Request) (string, error) {
-	v := r.Header.Get(invokingSubjectHeader)
-	if v == "" {
-		return "", nil
-	}
-	if len(v) > maxInvokingSubjectLen {
-		return "", errors.New("invalid_invoking_subject")
-	}
-	if !validInvokingSubject.MatchString(v) {
-		return "", errors.New("invalid_invoking_subject")
-	}
-	// Reject invisible ASCII control characters (including tabs, newlines, etc.)
-	// that the regex would not catch.
-	for _, c := range v {
-		if c <= unicode.MaxASCII && (c < 32 || c == 127) {
-			return "", errors.New("invalid_invoking_subject")
-		}
-	}
-	return v, nil
-}
 
 // runServe starts the runtime-owned HTTP adapter. The adapter is deliberately
 // separate from the one-shot stdin/stdout commands so existing harnesses keep
@@ -108,7 +77,6 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			IdleTimeout:       2 * time.Minute,
 		}
 	}
-	base := newRuntimeHTTPHandler(cfg).(*runtimeHTTPHandler)
 	emitFunc := func(data json.RawMessage) {
 		if cfg.AuditPath == "" {
 			return
@@ -116,6 +84,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		_ = newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append("decision", data)
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
+	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
 	server := newServer(base)
 	socketServer := newServer(local.NewHandler(base, base.runtimeConfigError, base.authorized))
 
@@ -190,13 +159,15 @@ type runtimeHTTPHandler struct {
 	cfg      Config
 	profiles ControlPlaneModelProfileClient
 	client   *http.Client
+	sessions *pdp.Sessions
 }
 
-func newRuntimeHTTPHandler(cfg Config) http.Handler {
+func newRuntimeHTTPHandler(cfg Config, sessions *pdp.Sessions) http.Handler {
 	return &runtimeHTTPHandler{
 		cfg:      cfg,
 		profiles: NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second),
 		client:   &http.Client{Timeout: 2 * time.Minute},
+		sessions: sessions,
 	}
 }
 
@@ -335,10 +306,11 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		return
 	}
 
-	invokingSubject, err := extractInvokingSubject(r)
-	if err != nil {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_invoking_subject", "end-user subject header is malformed")
-		return
+	invokingSubject := ""
+	if h.sessions != nil {
+		if sub, ok := h.sessions.Current(); ok {
+			invokingSubject = sub.UserID
+		}
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxModelRequest))
@@ -428,16 +400,12 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	if err != nil {
 		return fmt.Errorf("local policy bundle unavailable: %w", err)
 	}
-	subject := invokingSubject
-	if subject == "" {
-		subject = envOr("KEI_PROXY_INVOKING_SUBJECT", "")
-	}
 	var attrs *policybundle.Subject
-	if subject != "" || h.cfg.ProviderUserID != "" {
+	if invokingSubject != "" || h.cfg.ProviderUserID != "" {
 		client := newPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
 		req := subjectResolveRequest{}
-		if subject != "" {
-			req.UserID = subject
+		if invokingSubject != "" {
+			req.UserID = invokingSubject
 		} else {
 			req.PlatformUserID = h.cfg.ProviderUserID
 			req.TenantID = os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")

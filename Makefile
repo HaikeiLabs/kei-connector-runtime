@@ -65,7 +65,7 @@ dev-provision-runtime:
 		token="$$(tr -d '\r\n' < "$$token_tmp")"; \
 		test -n "$$token"; \
 		umask 077; \
-		{ printf 'export KEI_RUNTIME_CONTROL_PLANE_URL="%s"\n' "$(KEI_RUNTIME_CONTROL_PLANE_URL)"; printf 'export KEI_RUNTIME_INSTALLATION_ID="%s"\n' "$$installation_id"; printf 'export KEI_RUNTIME_TOKEN="%s"\n' "$$token"; printf 'export KEI_PROXY_INVOKING_SUBJECT="%s"\n' "$(KEI_SUBJECT)"; } > "$(RUNTIME_ENV_FILE)"; \
+		{ printf 'export KEI_RUNTIME_CONTROL_PLANE_URL="%s"\n' "$(KEI_RUNTIME_CONTROL_PLANE_URL)"; printf 'export KEI_RUNTIME_INSTALLATION_ID="%s"\n' "$$installation_id"; printf 'export KEI_RUNTIME_TOKEN="%s"\n' "$$token"; } > "$(RUNTIME_ENV_FILE)"; \
 		echo "Provisioned installation $$installation_id and wrote runtime environment to $(RUNTIME_ENV_FILE)."
 
 # Retrieve a one-time runtime credential for an installation created through
