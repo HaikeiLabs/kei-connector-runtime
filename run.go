@@ -110,9 +110,11 @@ func runHook(args []string) int {
 
 func runProxyRun(args []string) int {
 	cfg := configFromEnv()
+	socketPath := runtimeSocketPathFromEnv()
 	return runcommand.Run(args, os.Stdout, os.Stderr, runcommand.Config{
 		ABACURL: cfg.ABACURL, ABACSecret: cfg.ABACSecret, RuntimeToken: cfg.RuntimeToken,
 		RuntimeStateDir: cfg.RuntimeStateDir, ProviderUserID: cfg.ProviderUserID,
+		ControlPlaneURL: cfg.RuntimeControlPlaneURL, SocketPath: socketPath,
 		AppendAudit: func(record []byte) error {
 			return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
 		},
@@ -204,7 +206,6 @@ Environment:
   KEI_RUNTIME_SOCKET_PATH   local HTTP Unix socket (serve; default platform-dependent, see docs/unix-socket.md)
   KEI_RUNTIME_STATE_DIR     protected policy bundle state directory (default /var/lib/kei-proxy)
   KEI_PROXY_SPAN_ID         span id for the invocation (stable dedupe key)
-  KEI_PROXY_INVOKING_SUBJECT invoking subject (defaults to --user)
   KEI_PROXY_PARENT_SPAN     parent span id (delegation chain)
   KEI_PROXY_DELEGATION_DEPTH delegation depth (0 = direct)
   KEI_PROXY_AGENT_ID        optional per-call agent id override; harnesses get their

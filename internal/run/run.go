@@ -9,6 +9,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,35 +28,43 @@ type runCredentialResolver interface {
 	Resolve(context.Context, string, string) (value, connectURL string, err error)
 }
 
+type runCredentialBindingClient interface {
+	Resolve(ctx context.Context, runtimeToken, userID, service string) (secretBackend, secretRef string, connectURL string, err error)
+}
+
 type runAuthorization interface {
 	Authorize(context.Context, string, string, string) (*invoke.Response, error)
+}
+
+// SubjectSource resolves the authenticated subject for the current run session.
+// TODO(HAI-290): Replace with session lookup from kei-proxy serve daemon (#80).
+// Until then, there is no way to obtain a verified subject, so OAuth references
+// always fail closed with subject_unlinked.
+type SubjectSource interface {
+	Subject(context.Context) (string, error)
 }
 
 // Config contains runtime values needed by the run wrapper. AppendAudit writes
 // one value-free run event into the shared runtime audit spool.
 type Config struct {
 	ABACURL, ABACSecret, RuntimeToken, RuntimeStateDir, ProviderUserID string
+	ControlPlaneURL, SocketPath                                        string
 	AppendAudit                                                        func([]byte) error
-}
-
-func envOr(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }
 
 type catalogRunAuthorization struct{ cfg Config }
 
 func (a catalogRunAuthorization) Authorize(ctx context.Context, connectorID, field, resource string) (*invoke.Response, error) {
 	client := invoke.NewClient(a.cfg.ABACURL, a.cfg.ABACSecret, 10*time.Second)
-	return client.Invoke(ctx, invoke.Request{HarnessToken: a.cfg.RuntimeToken, ConnectorID: connectorID, Capability: "credential", Action: "use", Resource: resource, TraceID: uuid.NewString(), InvokingSubject: envOr("KEI_PROXY_INVOKING_SUBJECT", ""), UserID: envOr("KEI_PROXY_USER_ID", ""), AgentID: envOr("KEI_PROXY_AGENT_ID", ""), Framework: "kei-proxy-run", ProviderUserID: a.cfg.ProviderUserID})
+	return client.Invoke(ctx, invoke.Request{HarnessToken: a.cfg.RuntimeToken, ConnectorID: connectorID, Capability: "credential", Action: "use", Resource: resource, TraceID: uuid.NewString(), AgentID: os.Getenv("KEI_PROXY_AGENT_ID"), Framework: "kei-proxy-run", ProviderUserID: a.cfg.ProviderUserID})
 }
 
 type deliveredRunResolver struct {
-	cfg           Config
-	store         secrets.Store
-	authorization runAuthorization
+	cfg               Config
+	store             secrets.Store
+	authorization     runAuthorization
+	credentialBinding runCredentialBindingClient
+	subjectSource     SubjectSource
 }
 
 func (r deliveredRunResolver) Resolve(ctx context.Context, connectorID, field string) (string, string, error) {
@@ -69,10 +79,11 @@ func (r deliveredRunResolver) Resolve(ctx context.Context, connectorID, field st
 	if response.Connector == nil || response.Connector.ID != connectorID {
 		return "", "", runReasonError{"unresolved_reference"}
 	}
-	if response.Connector.EffectiveCredentialSource() == contract.CredentialSourceOAuth {
-		return "", "", runReasonError{"oauth_not_supported"}
+	source := response.Connector.EffectiveCredentialSource()
+	if source == contract.CredentialSourceOAuth {
+		return r.resolveOAuth(ctx, connectorID, field, response)
 	}
-	if response.Connector.EffectiveCredentialSource() != contract.CredentialSourceOpaqueRef {
+	if source != contract.CredentialSourceOpaqueRef {
 		return "", "", runReasonError{"unresolved_reference"}
 	}
 	entry, err := credentials.ReadConnectorReference(filepath.Join(r.cfg.RuntimeStateDir, "connector-credentials.json"), connectorID, field)
@@ -84,6 +95,79 @@ func (r deliveredRunResolver) Resolve(ctx context.Context, connectorID, field st
 		return "", "", runReasonError{"unresolved_reference"}
 	}
 	return *value, "", nil
+}
+
+func (r deliveredRunResolver) resolveOAuth(ctx context.Context, connectorID, field string, response *invoke.Response) (string, string, error) {
+	if r.subjectSource == nil {
+		return "", "", runReasonError{"subject_unlinked"}
+	}
+	userID, err := r.subjectSource.Subject(ctx)
+	if err != nil || userID == "" {
+		return "", "", runReasonError{"subject_unlinked"}
+	}
+	if r.credentialBinding == nil {
+		return "", "", runReasonError{"unresolved_reference"}
+	}
+	provider := string(response.Connector.Provider)
+	if provider == "" {
+		return "", "", runReasonError{"unresolved_reference"}
+	}
+	backend, ref, connectURL, err := r.credentialBinding.Resolve(ctx, r.cfg.RuntimeToken, userID, provider)
+	if err != nil {
+		if connectURL != "" {
+			return "", connectURL, runReasonError{"connect_required"}
+		}
+		return "", "", runReasonError{"unresolved_reference"}
+	}
+	value, err := r.store.Get(ctx, backend, ref)
+	if err != nil || value == nil || *value == "" {
+		return "", "", runReasonError{"unresolved_reference"}
+	}
+	return *value, "", nil
+}
+
+type httpCredentialBindingClient struct {
+	baseURL string
+	client  *http.Client
+}
+
+func newHTTPCredentialBindingClient(baseURL string) *httpCredentialBindingClient {
+	return &httpCredentialBindingClient{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		client:  &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+func (c *httpCredentialBindingClient) Resolve(ctx context.Context, runtimeToken, userID, service string) (string, string, string, error) {
+	endpoint := c.baseURL + "/api/v1/runtime/credential-bindings/" + url.PathEscape(userID) + "/" + url.PathEscape(service)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+runtimeToken)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		connectURL := c.baseURL + "/credentials/connect?service=" + url.QueryEscape(service) + "&user_id=" + url.QueryEscape(userID)
+		return "", "", connectURL, errors.New("not found")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("credential binding returned status %d", resp.StatusCode)
+	}
+	var descriptor struct {
+		SecretBackend string `json:"secret_backend"`
+		SecretRef     string `json:"secret_ref"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&descriptor); err != nil {
+		return "", "", "", fmt.Errorf("decode response: %w", err)
+	}
+	if descriptor.SecretBackend == "" || descriptor.SecretRef == "" {
+		return "", "", "", fmt.Errorf("incomplete response")
+	}
+	return descriptor.SecretBackend, descriptor.SecretRef, "", nil
 }
 
 type runReasonError struct{ reason string }
@@ -212,7 +296,15 @@ func Run(args []string, stdout, stderr io.Writer, cfg Config) int {
 		fmt.Fprintln(stderr, "run credential store is unavailable")
 		return 1
 	}
-	resolver := deliveredRunResolver{cfg: cfg, store: store, authorization: catalogRunAuthorization{cfg: cfg}}
+	var credBinding runCredentialBindingClient
+	if cfg.ControlPlaneURL != "" {
+		credBinding = newHTTPCredentialBindingClient(cfg.ControlPlaneURL)
+	}
+	var subjectSource SubjectSource
+	if cfg.SocketPath != "" {
+		subjectSource = NewSocketSubjectSource(cfg.SocketPath, cfg.RuntimeToken)
+	}
+	resolver := deliveredRunResolver{cfg: cfg, store: store, authorization: catalogRunAuthorization{cfg: cfg}, credentialBinding: credBinding, subjectSource: subjectSource}
 	return runCommand(args, stdout, stderr, cfg, os.Environ(), resolver, nil)
 }
 
