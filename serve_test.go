@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 )
 
 func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
@@ -125,14 +126,29 @@ func shortSocketTempDir(t *testing.T) string {
 }
 
 func TestRuntimeSocketPathDefaultAndOverride(t *testing.T) {
-	t.Setenv("KEI_RUNTIME_SOCKET_PATH", "")
-	if got := runtimeSocketPathFromEnv(); got != "/run/kei-proxy/runtime.sock" {
-		t.Fatalf("default socket path = %q", got)
-	}
-	t.Setenv("KEI_RUNTIME_SOCKET_PATH", "/tmp/test-runtime.sock")
-	if got := runtimeSocketPathFromEnv(); got != "/tmp/test-runtime.sock" {
-		t.Fatalf("configured socket path = %q", got)
-	}
+	t.Run("DefaultPath_linux", func(t *testing.T) {
+		if got := socket.DefaultPath("linux"); got != "/run/kei-proxy/runtime.sock" {
+			t.Fatalf("DefaultPath(\"linux\") = %q", got)
+		}
+	})
+	t.Run("DefaultPath_darwin", func(t *testing.T) {
+		want := filepath.Join(os.TempDir(), "kei-proxy", "runtime.sock")
+		if got := socket.DefaultPath("darwin"); got != want {
+			t.Fatalf("DefaultPath(\"darwin\") = %q, want %q", got, want)
+		}
+	})
+	t.Run("FromEnv_default", func(t *testing.T) {
+		t.Setenv("KEI_RUNTIME_SOCKET_PATH", "")
+		if got := runtimeSocketPathFromEnv(); got != socket.DefaultPathOS() {
+			t.Fatalf("runtimeSocketPathFromEnv() = %q, want %q", got, socket.DefaultPathOS())
+		}
+	})
+	t.Run("FromEnv_override", func(t *testing.T) {
+		t.Setenv("KEI_RUNTIME_SOCKET_PATH", "/tmp/test-runtime.sock")
+		if got := runtimeSocketPathFromEnv(); got != "/tmp/test-runtime.sock" {
+			t.Fatalf("runtimeSocketPathFromEnv() = %q", got)
+		}
+	})
 }
 
 type contextBlockingFlushClient struct {
