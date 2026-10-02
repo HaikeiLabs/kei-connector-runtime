@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
 )
 
 // ForKind returns the adapter for a supported harness.
@@ -191,7 +193,7 @@ func CompileEntries(kind Kind, bundle VerifiedBundle, h Harness) ([]ManagedEntry
 		if !p.Enabled || (p.Scope.AgentID != "" && p.Scope.AgentID != h.AgentID) || !sourceApplies(p.Src, h) {
 			continue
 		}
-		if p.Action != "permit" && p.Action != "deny" {
+		if p.Action != string(harnessmatch.OutcomePermit) && p.Action != string(harnessmatch.OutcomeDeny) {
 			continue
 		}
 		path, value, ok := nativeEntry(kind, p.Dst, p.Action)
@@ -206,7 +208,7 @@ func CompileEntries(kind Kind, bundle VerifiedBundle, h Harness) ([]ManagedEntry
 		// Human and group sources cannot be resolved by a harness renderer.
 		// Their earlier overlapping policy must shadow a later harness permit.
 		blocked := false
-		if p.Action == "permit" {
+		if p.Action == string(harnessmatch.OutcomePermit) {
 			for _, prior := range set.Policies[:i] {
 				if prior.Enabled && (prior.Scope.AgentID == "" || prior.Scope.AgentID == h.AgentID) && unrenderableSource(prior.Src) && destinationsOverlap(prior.Dst, p.Dst) {
 					blocked = true
@@ -217,11 +219,11 @@ func CompileEntries(kind Kind, bundle VerifiedBundle, h Harness) ([]ManagedEntry
 		if blocked {
 			continue
 		}
-		candidates = append(candidates, candidate{entry: ManagedEntry{Path: path, Value: value, Decision: p.Action, PolicyID: p.ID, BundleDigest: bundle.Digest, RemoveOnExpiry: p.Action == "permit", ExpiresAt: bundle.ExpiresAt}, dst: p.Dst})
+		candidates = append(candidates, candidate{entry: ManagedEntry{Path: path, Value: value, Decision: p.Action, PolicyID: p.ID, BundleDigest: bundle.Digest, RemoveOnExpiry: p.Action == string(harnessmatch.OutcomePermit), ExpiresAt: bundle.ExpiresAt}, dst: p.Dst})
 		if kind == OpenCode && strings.HasPrefix(p.Dst, "shell:") {
 			exact := strings.TrimSpace(strings.TrimPrefix(p.Dst, "shell:"))
 			if exact != "" && exact != "*" {
-				candidates = append(candidates, candidate{entry: ManagedEntry{Path: "permission.bash", Value: exact, Decision: p.Action, PolicyID: p.ID, BundleDigest: bundle.Digest, RemoveOnExpiry: p.Action == "permit", ExpiresAt: bundle.ExpiresAt}, dst: p.Dst})
+				candidates = append(candidates, candidate{entry: ManagedEntry{Path: "permission.bash", Value: exact, Decision: p.Action, PolicyID: p.ID, BundleDigest: bundle.Digest, RemoveOnExpiry: p.Action == string(harnessmatch.OutcomePermit), ExpiresAt: bundle.ExpiresAt}, dst: p.Dst})
 			}
 		}
 	}
@@ -275,7 +277,7 @@ func destinationsOverlap(a, b string) bool {
 func ExpiredEntries(entries []ManagedEntry, now time.Time) []ManagedEntry {
 	var expired []ManagedEntry
 	for _, entry := range entries {
-		if entry.RemoveOnExpiry && entry.Decision == "permit" && !now.Before(entry.ExpiresAt) {
+		if entry.RemoveOnExpiry && entry.Decision == string(harnessmatch.OutcomePermit) && !now.Before(entry.ExpiresAt) {
 			expired = append(expired, entry)
 		}
 	}
@@ -283,13 +285,18 @@ func ExpiredEntries(entries []ManagedEntry, now time.Time) []ManagedEntry {
 }
 
 func sourceApplies(src string, h Harness) bool {
-	return src == "*" || src == "harness:"+string(h.Kind) || (h.ID != "" && src == "harness:"+h.ID) || (h.AgentID != "" && src == "agent:"+h.AgentID)
+	applies, _ := harnessmatch.MatchSrc(src, harnessmatch.Call{
+		Kind:      string(h.Kind),
+		HarnessID: h.ID,
+		AgentID:   h.AgentID,
+	})
+	return applies
 }
 func nativeEntry(kind Kind, dst, decision string) (string, string, bool) {
 	if strings.HasPrefix(dst, "shell:") {
 		prefix := strings.TrimSpace(strings.TrimPrefix(dst, "shell:"))
 		if prefix == "" || prefix == "*" {
-			if decision != "deny" {
+			if decision != string(harnessmatch.OutcomeDeny) {
 				return "", "", false
 			}
 			switch kind {
@@ -325,7 +332,7 @@ func nativeEntry(kind Kind, dst, decision string) (string, string, bool) {
 				return "", "", false
 			}
 			if strings.HasSuffix(raw, ".bash") || raw == "codex.shell" {
-				if decision != "deny" {
+				if decision != string(harnessmatch.OutcomeDeny) {
 					return "", "", false
 				}
 				switch kind {
@@ -394,7 +401,7 @@ func claudeNativeTool(name string) (string, bool) {
 	return "", false
 }
 func decisionKey(d string) string {
-	if d == "permit" {
+	if d == string(harnessmatch.OutcomePermit) {
 		return "allow"
 	}
 	return "deny"

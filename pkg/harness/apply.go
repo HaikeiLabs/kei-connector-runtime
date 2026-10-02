@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
 )
 
 // SyncLedger records exact native values managed by Kei for one harness.
@@ -205,7 +207,7 @@ func removeManaged(kind Kind, config []byte, entries []ManagedEntry) ([]byte, er
 	if kind == Codex {
 		remove := map[string]bool{}
 		for _, e := range entries {
-			if e.Decision == "permit" && e.Path == "codex.rules" {
+			if e.Decision == string(harnessmatch.OutcomePermit) && e.Path == "codex.rules" {
 				remove[e.Value] = true
 			}
 		}
