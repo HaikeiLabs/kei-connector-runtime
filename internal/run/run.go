@@ -142,21 +142,21 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 		connectorIDs = appendUnique(connectorIDs, ref.connectorID)
 		fields = appendUnique(fields, ref.field)
 		if *connectorID != "" && *connectorID != ref.connectorID {
-			fmt.Fprintln(stderr, "run credential reference does not match --connector")
+			fmt.Fprintf(stderr, "Connector credential %s/%s does not match --connector.\n", ref.connectorID, ref.field)
 			appendRunAudit(cfg, connectorIDs, fields, "", childArgs, "credential_reference_mismatch", 1)
 			return 1
 		}
 		secret, connectURL, err := resolver.Resolve(context.Background(), ref.connectorID, ref.field)
 		if err != nil || secret == "" {
 			if connectURL != "" {
-				fmt.Fprintf(stderr, "Connector credentials are not connected. Open this link privately: %s\n", connectURL)
+				fmt.Fprintf(stderr, "Connector credential %s/%s is not connected. Open this link privately: %s\n", ref.connectorID, ref.field, connectURL)
 			} else {
 				reason := "unresolved_reference"
 				var coded runReasonError
 				if errors.As(err, &coded) {
 					reason = coded.reason
 				}
-				fmt.Fprintf(stderr, "Connector credential unavailable (%s).\n", reason)
+				fmt.Fprintf(stderr, "Connector credential %s/%s unavailable (%s).\n", ref.connectorID, ref.field, reason)
 			}
 			reason := "unresolved_reference"
 			var coded runReasonError

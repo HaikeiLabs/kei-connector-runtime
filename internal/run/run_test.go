@@ -4,13 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/HaikeiLabs/kei-connector-contracts/contract"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 )
 
 type testRunResolver struct {
@@ -141,6 +143,48 @@ func TestRunFailsClosedAndPrintsConnectURLOnlyToStderr(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "kei://connectors/") {
 		t.Fatal("credential reference leaked to stderr")
+	}
+}
+
+func TestRunNeverSurfacesResolvedSecretOnSuccessOrFailure(t *testing.T) {
+	const secret = "fake-secret-never-print-this"
+	const reference = "kei://connectors/connector-1/api_token"
+	tests := []struct {
+		name     string
+		resolver testRunResolver
+		child    bool
+		wantExit int
+	}{
+		{name: "unresolved", resolver: testRunResolver{err: fmt.Errorf("backend detail: %s", secret)}, wantExit: 1},
+		{name: "denied", resolver: testRunResolver{err: fmt.Errorf("policy detail: %s", secret)}, wantExit: 1},
+		{name: "child-exit-nonzero", resolver: testRunResolver{value: secret}, child: true, wantExit: 9},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr, audit bytes.Buffer
+			childArgs := []string{"--", "/bin/sh", "-c", "printf '%s\\n' \"$API_TOKEN\"; printf '%s\\n' \"$API_TOKEN\" >&2; exit 9"}
+			if !tc.child {
+				childArgs = []string{"--", "/bin/sh", "-c", "exit 0"}
+			}
+			code := runCommand(childArgs, &stdout, &stderr, Config{AppendAudit: func(record []byte) error { _, err := audit.Write(record); return err }}, []string{"API_TOKEN=" + reference}, tc.resolver, nil)
+			if code != tc.wantExit {
+				t.Fatalf("exit=%d want=%d", code, tc.wantExit)
+			}
+			if !tc.child && (!strings.Contains(stderr.String(), "connector-1") || !strings.Contains(stderr.String(), "api_token")) {
+				t.Fatal("credential error omitted reference id/field")
+			}
+			for where, value := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String(), "audit": audit.String(), "error text": stderr.String(), "reason error": runReasonError{"policy_denied"}.Error()} {
+				if strings.Contains(value, secret) {
+					t.Fatalf("credential appeared in %s", where)
+				}
+			}
+			if !strings.Contains(audit.String(), "connector-1") || !strings.Contains(audit.String(), "api_token") {
+				t.Fatal("audit omitted reference id/field")
+			}
+			if tc.child && (!strings.Contains(stdout.String(), "[REDACTED]") || !strings.Contains(stderr.String(), "[REDACTED]")) {
+				t.Fatal("child output was not masked")
+			}
+		})
 	}
 }
 
