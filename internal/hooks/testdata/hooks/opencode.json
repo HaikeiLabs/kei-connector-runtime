@@ -1,0 +1,1 @@
+{"tool_name":"bash","tool_input":{"command":"git status --short"},"session_id":"opencode-session-1","tool_use_id":"tool-3","phase":"pre","native_decision":"deny"}
