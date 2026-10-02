@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 	"github.com/google/uuid"
 )
 
@@ -129,15 +130,16 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 // workspace identity come only from the bearer token, so the report has no
 // field that could carry them, a credential, or any provider data.
 type HeartbeatReport struct {
-	RuntimeVersion   string            `json:"runtime_version"`
-	SchemaVersion    int               `json:"schema_version,omitempty"`
-	RunID            string            `json:"run_id,omitempty"`
-	Seq              uint64            `json:"seq,omitempty"`
-	IntervalSeconds  int               `json:"interval_seconds,omitempty"`
-	RuntimeStartedAt string            `json:"runtime_started_at,omitempty"`
-	Harness          *HarnessEnvelope  `json:"harness,omitempty"`
-	Counters         *HeartbeatCounter `json:"counters,omitempty"`
-	ToolSyncStatus   string            `json:"tool_sync_status,omitempty"`
+	RuntimeVersion   string                     `json:"runtime_version"`
+	SchemaVersion    int                        `json:"schema_version,omitempty"`
+	RunID            string                     `json:"run_id,omitempty"`
+	Seq              uint64                     `json:"seq,omitempty"`
+	IntervalSeconds  int                        `json:"interval_seconds,omitempty"`
+	RuntimeStartedAt string                     `json:"runtime_started_at,omitempty"`
+	Harness          *HarnessEnvelope           `json:"harness,omitempty"`
+	Counters         *HeartbeatCounter          `json:"counters,omitempty"`
+	ToolSyncStatus   string                     `json:"tool_sync_status,omitempty"`
+	PolicyBundle     *policybundlehealth.Health `json:"policy_bundle,omitempty"`
 }
 
 type HeartbeatCounter struct {
@@ -388,6 +390,7 @@ type heartbeatLoop struct {
 	// appendLifecycle writes a lifecycle audit record to the local spool after
 	// each tick, when set. nil in tests and when no audit path is configured.
 	appendLifecycle func(LifecycleEvent) error
+	policyBundle    func() *policybundlehealth.Health
 }
 
 func (l *heartbeatLoop) retryDelay() time.Duration {
@@ -445,6 +448,9 @@ func (l *heartbeatLoop) tick(ctx context.Context) *HeartbeatFailure {
 
 func (l *heartbeatLoop) send(ctx context.Context) *HeartbeatFailure {
 	report := l.report
+	if l.policyBundle != nil {
+		report.PolicyBundle = l.policyBundle()
+	}
 	if l.versioned {
 		report.Seq = l.seq
 		report.Counters = &HeartbeatCounter{BeatsFailedSinceOK: l.failedSinceOK}

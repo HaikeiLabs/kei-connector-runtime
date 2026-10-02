@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 )
 
 const heartbeatTestToken = "kh_live_runtime_test_token_1234567890"
@@ -116,6 +118,22 @@ func testLoop(client RuntimeClient, out io.Writer) *heartbeatLoop {
 		events:    &heartbeatEmitter{out: out, runID: "run-1"},
 		now:       time.Now,
 		jitter:    func(d time.Duration) time.Duration { return d },
+	}
+}
+
+func TestHeartbeatLoopIncludesPolicyBundleHealthSnapshot(t *testing.T) {
+	client := &scriptedHeartbeatClient{results: []error{nil}}
+	loop := testLoop(client, io.Discard)
+	checked := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	reason := policybundlehealth.ReasonBundleMissing
+	loop.policyBundle = func() *policybundlehealth.Health {
+		return &policybundlehealth.Health{SchemaVersion: 1, State: policybundlehealth.StateCold, CheckedAt: &checked, ReasonCode: &reason}
+	}
+	if failure := loop.tick(context.Background()); failure != nil {
+		t.Fatal(failure)
+	}
+	if got := client.reports[0].PolicyBundle; got == nil || got.State != policybundlehealth.StateCold || got.ReportedAt != nil {
+		t.Fatalf("policy bundle heartbeat report = %+v", got)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/crypto"
 )
 
@@ -154,6 +155,7 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 		appendLifecycle: func(e LifecycleEvent) error {
 			return appendLifecycleEvent(auditPath, auditMax, e)
 		},
+		policyBundle: func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) },
 	}
 	if err := loop.run(ctx, false); err != nil {
 		if isRuntimeRevocation(err) {
@@ -225,6 +227,7 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 	if err := syncPolicyBundle(ctx, cfg, identity, timeout); err != nil {
 		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
 	}
+	loop.policyBundle = func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) }
 	events.identity(identity)
 	// The first beat is sent at once and stands in for bootstrap's heartbeat.
 	err = loop.run(ctx, true)
