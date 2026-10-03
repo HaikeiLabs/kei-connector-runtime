@@ -33,6 +33,25 @@ func TestValidateUnsignedCanonicalBundleAndDigest(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsLegacyBarePolicySelectors(t *testing.T) {
+	now := time.Now().UTC()
+	raw := unsignedExampleBundle(t, now)
+	replaceSelector := func(from, to string) {
+		t.Helper()
+		if !bytes.Contains(raw, []byte(from)) {
+			t.Fatalf("fixture does not contain selector %s", from)
+		}
+		raw = bytes.ReplaceAll(raw, []byte(from), []byte(to))
+	}
+	replaceSelector(`"src_pattern": "group:members"`, `"src_pattern": "read"`)
+	replaceSelector(`"dst_pattern": "tool:search_wiki"`, `"dst_pattern": "search_wiki"`)
+	replaceSelector(`"dst_pattern": "tool:web_search"`, `"dst_pattern": "web_search"`)
+
+	if _, err := policybundle.Validate(raw, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", 41, now); err != nil {
+		t.Fatalf("validate bundle with legacy bare group/tool selectors: %v", err)
+	}
+}
+
 func TestValidateUnsignedBundleRejectsAudienceRollbackExpirySchemaAndDuplicateKeys(t *testing.T) {
 	now := time.Date(2026, 9, 28, 17, 0, 0, 0, time.UTC)
 	base := fixtureBundlePayloadForTest(t, now)
@@ -62,7 +81,7 @@ func TestValidateUnsignedBundleRejectsAudienceRollbackExpirySchemaAndDuplicateKe
 func TestVendoredFixtureHashesAndCanonicalAuthorizeParity(t *testing.T) {
 	for path, want := range map[string]string{
 		"docs/contracts/policy-bundle-v1.schema.json": "16df971e54c626e8fc5b1d20224047d589a25afbd10dff13f940e73fc19c91ab",
-		"docs/contracts/policy-set-v1.schema.json":    "0b69f38f0df1e9d873eba6bede8d0f69671c5fdc3fb2c5df95f37136bb875fd1",
+		"docs/contracts/policy-set-v1.schema.json":    "d7f27b67a081e75e65ebb1a6bbdb0c4cf29f5abb3e37a8cc09b4138577356806",
 	} {
 		b, err := os.ReadFile(path)
 		if err != nil {

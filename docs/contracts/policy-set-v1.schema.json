@@ -91,16 +91,16 @@
       "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"
     },
     "src_pattern": {
-      "description": "Who a policy applies to: user:<id>, email:<address>, agent:<id>, org:<role>, group:<name>, a *<suffix> wildcard, or *.",
+      "description": "Who a policy applies to: user:<id>, email:<address>, agent:<id>, org:<role>, group:<name>, a legacy bare group name, a *<suffix> wildcard, or *.",
       "type": "string",
-      "pattern": "^(\\*|\\*[^\\s]+|user:[^\\s]+|email:[^\\s]+|agent:[^\\s]+|org:[a-z_]+|group:[^\\s]+)$"
+      "pattern": "^(\\*|\\*[^\\s]+|user:[^\\s]+|email:[^\\s]+|agent:[^\\s]+|org:[a-z_]+|group:[^\\s]+|[^\\s:*]+)$"
     },
     "dst_pattern": {
-      "description": "What a policy applies to: tool:<name>, connector:<id>, capability:<name>, resource:<resource>, the legacy <action>:<resource> form, a *<suffix> wildcard, or *.",
+      "description": "What a policy applies to: tool:<name>, connector:<id>, capability:<name>, resource:<resource>, the legacy <action>:<resource> form, a legacy bare tool/action name, a *<suffix> wildcard, or *.",
       "type": "string",
       "minLength": 1,
       "maxLength": 255,
-      "pattern": "^(\\*|\\*[^\\s]+|[a-z_]+:[^\\s]+)$"
+      "pattern": "^(\\*|\\*[^\\s]+|[a-z_]+:[^\\s]+|[^\\s:*]+)$"
     },
     "group": {
       "type": "object",
