@@ -23,6 +23,9 @@ type permissionEvent struct {
 	Phase             string    `json:"phase"`
 	Tool              string    `json:"tool"`
 	ArgsDigest        string    `json:"args_digest"`
+	DigestKeyID       string    `json:"digest_key_id,omitempty"`
+	ArgsCiphertext    string    `json:"args_ciphertext,omitempty"`
+	RecipientKeyIDs   []string  `json:"recipient_key_ids,omitempty"`
 	NativeDecision    string    `json:"native_decision"`
 	Argv0             string    `json:"argv0,omitempty"`
 	ObservedAt        time.Time `json:"observed_at"`
@@ -55,7 +58,16 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 		return 0
 	}
 	canonical := CanonicalJSON(in.ToolInput)
-	digest := sha256.Sum256(canonical)
+	var argsDigest, digestKeyID string
+	var argsCiphertext string
+	var recipientKeyIDs []string
+	if cfg.AuditCrypto != nil {
+		argsDigest, digestKeyID = cfg.AuditCrypto.Digest(canonical)
+		argsCiphertext, recipientKeyIDs = cfg.AuditCrypto.Encrypt(canonical)
+	} else {
+		digest := sha256.Sum256(canonical)
+		argsDigest = "sha256:" + hex.EncodeToString(digest[:])
+	}
 	phase := in.Phase
 	if phase == "" {
 		phase = "pre"
@@ -71,7 +83,7 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 		decision = "unknown"
 	}
 	tool, argv0 := reportedTool(in.ToolName, in.ToolInput)
-	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, ArgsDigest: "sha256:" + hex.EncodeToString(digest[:]), NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
+	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {
 		WriteAudit(cfg, data)

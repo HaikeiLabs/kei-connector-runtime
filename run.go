@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/hooks"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -100,8 +101,10 @@ func Main(buildVersion string, args []string) int {
 
 func runHook(args []string) int {
 	cfg := configFromEnv()
+	auditProv := auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken)
 	return hooks.Run(args, os.Stdin, os.Stdout, hooks.Config{
 		RuntimeStateDir: cfg.RuntimeStateDir,
+		AuditCrypto:     auditProv,
 		AppendAudit: func(record []byte) error {
 			return keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, record)
 		},
@@ -111,10 +114,12 @@ func runHook(args []string) int {
 func runProxyRun(args []string) int {
 	cfg := configFromEnv()
 	socketPath := runtimeSocketPathFromEnv()
+	auditProv := auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken)
 	return runcommand.Run(args, os.Stdout, os.Stderr, runcommand.Config{
 		ABACURL: cfg.ABACURL, ABACSecret: cfg.ABACSecret, RuntimeToken: cfg.RuntimeToken,
 		RuntimeStateDir: cfg.RuntimeStateDir, ProviderUserID: cfg.ProviderUserID,
 		ControlPlaneURL: cfg.RuntimeControlPlaneURL, SocketPath: socketPath,
+		AuditCrypto: auditProv,
 		AppendAudit: func(record []byte) error {
 			return keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, record)
 		},
