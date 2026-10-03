@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 )
 
 // ToolInput is the common subset of harness hook input used for reporting.
@@ -23,6 +25,7 @@ type ToolInput struct {
 type Config struct {
 	RuntimeStateDir string
 	AppendAudit     func([]byte) error
+	AuditCrypto     *auditcrypto.Provider
 }
 
 // ReadInput safely reads and decodes one harness hook payload.

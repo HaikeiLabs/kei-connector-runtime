@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
@@ -43,6 +44,7 @@ type Config struct {
 	ABACURL, ABACSecret, RuntimeToken, RuntimeStateDir, ProviderUserID string
 	ControlPlaneURL, SocketPath                                        string
 	AppendAudit                                                        func([]byte) error
+	AuditCrypto                                                        *auditcrypto.Provider
 }
 
 type catalogRunAuthorization struct{ cfg Config }
@@ -168,15 +170,18 @@ type runReasonError struct{ reason string }
 func (e runReasonError) Error() string { return e.reason }
 
 type runAuditEvent struct {
-	Schema       string    `json:"schema"`
-	EventClass   string    `json:"event_class"`
-	ObservedAt   time.Time `json:"observed_at"`
-	ConnectorIDs []string  `json:"connector_ids,omitempty"`
-	Fields       []string  `json:"fields,omitempty"`
-	Command      string    `json:"command"`
-	ArgsDigest   string    `json:"args_digest"`
-	Outcome      string    `json:"outcome"`
-	ExitCode     int       `json:"exit_code"`
+	Schema          string    `json:"schema"`
+	EventClass      string    `json:"event_class"`
+	ObservedAt      time.Time `json:"observed_at"`
+	ConnectorIDs    []string  `json:"connector_ids,omitempty"`
+	Fields          []string  `json:"fields,omitempty"`
+	Command         string    `json:"command"`
+	ArgsDigest      string    `json:"args_digest"`
+	DigestKeyID     string    `json:"digest_key_id,omitempty"`
+	ArgsCiphertext  string    `json:"args_ciphertext,omitempty"`
+	RecipientKeyIDs []string  `json:"recipient_key_ids,omitempty"`
+	Outcome         string    `json:"outcome"`
+	ExitCode        int       `json:"exit_code"`
 }
 
 func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv []string, resolver runCredentialResolver, execFn func(string, []string, []string) int) int {
@@ -308,8 +313,17 @@ func appendRunAudit(stderr io.Writer, cfg Config, connectorIDs, fields []string,
 		fmt.Fprintf(stderr, "audit: failed to marshal argv for run audit event: %v\n", err)
 		return
 	}
-	argsDigest := sha256.Sum256(argvBytes)
-	event, err := json.Marshal(runAuditEvent{Schema: "kei.proxy-run-event/v1", EventClass: "credential", ObservedAt: time.Now().UTC(), ConnectorIDs: connectorIDs, Fields: fields, Command: command, ArgsDigest: "sha256:" + hex.EncodeToString(argsDigest[:]), Outcome: outcome, ExitCode: exitCode})
+	var argsDigest, digestKeyID string
+	var argsCiphertext string
+	var recipientKeyIDs []string
+	if cfg.AuditCrypto != nil {
+		argsDigest, digestKeyID = cfg.AuditCrypto.Digest(argvBytes)
+		argsCiphertext, recipientKeyIDs = cfg.AuditCrypto.Encrypt(argvBytes)
+	} else {
+		sum := sha256.Sum256(argvBytes)
+		argsDigest = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	event, err := json.Marshal(runAuditEvent{Schema: "kei.proxy-run-event/v1", EventClass: "credential", ObservedAt: time.Now().UTC(), ConnectorIDs: connectorIDs, Fields: fields, Command: command, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, Outcome: outcome, ExitCode: exitCode})
 	if err != nil {
 		fmt.Fprintf(stderr, "audit: failed to marshal run audit event: %v\n", err)
 		return
