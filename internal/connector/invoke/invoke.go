@@ -22,6 +22,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/google/uuid"
 )
 
@@ -82,6 +83,10 @@ type Env struct {
 	Store              credentials.Store
 	BackendUnavailable func(error) bool
 	AssertionKey       crm.KeyConfig
+	// SubjectSource resolves the authenticated end-user subject for the current
+	// runtime session. When nil, InvokingSubject is left empty on the request.
+	SubjectSource session.SubjectSource
+
 	// Audit appends one audit record (a JSON line) to the local spool.
 	Audit func(record []byte) error
 
@@ -161,16 +166,15 @@ func (c *Client) Invoke(ctx context.Context, req Request) (*Response, error) {
 
 // connectorInvokeArgs is the parsed CLI input for `kei-proxy connector invoke`.
 type connectorInvokeArgs struct {
-	connectorID     string
-	capability      string
-	action          string
-	resource        string
-	traceID         string
-	idempotencyKey  string
-	invokingSubject string
-	userID          string
-	agentID         string
-	framework       string
+	connectorID    string
+	capability     string
+	action         string
+	resource       string
+	traceID        string
+	idempotencyKey string
+	userID         string
+	agentID        string
+	framework      string
 }
 
 // connectorInvokePlan is the resolved execution plan for `connector invoke`:
@@ -195,7 +199,6 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	resource := fs.String("resource", "", "resource/data being accessed")
 	traceID := fs.String("trace-id", envOr("KEI_PROXY_SPAN_ID", ""), "trace id for the invocation (stable dedupe key)")
 	idempotencyKey := fs.String("idempotency-key", "", "idempotency key (dedupe key, overrides trace id for audit)")
-	invokingSubject := fs.String("invoking-subject", envOr("KEI_PROXY_INVOKING_SUBJECT", ""), "invoking subject (defaults to --user-id)")
 	userID := fs.String("user-id", "", "user id acting (defaults to --user)")
 	user := fs.String("user", "", "alias for --user-id")
 	agentID := fs.String("agent-id", envOr("KEI_PROXY_AGENT_ID", ""), "agent id making the call")
@@ -227,9 +230,6 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		*traceID = uuid.NewString()
 	}
 
-	if *invokingSubject == "" {
-		*invokingSubject = *userID
-	}
 	if *providerUser == "" {
 		*providerUser = env.ProviderUserID
 	}
@@ -244,18 +244,17 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 
 	return connectorInvokePlan{
 		req: Request{
-			HarnessToken:    cfg.RuntimeToken,
-			AgentID:         *agentID,
-			ConnectorID:     *connectorID,
-			Capability:      *capability,
-			Action:          *action,
-			Resource:        *resource,
-			TraceID:         *traceID,
-			IdempotencyKey:  *idempotencyKey,
-			InvokingSubject: *invokingSubject,
-			UserID:          *userID,
-			Framework:       *framework,
-			ProviderUserID:  *providerUser,
+			HarnessToken:   cfg.RuntimeToken,
+			AgentID:        *agentID,
+			ConnectorID:    *connectorID,
+			Capability:     *capability,
+			Action:         *action,
+			Resource:       *resource,
+			TraceID:        *traceID,
+			IdempotencyKey: *idempotencyKey,
+			UserID:         *userID,
+			Framework:      *framework,
+			ProviderUserID: *providerUser,
 		},
 		abacURL:    abacURLValue,
 		abacSecret: secret,
@@ -296,6 +295,13 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
+	if env.SubjectSource != nil {
+		subject, subErr := env.SubjectSource.Subject(context.Background())
+		if subErr == nil && subject != "" {
+			plan.req.InvokingSubject = subject
+		}
+	}
+
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
 	defer cancel()

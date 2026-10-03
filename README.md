@@ -232,8 +232,7 @@ The combined target uses `kei bot init --platform cli` and then
 agent-specific model profile is desired (this is an admin-side assignment for
 `kei bot init`; the runtime and harness learn it from `whoami`, not from an
 environment variable), or `KEI_INSTALLATION_ID=...` to reuse an existing
-installation instead of creating another one. Set `KEI_SUBJECT` if the local
-policy configuration requires a fixed development subject.
+installation instead of creating another one.
 
 The target uses `kei bot credential`, never prints the token, and writes the
 control-plane URL and token to `.runtime.env`. That file is local-only and must
@@ -275,24 +274,11 @@ independently usable without OpenWebUI.
 
 #### End-user subject attribution
 
-A harness may assert an end-user identity on chat requests via the optional
-`X-Kei-Invoking-Subject` header. The value follows the `<tenant>/<object-id>`
-format used by `authorize --invoking-subject` and must consist of only printable
-ASCII characters (alphanumeric, `@`, `:`, `/`, `-`, `_`, `.`, `~`) with a
-maximum length of 512 bytes.
-
-- When present and valid, the subject is forwarded into the `model.invoke`
-  authorization request (as both `user_id` and `invoking_subject`) and appears
-  in the audit record's `invoking_subject` field.
-- When absent, the runtime falls back to the `KEI_PROXY_INVOKING_SUBJECT`
-  environment variable (unchanged existing behavior).
-- A malformed value (disallowed characters, control codes, or exceeding the
-  length limit) is rejected with HTTP `400` and error code
-  `invalid_invoking_subject`. The original value is never echoed in the
-  response or logs.
-- The header is processed only after the runtime bearer token is authenticated;
-  a request without a valid token is still rejected with `401` regardless of
-  the header.
+The end-user subject for `model.invoke` authorization is obtained exclusively
+from the runtime session (Unix socket `/v1/session`). If no session is active,
+the subject is empty. This ensures that subject identity is governed by the
+runtime's per-connection session, not by request headers or environment
+variables.
 
 ### Local daemon socket
 

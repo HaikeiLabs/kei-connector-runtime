@@ -21,6 +21,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/google/uuid"
 )
 
@@ -34,14 +35,6 @@ type runCredentialBindingClient interface {
 
 type runAuthorization interface {
 	Authorize(context.Context, string, string, string) (*invoke.Response, error)
-}
-
-// SubjectSource resolves the authenticated subject for the current run session.
-// TODO(HAI-290): Replace with session lookup from kei-proxy serve daemon (#80).
-// Until then, there is no way to obtain a verified subject, so OAuth references
-// always fail closed with subject_unlinked.
-type SubjectSource interface {
-	Subject(context.Context) (string, error)
 }
 
 // Config contains runtime values needed by the run wrapper. AppendAudit writes
@@ -64,7 +57,7 @@ type deliveredRunResolver struct {
 	store             secrets.Store
 	authorization     runAuthorization
 	credentialBinding runCredentialBindingClient
-	subjectSource     SubjectSource
+	subjectSource     session.SubjectSource
 }
 
 func (r deliveredRunResolver) Resolve(ctx context.Context, connectorID, field string) (string, string, error) {
@@ -300,9 +293,9 @@ func Run(args []string, stdout, stderr io.Writer, cfg Config) int {
 	if cfg.ControlPlaneURL != "" {
 		credBinding = newHTTPCredentialBindingClient(cfg.ControlPlaneURL)
 	}
-	var subjectSource SubjectSource
+	var subjectSource session.SubjectSource
 	if cfg.SocketPath != "" {
-		subjectSource = NewSocketSubjectSource(cfg.SocketPath, cfg.RuntimeToken)
+		subjectSource = session.NewSocketSubjectSource(cfg.SocketPath, cfg.RuntimeToken)
 	}
 	resolver := deliveredRunResolver{cfg: cfg, store: store, authorization: catalogRunAuthorization{cfg: cfg}, credentialBinding: credBinding, subjectSource: subjectSource}
 	return runCommand(args, stdout, stderr, cfg, os.Environ(), resolver, nil)

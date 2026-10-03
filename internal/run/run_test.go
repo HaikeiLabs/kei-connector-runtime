@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,8 +232,7 @@ func TestDeliveredRunResolverFailsOAuthSubjectMissing(t *testing.T) {
 	}
 }
 
-func TestDeliveredRunResolverFailsOAuthWhenEnvVarSetButNoSubjectSource(t *testing.T) {
-	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", "env-invoker")
+func TestDeliveredRunResolverFailsOAuthWhenNoSubjectSource(t *testing.T) {
 	t.Setenv("KEI_PROXY_USER_ID", "env-user")
 	const id = "00000000-0000-4000-8000-000000000123"
 	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "api_token", CredentialSource: contract.CredentialSourceOAuth, Provider: contract.Provider("github")}}}}
@@ -372,90 +370,6 @@ func TestHTTPCredentialBindingClientFailsOnServerError(t *testing.T) {
 	if backend != "" || ref != "" || connectURL != "" {
 		t.Fatalf("expected empty values on 500: backend=%q ref=%q connectURL=%q", backend, ref, connectURL)
 	}
-}
-
-func TestSocketSubjectSourceReturnsUserIDWhenLinked(t *testing.T) {
-	socketPath := testSocketPath(t)
-	server := launchSessionSocket(t, socketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || r.URL.Path != "/v1/session" {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"user_id":"user-abc","status":"linked"}`))
-	}))
-	defer server.Close()
-
-	source := NewSocketSubjectSource(socketPath, "test-token")
-	userID, err := source.Subject(context.Background())
-	if err != nil || userID != "user-abc" {
-		t.Fatalf("Subject() = %q, %v", userID, err)
-	}
-}
-
-func TestSocketSubjectSourceReturnsEmptyOn404(t *testing.T) {
-	socketPath := testSocketPath(t)
-	server := launchSessionSocket(t, socketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-
-	source := NewSocketSubjectSource(socketPath, "test-token")
-	userID, err := source.Subject(context.Background())
-	if err != nil || userID != "" {
-		t.Fatalf("Subject() = %q, %v", userID, err)
-	}
-}
-
-func TestSocketSubjectSourceReturnsEmptyOnUnlinkedStatus(t *testing.T) {
-	socketPath := testSocketPath(t)
-	server := launchSessionSocket(t, socketPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"user_id":"user-abc","status":"pending"}`))
-	}))
-	defer server.Close()
-
-	source := NewSocketSubjectSource(socketPath, "test-token")
-	userID, err := source.Subject(context.Background())
-	if err != nil || userID != "" {
-		t.Fatalf("Subject() = %q, %v", userID, err)
-	}
-}
-
-func TestSocketSubjectSourceReturnsEmptyOnDaemonUnreachable(t *testing.T) {
-	source := NewSocketSubjectSource("/nonexistent/socket", "test-token")
-	userID, err := source.Subject(context.Background())
-	if err != nil || userID != "" {
-		t.Fatalf("Subject() = %q, %v", userID, err)
-	}
-}
-
-// testSocketPath returns a short Unix socket path for testing.
-func testSocketPath(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join("/tmp", fmt.Sprintf("kei-session-test-%d.sock", os.Getpid()))
-	t.Cleanup(func() { os.Remove(path) })
-	return path
-}
-
-// launchSessionSocket starts an HTTP server on a Unix socket at the given path.
-// The caller must close the returned server.
-func launchSessionSocket(t *testing.T, socketPath string, handler http.Handler) *http.Server {
-	t.Helper()
-	server := &http.Server{Handler: handler}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen %s: %v", socketPath, err)
-	}
-	go func() {
-		_ = server.Serve(listener)
-	}()
-	t.Cleanup(func() {
-		server.Close()
-		os.Remove(socketPath)
-	})
-	return server
 }
 
 func TestRedactingWriterMasksSecretAcrossWrites(t *testing.T) {

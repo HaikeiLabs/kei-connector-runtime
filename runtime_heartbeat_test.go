@@ -504,7 +504,6 @@ func TestRuntimeHeartbeatRedactsSecretsFromBodyAndOutput(t *testing.T) {
 		"DISCORD_TOKEN":               canary,
 		"TWILIO_AUTH_TOKEN":           canary,
 		"KEI_CREDENTIAL_SYNC_PRIVATE": canary,
-		"KEI_PROXY_INVOKING_SUBJECT":  canary,
 	}
 	run := startHeartbeat(t, server, nil, env, "--output", "jsonl")
 	waitFor(t, "a failed beat event", func() bool { return len(eventsOf(heartbeatEvents(t, run.stdout.String()), "beat")) > 0 })

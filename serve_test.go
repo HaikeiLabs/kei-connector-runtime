@@ -16,11 +16,13 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 )
 
 func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
-	handler := newRuntimeHTTPHandler(Config{})
+	handler := newRuntimeHTTPHandler(Config{}, nil)
 
 	health := httptest.NewRecorder()
 	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -343,73 +345,6 @@ func TestRuntimeHTTPHandlerHealthProbeSendsAuthHeader(t *testing.T) {
 	}
 }
 
-func TestExtractInvokingSubject_Valid(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"tenant object id", "acme-corp/user-123"},
-		{"email-like", "user@example.com/admin"},
-		{"path-like", "org/team/sub-team"},
-		{"with special chars", "org~name/user.name_suffix"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-			r.Header.Set(invokingSubjectHeader, tc.value)
-			got, err := extractInvokingSubject(r)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.value {
-				t.Fatalf("got %q, want %q", got, tc.value)
-			}
-		})
-	}
-}
-
-func TestExtractInvokingSubject_Absent(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	got, err := extractInvokingSubject(r)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "" {
-		t.Fatalf("got %q, want empty", got)
-	}
-}
-
-func TestExtractInvokingSubject_Malformed(t *testing.T) {
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"spaces", "user subject"},
-		{"control char", "user\tsubject"},
-		{"newline", "user\nsubject"},
-		{"too long", func() string {
-			s := ""
-			for i := 0; i <= maxInvokingSubjectLen; i++ {
-				s += "a"
-			}
-			return s
-		}()},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-			r.Header.Set(invokingSubjectHeader, tc.value)
-			_, err := extractInvokingSubject(r)
-			if err == nil {
-				t.Fatal("expected error for malformed subject")
-			}
-			if err.Error() != "invalid_invoking_subject" {
-				t.Fatalf("error message = %q, want %q", err.Error(), "invalid_invoking_subject")
-			}
-		})
-	}
-}
-
 func TestRuntimeHTTPHandlerRejectsInvalidToken(t *testing.T) {
 	var controlPlaneCalls, providerCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -424,7 +359,7 @@ func TestRuntimeHTTPHandlerRejectsInvalidToken(t *testing.T) {
 		RuntimeControlPlaneURL: controlPlane.URL,
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 	}
-	handler := newRuntimeHTTPHandler(config)
+	handler := newRuntimeHTTPHandler(config, nil)
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
 	request.Header.Set("Authorization", "Bearer wrong-token")
@@ -444,7 +379,7 @@ func TestRuntimeHTTPHandlerRequiresBearerToken(t *testing.T) {
 		RuntimeControlPlaneURL: "https://control-plane.test",
 		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
 	}
-	handler := newRuntimeHTTPHandler(config)
+	handler := newRuntimeHTTPHandler(config, nil)
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
@@ -520,8 +455,6 @@ func stringPtr(value string) *string { return &value }
 
 func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
 	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-	const subject = "env-user"
-	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", subject)
 
 	var providerCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -547,86 +480,6 @@ func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
 
 	if response.Code != http.StatusForbidden || providerCalls != 0 {
 		t.Fatalf("cold runtime must deny locally before provider dispatch: status=%d calls=%d body=%s", response.Code, providerCalls, response.Body.String())
-	}
-}
-
-func TestRuntimeHTTPHandlerInvokingSubjectHeaderPassedToABAC(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-	const headerSubject = "acme/end-user-42"
-
-	var providerCalls int
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		providerCalls++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"completion-1"}`)
-	}))
-	defer provider.Close()
-
-	handler := &runtimeHTTPHandler{
-		cfg: Config{
-			RuntimeControlPlaneURL: "https://control-plane.test",
-			RuntimeToken:           runtimeToken,
-		},
-		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
-		client:   &http.Client{Timeout: time.Second},
-	}
-
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
-	request.Header.Set("Authorization", "Bearer "+runtimeToken)
-	request.Header.Set(invokingSubjectHeader, headerSubject)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusForbidden || providerCalls != 0 {
-		t.Fatalf("cold runtime must deny locally before provider dispatch: status=%d calls=%d body=%s", response.Code, providerCalls, response.Body.String())
-	}
-}
-
-func TestRuntimeHTTPHandlerInvokingSubjectMalformedReturns400(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-
-	var providerCalls int
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		providerCalls++
-	}))
-	defer provider.Close()
-
-	handler := &runtimeHTTPHandler{
-		cfg: Config{
-			RuntimeControlPlaneURL: "https://control-plane.test",
-			RuntimeToken:           runtimeToken,
-		},
-		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
-		client:   &http.Client{Timeout: time.Second},
-	}
-
-	badValue := "invalid subject with spaces"
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
-	request.Header.Set("Authorization", "Bearer "+runtimeToken)
-	request.Header.Set(invokingSubjectHeader, badValue)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
-	}
-	var body struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if body.Error.Code != "invalid_invoking_subject" {
-		t.Fatalf("error code = %q, want %q", body.Error.Code, "invalid_invoking_subject")
-	}
-	if strings.Contains(response.Body.String(), badValue) {
-		t.Fatal("response must not echo the malformed header value")
-	}
-	if providerCalls != 0 {
-		t.Fatalf("malformed subject reached provider %d times; want 0", providerCalls)
 	}
 }
 
@@ -643,7 +496,6 @@ func TestRuntimeHTTPHandlerInvokingSubjectWithoutTokenStill401(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
-	request.Header.Set(invokingSubjectHeader, "tenant/user")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
@@ -718,7 +570,6 @@ func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *te
 	const agentID = "00000000-0000-0000-0000-000000000041"
 	const subject = "user:runtime-invoker"
 	t.Setenv("KEI_PROXY_AGENT_ID", agentID)
-	t.Setenv("KEI_PROXY_INVOKING_SUBJECT", subject)
 
 	var providerCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -776,7 +627,7 @@ func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *te
 			if request.Resources == nil || len(request.Resources) != 1 || request.Resources[0] != "model:"+profileID {
 				t.Errorf("authorization resources = %#v", request.Resources)
 			}
-			if request.AgentID != agentID || request.UserID != subject || request.InvokingSubject != subject {
+			if request.AgentID != agentID || request.UserID != subject || request.InvokingSubject != "" {
 				t.Errorf("authorization identity claims agent=%q user=%q invoking=%q", request.AgentID, request.UserID, request.InvokingSubject)
 			}
 			if request.Framework != "openai-http" {
@@ -790,7 +641,7 @@ func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *te
 	}))
 	defer controlPlane.Close()
 
-	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken})
+	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken}, nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+profileID+`"}`))
 	request.Header.Set("Authorization", "Bearer "+runtimeToken)
 	response := httptest.NewRecorder()
@@ -854,7 +705,7 @@ func TestRuntimeHTTPHandlerDeniesBeforeProviderDispatch(t *testing.T) {
 	}))
 	defer controlPlane.Close()
 
-	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken})
+	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken}, nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+profileID+`"}`))
 	request.Header.Set("Authorization", "Bearer "+runtimeToken)
 	response := httptest.NewRecorder()
@@ -865,5 +716,70 @@ func TestRuntimeHTTPHandlerDeniesBeforeProviderDispatch(t *testing.T) {
 	}
 	if authorizeCalls != 0 || providerCalls != 0 {
 		t.Fatalf("calls authorize=%d provider=%d, want no catalog decision and no provider calls", authorizeCalls, providerCalls)
+	}
+}
+
+func TestRuntimeHTTPHandlerIgnoresInvokingSubjectHeader(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	stateDir := t.TempDir()
+	now := time.Now().UTC()
+	mustActivateTestBundle(t, stateDir, now)
+	workspace := "ws-fixture-0001"
+
+	var subjectUserID string
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/whoami":
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{
+				ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace,
+				Platform: "discord", Status: "active", BindingStatus: "verified",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"profile_id":   "00000000-0000-0000-0000-000000000011",
+				"org_id":       "00000000-0000-0000-0000-000000000012",
+				"agent_id":     "00000000-0000-0000-0000-000000000013",
+				"display_name": "Test model", "endpoint": "http://127.0.0.1:1",
+				"default_model": "m1", "auth_type": "none", "status": "active",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runtime/subject-attributes:resolve":
+			var req subjectResolveRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode subject resolve request: %v", err)
+			}
+			subjectUserID = req.UserID
+			_ = json.NewEncoder(w).Encode(policybundle.Subject{
+				Status: "linked_approved", UserID: req.UserID,
+				EffectiveGroups: []string{"members"}, OrgRoles: []string{"member"}, MaxAgeSeconds: 60,
+			})
+		default:
+			t.Errorf("unexpected control plane request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer controlPlane.Close()
+
+	sessions := pdp.NewSessions()
+	if err := sessions.Start(pdp.Subject{UserID: "session-user-42", Status: pdp.StatusLinked}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newRuntimeHTTPHandler(Config{
+		RuntimeControlPlaneURL: controlPlane.URL,
+		RuntimeToken:           runtimeToken,
+		RuntimeStateDir:        stateDir,
+	}, sessions)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"00000000-0000-0000-0000-000000000011"}`))
+	request.Header.Set("Authorization", "Bearer "+runtimeToken)
+	request.Header.Set("X-Kei-Invoking-Subject", "victim")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (model:invoke not in test bundle), body = %s", response.Code, response.Body.String())
+	}
+	if subjectUserID != "session-user-42" {
+		t.Fatalf("subject resolve UserID = %q, want session-user-42 (X-Kei-Invoking-Subject header victim was ignored)", subjectUserID)
 	}
 }

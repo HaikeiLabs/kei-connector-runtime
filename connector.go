@@ -8,6 +8,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 // runConnector dispatches the connector subcommand.
@@ -20,7 +21,7 @@ func runConnector(args []string) int {
 				return 1
 			}
 		}
-		return invoke.Run(args[1:], invoke.Env{
+		env := invoke.Env{
 			RuntimeToken:           cfg.RuntimeToken,
 			RuntimeControlPlaneURL: cfg.RuntimeControlPlaneURL,
 			ABACURL:                cfg.ABACURL,
@@ -36,7 +37,11 @@ func runConnector(args []string) int {
 				}
 				return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
 			},
-		}, os.Stdout, os.Stderr)
+		}
+		if cfg.IsRuntime() {
+			env.SubjectSource = session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken)
+		}
+		return invoke.Run(args[1:], env, os.Stdout, os.Stderr)
 	}
 	fmt.Fprintln(os.Stderr, "Error: unknown connector command\n\nUsage: kei-proxy connector invoke --connector <id> --capability <name> --action <action> --resource <resource>")
 	return 1
