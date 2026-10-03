@@ -5,11 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -602,5 +606,228 @@ func TestCollectorRoutesCredentialThroughSeam(t *testing.T) {
 	}
 	if fake.total() != 1 || len(credential.records) != 1 {
 		t.Fatalf("decisions = %d credential = %d, want 1/1", fake.total(), len(credential.records))
+	}
+}
+
+// fakeCollectorConfig is a CollectorConfig for the flush-client factories.
+type fakeCollectorConfig struct {
+	isRuntime    bool
+	token        string
+	controlPlane string
+	flushURL     string
+	flushSecret  string
+}
+
+func (f fakeCollectorConfig) IsRuntime() bool         { return f.isRuntime }
+func (f fakeCollectorConfig) Token() string           { return f.token }
+func (f fakeCollectorConfig) ControlPlaneURL() string { return f.controlPlane }
+func (f fakeCollectorConfig) FlushURL() string        { return f.flushURL }
+func (f fakeCollectorConfig) FlushSecret() string     { return f.flushSecret }
+
+// TestHarnessToolFlushSendsOnlyFourFields pins the payload boundary: the
+// client forwards exactly {tool, skill?, harness_kind, observed_at} and never
+// the spool's args_digest / args_ciphertext / tool_input.
+func TestHarnessToolFlushSendsOnlyFourFields(t *testing.T) {
+	var gotAuth string
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"upserted":1}`))
+	}))
+	defer server.Close()
+
+	client := NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{token: "tok-123", controlPlane: server.URL}, time.Second)
+	if client == nil {
+		t.Fatal("client is nil")
+	}
+	raw := json.RawMessage(`{"event_class":"harness_tool","harness_id":"h1","tool":"shell","harness_kind":"claude","args_digest":"sha256:abc","args_ciphertext":"AAAA","tool_input":{"command":"rm -rf"},"observed_at":"2026-10-03T12:00:00Z"}`)
+	n, err := client.FlushHarnessTool(context.Background(), []json.RawMessage{raw})
+	if err != nil {
+		t.Fatalf("FlushHarnessTool: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("upserted = %d, want 1", n)
+	}
+	if gotAuth != "Bearer tok-123" {
+		t.Fatalf("auth = %q, want Bearer tok-123", gotAuth)
+	}
+	if gotPath != "/api/v1/runtime/harness-tool-events:batchCreate" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	var envelope struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(gotBody, &envelope); err != nil {
+		t.Fatalf("unmarshal body: %v (body=%s)", err, gotBody)
+	}
+	if len(envelope.Events) != 1 {
+		t.Fatalf("events = %d, want 1", len(envelope.Events))
+	}
+	ev := envelope.Events[0]
+	// skill is optional and omitted when empty, so the event carries at most the
+	// four ingest fields; the three required ones must be present.
+	if len(ev) > 4 {
+		t.Fatalf("event has %d fields, want at most 4: %v", len(ev), ev)
+	}
+	for _, required := range []string{"tool", "harness_kind", "observed_at"} {
+		if _, ok := ev[required]; !ok {
+			t.Fatalf("required field %q missing: %v", required, ev)
+		}
+	}
+	for _, forbidden := range []string{"args_digest", "args_ciphertext", "tool_input", "event_class", "harness_id", "schema", "native_decision", "argv0"} {
+		if _, ok := ev[forbidden]; ok {
+			t.Fatalf("forbidden field %q present: %v", forbidden, ev)
+		}
+	}
+	if ev["tool"] != "shell" || ev["harness_kind"] != "claude_code" || ev["observed_at"] != "2026-10-03T12:00:00Z" {
+		t.Fatalf("event = %v, want tool=shell harness_kind=claude_code observed_at=...", ev)
+	}
+	if _, hasSkill := ev["skill"]; hasSkill {
+		t.Fatalf("skill present but must be omitted when empty: %v", ev)
+	}
+}
+
+// TestHarnessToolFlushCarriesSkill verifies an opencode skill is forwarded.
+func TestHarnessToolFlushCarriesSkill(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"upserted":1}`))
+	}))
+	defer server.Close()
+
+	client := NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
+	raw := json.RawMessage(`{"event_class":"harness_tool","tool":"shell","skill":"pdf","harness_kind":"opencode","observed_at":"2026-10-03T12:00:00Z"}`)
+	if _, err := client.FlushHarnessTool(context.Background(), []json.RawMessage{raw}); err != nil {
+		t.Fatalf("FlushHarnessTool: %v", err)
+	}
+	var envelope struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(gotBody, &envelope); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if len(envelope.Events) != 1 || envelope.Events[0]["skill"] != "pdf" || envelope.Events[0]["harness_kind"] != "opencode" {
+		t.Fatalf("event = %v, want skill=pdf harness_kind=opencode", envelope.Events)
+	}
+}
+
+// TestHarnessToolFlushBatchesAtMost500 verifies the client splits a large batch
+// into chunks of at most 500 events.
+func TestHarnessToolFlushBatchesAtMost500(t *testing.T) {
+	var mu sync.Mutex
+	batchSizes := []int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var envelope struct {
+			Events []map[string]any `json:"events"`
+		}
+		_ = json.Unmarshal(b, &envelope)
+		mu.Lock()
+		batchSizes = append(batchSizes, len(envelope.Events))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"upserted":` + strconv.Itoa(len(envelope.Events)) + `}`))
+	}))
+	defer server.Close()
+
+	client := NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
+	records := make([]json.RawMessage, 1200)
+	for i := range records {
+		records[i] = json.RawMessage(fmt.Sprintf(`{"tool":"t%d","harness_kind":"opencode","observed_at":"2026-10-03T12:00:00Z"}`, i))
+	}
+	n, err := client.FlushHarnessTool(context.Background(), records)
+	if err != nil {
+		t.Fatalf("FlushHarnessTool: %v", err)
+	}
+	if n != 1200 {
+		t.Fatalf("upserted = %d, want 1200", n)
+	}
+	want := []int{500, 500, 200}
+	if len(batchSizes) != len(want) {
+		t.Fatalf("batches = %v, want %v", batchSizes, want)
+	}
+	for i := range want {
+		if batchSizes[i] != want[i] {
+			t.Fatalf("batch %d = %d, want %d", i, batchSizes[i], want[i])
+		}
+	}
+}
+
+// TestCanonicalHarnessKind pins the spool->catalog harness_kind mapping.
+func TestCanonicalHarnessKind(t *testing.T) {
+	cases := map[string]string{
+		"claude":   "claude_code",
+		"codex":    "codex",
+		"opencode": "opencode",
+		"custom":   "custom",
+	}
+	for in, want := range cases {
+		if got := canonicalHarnessKind(in); got != want {
+			t.Errorf("canonicalHarnessKind(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestHarnessToolFlushRetriesOnThrottle verifies a 429 with Retry-After is
+// surfaced so the collector retains the spool and retries the batch.
+func TestHarnessToolFlushRetriesOnThrottle(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		current := requests
+		mu.Unlock()
+		if current == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"upserted":1}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(path, []byte(`{"event_class":"harness_tool","tool":"shell","harness_kind":"claude","observed_at":"2026-10-03T12:00:00Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	collector := NewCollector(path, &fakeFlushClient{}, 100)
+	collector.HarnessToolClient = NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- collector.RunPolling(ctx, time.Hour) }()
+
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		mu.Lock()
+		n := requests
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d request(s), want the 429 followed by a retry", n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
+// TestHarnessToolFlushClientNilWithoutToken verifies the factory fails closed
+// when no runtime token is configured.
+func TestHarnessToolFlushClientNilWithoutToken(t *testing.T) {
+	if client := NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{}, time.Second); client != nil {
+		t.Fatal("expected a nil client without a token")
 	}
 }
