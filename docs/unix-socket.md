@@ -35,8 +35,10 @@ and disappears when it stops.
 `kei-proxy serve` is a long-running daemon that exposes its HTTP/1.1 API on a
 Unix domain socket. Harness processes on the same host connect to that socket
 to reach the local API: health, readiness, model profile, and chat-completion
-routes. The daemon and the harness run independently: the daemon provides the
-local API, the harness connects to it.
+routes. The daemon hosts both the PDP and the PEP, so every governed tool
+invocation is decided and enforced locally without a subprocess or a catalog
+round trip. The daemon and the harness run
+independently: the daemon provides the local API, the harness connects to it.
 
 This daemon-socket model brings three benefits:
 
@@ -49,16 +51,21 @@ This daemon-socket model brings three benefits:
 - **No port management.** The address is just a file path. There is no port to
   choose, reserve, or collide on.
 
-### Current API surface and the target
+### API surface
 
-Today the socket serves `GET /healthz`, `GET /readyz`, `GET /v1/models`, and
-`POST /v1/chat/completions`. Governed tool authorization is not served over
-the socket: Agentware harnesses still spawn `kei-proxy authorize` as a
-subprocess for each tool decision.
+The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/models`,
+`POST /v1/chat/completions`, `POST /v1/authorize`, and
+`PUT/DELETE/GET /v1/session`. Governed tool authorization — the PEP — uses
+the local PDP on the socket (PRs #78, #79, #80 merged). The legacy
+`kei-proxy authorize` CLI subprocess is deprecated; it delegates PDP to the
+remote catalog and is retained for harnesses that have not yet migrated.
 
-ADR-011's local-PDP authorization over the daemon is the target. The socket
-route proposed in the closed PR #65 was rejected because it called the catalog
-authorize endpoint per request and did not authenticate the caller.
+Both the PEP and the PDP run in the same daemon process. The PDP evaluates
+policy locally from an unsigned canonical JSON bundle (ADR-026), and the PEP
+enforces the result on every governed invocation without a round trip to the
+catalog. The socket route proposed in the closed PR #65 was rejected because
+it called the catalog authorize endpoint per request and did not authenticate
+the caller.
 
 ### Same-host daemon and harness (primary deployment)
 

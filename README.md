@@ -1,9 +1,20 @@
 # kei-connector-runtime
 
 The tenant-side connector runtime. It runs inside the customer's own
-environment, evaluates ABAC policy locally, enforces the allow/deny decision,
-resolves credentials from tenant-owned backends, executes approved provider
-operations, and emits redacted audit metadata.
+environment, enforces ABAC policy decisions, resolves credentials from
+tenant-owned backends, executes approved provider operations, and emits
+redacted audit metadata.
+
+In the ADR-011 target architecture, the runtime hosts both a **Policy
+Decision Point (PDP)** and a **Policy Enforcement Point (PEP)**: the PDP
+evaluates applicable policy and returns allow or deny; the PEP intercepts every
+governed tool call and enforces that result. Local PDP evaluation occurs for
+every governed invocation. A denial ends that invocation; a later durable grant
+may affect future calls but does not alter the current one. There is no
+synchronous catalog-authorization or subject-resolution request per invocation
+in this flow; identity and grant APIs are separate session-setup operations
+outside the runtime daemon's invocation flow. The legacy catalog-authorize path
+is described below; it is being removed as local PDP evaluation ships.
 
 Extracted from `kei` (`cmd/kei-connector-runtime`) under
 [ADR-017](https://github.com/HaikeiLabs/kei/blob/main/docs/adr/017-service-repository-boundaries-and-naming.md).
@@ -11,10 +22,44 @@ Extracted from `kei` (`cmd/kei-connector-runtime`) under
 ## The boundary this service exists to hold
 
 [ADR-011](https://github.com/HaikeiLabs/kei/blob/main/docs/adr/011-tenant-side-proxy-data-plane.md)
-is canonical: as the **data plane** the connector runtime authorises every
-provider invocation. Authorisation *is* delegated to the remote ABAC control
-plane on every call — local bundle evaluation (ADR-011 §4) is the target
-architecture but is not yet implemented.
+is canonical: in the **target architecture** the connector runtime is both the
+PDP and the PEP for tenant-side policy evaluation — policy is evaluated and
+enforced locally on every governed call without delegating the decision to the
+control plane. On the legacy catalog-authorize path (described below), the
+remote catalog PDP returns the decision and the runtime acts as the PEP only.
+That path is being removed.
+
+**Legacy catalog-authorize path (being removed).** Authorisation is delegated
+to the remote ABAC control plane on every call (`POST /api/v1/authorize`).
+The runtime is the PEP — it intercepts the call and enforces the remote
+decision — but the PDP lives in the catalog. This path is being removed as
+local PDP evaluation ships; no retirement date is set.
+
+**Target architecture (ADR-011 §4).** The PDP moves into the runtime via local
+bundle evaluation. The runtime still hosts the PEP, and local PDP evaluation
+occurs for every governed invocation. A denial ends that invocation; a later
+durable grant may affect future calls. There is no synchronous catalog
+authorisation or subject-resolution request per invocation in this flow;
+identity and grant APIs remain separate session-setup operations.
+
+**Status.** Local bundle evaluation is implemented on `main` (PRs #78, #79,
+#80 merged). The `serve` daemon's Unix socket serves `POST /v1/authorize`
+for local PDP evaluation and `PUT/DELETE/GET /v1/session` for session
+identity. The legacy `kei-proxy authorize` CLI subprocess is deprecated and
+continues to delegate to the remote catalog; it will be removed once all
+harnesses have migrated to the socket path. The bundle contract is defined by
+ADR-026 (G0 decisions accepted in Kei #681, #682, #693): unsigned canonical
+JSON over authenticated HTTPS; no bundle signing, key distribution, or
+encryption. The session subject is held in runtime memory; memberships, roles,
+and grants arrive in the bundle. Identity and grant APIs remain separate
+session-setup operations. Per-call approvals are removed (ADR-027, Kei #681).
+
+**Deny-and-defer pattern.** A local PDP deny ends that invocation; the harness
+does not pause, retry, or escalate the denied call. After repeated denials, a
+harness may offer the user a separate way to request a durable user/group grant
+from the policy catalog. That access request does not approve, pause, or replay
+the denied invocation — a granted policy change reaches the runtime through the
+next bundle sync and affects later invocations.
 
 - Credentials are resolved **here**, from tenant-owned secret/OAuth backends.
 - Provider payloads and results stay **here**, inside the tenant runtime.
@@ -38,13 +83,14 @@ name.
 
 The same binary supports two modes. **CLI commands** (`authorize`, `connector`,
 `collector`, `credential`, `model`, `runtime`, `identity`, `init`, `org`) each
-perform one governed action and exit. **`kei-proxy serve`** is a long-running
-daemon that exposes a local HTTP/1.1 API on a Unix socket (default
-`/run/kei-proxy/runtime.sock`, mode `0600`) and an optional TCP listener
-(`KEI_PROXY_LISTEN_ADDR`, default `:8085`). The socket API currently serves
-health, readiness, model profile, and chat-completion routes. Governed tool
-authorization over the socket is not yet available — harnesses call the
-`authorize` CLI subprocess for each tool decision.
+perform one governed action and exit; the `authorize` and `connector invoke`
+commands act as the PEP, and the PDP runs locally in the same process.
+**`kei-proxy serve`** is a long-running daemon that exposes a local HTTP/1.1
+API on a Unix socket (default `/run/kei-proxy/runtime.sock`, mode `0600`) and
+an optional TCP listener (`KEI_PROXY_LISTEN_ADDR`, default `:8085`). The
+socket API serves health, readiness, model profile, chat-completion,
+authorize, and session routes. Governed tool authorization over the socket —
+the daemon-side PEP — replaces the legacy `authorize` CLI subprocess.
 
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
@@ -265,10 +311,11 @@ KEI_RUNTIME_TOKEN=kh_live_... \
 kei-proxy serve
 ```
 
-The initial endpoints are `GET /healthz`, `GET /readyz`, `GET /v1/models`, and
-`POST /v1/chat/completions`. The models endpoint advertises the active profile
+The initial endpoints are `GET /healthz`, `GET /readyz`, `GET /v1/models`,
+`POST /v1/chat/completions`, `POST /v1/authorize`, and
+`PUT/DELETE/GET /v1/session`. The models endpoint advertises the active profile
 assigned to the runtime. Chat requests authenticate with the runtime token,
-obtain a `model.invoke` decision from policy-catalog, and only then resolve
+obtain a `model.invoke` decision from the local PDP, and only then resolve
 provider credentials and call the model endpoint. The runtime remains
 independently usable without OpenWebUI.
 
@@ -289,8 +336,8 @@ the operating system's socket permissions to limit access to the runtime's OS
 user. The runtime and harness should run as the same OS user. HTTP bearer
 authentication and model authorization still apply to requests made through
 the socket. The socket serves health, readiness, model profile, and
-chat-completion routes; governed tool authorization is served by the
-`authorize` CLI subprocess and is not yet available over the socket.
+chat-completion, authorize, and session routes; governed tool authorization
+(the PEP) over the socket replaces the legacy `authorize` CLI subprocess.
 
 The default socket is `/run/kei-proxy/runtime.sock` on Linux or
 `$TMPDIR/kei-proxy/runtime.sock` on macOS (falls back to `os.TempDir()`); set
