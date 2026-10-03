@@ -16,6 +16,8 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 	"github.com/google/uuid"
+
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 // Heartbeat exit codes. They are part of the `runtime heartbeat --output jsonl`
@@ -492,7 +494,7 @@ func (l *heartbeatLoop) emitLifecycleRecord(outcome HeartbeatOutcome) {
 		return
 	}
 	_ = l.appendLifecycle(LifecycleEvent{
-		EventClass:     eventClassLifecycle,
+		EventClass:     keiruntime.EventClassLifecycle,
 		SchemaVersion:  1,
 		EventType:      "heartbeat",
 		Outcome:        outcome,

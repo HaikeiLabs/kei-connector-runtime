@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"crypto/sha256"
@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// pedroAuditLine is the pre-canonical record shape historically written by
-// Pedro's Agentware Auditor. It is accepted during the spool migration so
-// existing pedro-audit.jsonl entries can be uploaded without losing history.
+// pedroAuditLine is the legacy audit event format from the pedro-agentware
+// era. ParseAuditLine attempts to decode a line as DecisionEvent first; if
+// that fails it falls back to this format for backward compatibility with
+// pre-migration spool files.
 type pedroAuditLine struct {
 	SpanID          string          `json:"span_id"`
 	InvokedAt       string          `json:"invoked_at"`
@@ -36,14 +37,8 @@ type pedroAuditLine struct {
 	} `json:"decision"`
 }
 
-// parseAuditLine accepts the canonical proxy record and the older Pedro
-// envelope. Raw tool arguments from old envelopes are reduced to a digest
-// before they leave the runtime.
-func parseAuditLine(line string) (DecisionEvent, bool) {
+func ParseAuditLine(line string) (DecisionEvent, bool) {
 	var event DecisionEvent
-	// DecisionEvent records predate the event_class discriminator and have
-	// historically allowed optional identity fields. Preserve that contract:
-	// successful decoding is enough to identify a canonical decision row.
 	if err := json.Unmarshal([]byte(line), &event); err == nil {
 		return event, true
 	}
@@ -67,8 +62,6 @@ func parseAuditLine(line string) (DecisionEvent, bool) {
 
 	spanID := old.SpanID
 	if spanID == "" {
-		// Stable across collector retries and unique for the historical line,
-		// unlike session_id which is shared by many tool calls in one chat.
 		digest := sha256.Sum256([]byte(line))
 		spanID = "pedro-" + hex.EncodeToString(digest[:])
 	}
@@ -141,8 +134,6 @@ func parsePedroTimestamp(value string) (time.Time, error) {
 	}
 	for _, layout := range []string{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05"} {
 		if parsed, err := time.Parse(layout, value); err == nil {
-			// Legacy Agentware timestamps were naive local container timestamps;
-			// the gateway runs in UTC and emits its structured logs in UTC.
 			return parsed.UTC(), nil
 		}
 	}

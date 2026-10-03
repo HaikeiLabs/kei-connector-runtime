@@ -103,7 +103,7 @@ func runHook(args []string) int {
 	return hooks.Run(args, os.Stdin, os.Stdout, hooks.Config{
 		RuntimeStateDir: cfg.RuntimeStateDir,
 		AppendAudit: func(record []byte) error {
-			return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
+			return keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, record)
 		},
 	})
 }
@@ -116,7 +116,7 @@ func runProxyRun(args []string) int {
 		RuntimeStateDir: cfg.RuntimeStateDir, ProviderUserID: cfg.ProviderUserID,
 		ControlPlaneURL: cfg.RuntimeControlPlaneURL, SocketPath: socketPath,
 		AppendAudit: func(record []byte) error {
-			return newAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(eventClassDecision, record)
+			return keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, record)
 		},
 	})
 }

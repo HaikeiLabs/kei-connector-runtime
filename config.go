@@ -55,6 +55,8 @@ func auditMaxBytesFromEnv() int64 {
 	return defaultAuditMaxBytes
 }
 
+const defaultAuditMaxBytes int64 = 100 << 20
+
 // DefaultRuntimeStateDir is the default directory for persisted policy bundle
 // and runtime state. Per ADR-026 §5 the directory must be created with mode
 // 0700 and its files with mode 0600.
@@ -86,6 +88,8 @@ func (c Config) Token() string              { return c.RuntimeToken }
 func (c Config) ControlPlaneURL() string    { return c.RuntimeControlPlaneURL }
 func (c Config) PolicyAuditPath() string    { return c.AuditPath }
 func (c Config) PolicyAuditMaxBytes() int64 { return c.AuditMaxBytes }
+func (c Config) FlushURL() string           { return c.ABACURL }
+func (c Config) FlushSecret() string        { return c.ABACSecret }
 
 // IsRuntime identifies the customer-hosted installation path.
 func (c Config) IsRuntime() bool {

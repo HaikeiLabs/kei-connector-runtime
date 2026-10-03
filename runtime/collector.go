@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bufio"
@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,17 +13,13 @@ import (
 	"mime"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
-// ABACFlushClient ships a batch of decision events to ABAC's audit flush
-// endpoint. It is an interface so the collector is testable without a network.
 type ABACFlushClient interface {
 	Flush(ctx context.Context, records []DecisionEvent) (int, error)
 }
@@ -36,10 +31,6 @@ type abacFlushClient struct {
 	client  *http.Client
 }
 
-// NewABACFlushClient builds a client that POSTs to <baseURL>/api/v1/audit/flush.
-// It carries no credential and is intended for deployments in which ABAC has
-// no auth configured (local development). Production deployments (and customer
-// runtimes) must use NewABACFlushClientFromConfig instead.
 func NewABACFlushClient(baseURL string, timeout time.Duration) ABACFlushClient {
 	return &abacFlushClient{
 		baseURL: baseURL,
@@ -48,33 +39,26 @@ func NewABACFlushClient(baseURL string, timeout time.Duration) ABACFlushClient {
 	}
 }
 
-// NewABACFlushClientFromConfig builds a client whose flush destination and
-// credential match the runtime mode of cfg:
-//   - runtime mode POSTs <KEI_RUNTIME_CONTROL_PLANE_URL>/api/v1/runtime/audit/flush
-//     with the installation token as an Authorization bearer. Customer runtimes
-//     never receive the internal API secret.
-//   - legacy mode POSTs <ABAC_URL>/api/v1/audit/flush with X-KEI-API-Key when an
-//     ABAC_API_SECRET is configured, matching the authorize client.
-func NewABACFlushClientFromConfig(cfg Config, timeout time.Duration) ABACFlushClient {
+func NewABACFlushClientFromConfig(cfg CollectorConfig, timeout time.Duration) ABACFlushClient {
 	if cfg.IsRuntime() {
-		base := cfg.RuntimeControlPlaneURL
+		base := cfg.ControlPlaneURL()
 		if base == "" {
-			base = cfg.ABACURL
+			base = cfg.FlushURL()
 		}
 		return &abacFlushClient{
 			baseURL: base,
 			path:    "/api/v1/runtime/audit/flush",
-			headers: map[string]string{"Authorization": "Bearer " + cfg.RuntimeToken},
+			headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
 			client:  &http.Client{Timeout: timeout},
 		}
 	}
 	client := &abacFlushClient{
-		baseURL: cfg.ABACURL,
+		baseURL: cfg.FlushURL(),
 		path:    "/api/v1/audit/flush",
 		client:  &http.Client{Timeout: timeout},
 	}
-	if cfg.ABACSecret != "" {
-		client.headers = map[string]string{"X-KEI-API-Key": cfg.ABACSecret}
+	if cfg.FlushSecret() != "" {
+		client.headers = map[string]string{"X-KEI-API-Key": cfg.FlushSecret()}
 	}
 	return client
 }
@@ -111,13 +95,16 @@ func (c *abacFlushClient) Flush(ctx context.Context, records []DecisionEvent) (i
 	return out.Upserted, nil
 }
 
-// LifecycleFlushClient ships runtime lifecycle records (state changes such as
-// started, degraded, recovered) to their own flush route. The policy catalog
-// has no such route yet, so the collector runs without one and counts and
-// logs lifecycle records as skipped; they must never reach the decision
-// endpoint, where they would be stored as blank decisions.
 type LifecycleFlushClient interface {
 	FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error)
+}
+
+type HarnessToolFlushClient interface {
+	FlushHarnessTool(ctx context.Context, records []json.RawMessage) (int, error)
+}
+
+type CredentialFlushClient interface {
+	FlushCredential(ctx context.Context, records []json.RawMessage) (int, error)
 }
 
 type lifecycleFlushClient struct {
@@ -148,8 +135,6 @@ func lifecycleRetryDelay(err error) (time.Duration, bool) {
 	if !errors.As(err, &flushErr) || flushErr.statusCode != http.StatusTooManyRequests {
 		return 0, false
 	}
-	// Retry-After is advisory and bounded so a malformed/misconfigured upstream
-	// cannot suspend delivery indefinitely. Missing/invalid hints retry promptly.
 	delay := flushErr.retryAfter
 	if delay <= 0 {
 		delay = time.Second
@@ -160,8 +145,6 @@ func lifecycleRetryDelay(err error) (time.Duration, bool) {
 	return delay, true
 }
 
-// lifecycleFlushLogAttrs returns only explicitly allowlisted, bounded response
-// metadata. Never inspect or log the response body or arbitrary headers.
 func lifecycleFlushLogAttrs(err error) []any {
 	var flushErr *lifecycleFlushHTTPError
 	if !errors.As(err, &flushErr) {
@@ -267,25 +250,28 @@ func boundedDigits(value string, maxLen int) bool {
 	return true
 }
 
-// NewLifecycleFlushClientFromConfig builds a client that POSTs lifecycle
-// records to <KEI_RUNTIME_CONTROL_PLANE_URL>/api/v1/runtime/audit/lifecycle:flush
-// with the installation token as an Authorization bearer. It returns nil when no
-// runtime token is configured (legacy harness mode), so the collector skips
-// lifecycle records without erroring.
-func NewLifecycleFlushClientFromConfig(cfg Config, timeout time.Duration) LifecycleFlushClient {
-	if cfg.RuntimeToken == "" {
+func NewLifecycleFlushClientFromConfig(cfg CollectorConfig, timeout time.Duration) LifecycleFlushClient {
+	if cfg.Token() == "" {
 		return nil
 	}
-	base := cfg.RuntimeControlPlaneURL
+	base := cfg.ControlPlaneURL()
 	if base == "" {
-		base = cfg.ABACURL
+		base = cfg.FlushURL()
 	}
 	return &lifecycleFlushClient{
 		baseURL: base,
 		path:    "/api/v1/runtime/audit/lifecycle:flush",
-		headers: map[string]string{"Authorization": "Bearer " + cfg.RuntimeToken},
+		headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
 		client:  &http.Client{Timeout: timeout},
 	}
+}
+
+func NewHarnessToolFlushClientFromConfig(CollectorConfig, time.Duration) HarnessToolFlushClient {
+	return nil
+}
+
+func NewCredentialFlushClientFromConfig(CollectorConfig, time.Duration) CredentialFlushClient {
+	return nil
 }
 
 func (c *lifecycleFlushClient) FlushLifecycle(ctx context.Context, records []json.RawMessage) (int, error) {
@@ -332,39 +318,20 @@ func (c *lifecycleFlushClient) FlushLifecycle(ctx context.Context, records []jso
 	return out.Upserted, nil
 }
 
-// Collector ships pending JSONL decision events to ABAC. Each run seals the
-// active spool file into a segment under the spool lock, then streams sealed
-// segments oldest first, so it never rereads data it has already shipped. Its
-// position, {segment, lines_sent}, lives in <jsonlPath>.state, so it is
-// resumable across runs, and a segment is deleted only after every line in it
-// has been acknowledged. Because the flush is idempotent (ABAC dedupes on
-// span_id), re-sending an already flushed batch after a crash is safe.
 type Collector struct {
-	jsonlPath string
-	statePath string
-	// legacyOffsetPath is the pre-segment state file: a plain count of lines
-	// already sent from the single, never-rotated spool file.
-	legacyOffsetPath string
-	spool            *auditSpool
-	abac             ABACFlushClient
-	lifecycle        LifecycleFlushClient
-	batchSize        int
-	logger           *slog.Logger
-	// open is os.Open; tests replace it to observe which files a run reads.
-	open func(name string) (*os.File, error)
+	jsonlPath         string
+	statePath         string
+	legacyOffsetPath  string
+	spool             *AuditSpool
+	FlushClient       ABACFlushClient
+	LifecycleClient   LifecycleFlushClient
+	HarnessToolClient HarnessToolFlushClient
+	CredentialClient  CredentialFlushClient
+	batchSize         int
+	logger            *slog.Logger
+	open              func(name string) (*os.File, error)
 }
 
-// collectorState is the collector's position in the spool plus the loss
-// counters it has already reported.
-type collectorState struct {
-	// Segment is the segment being shipped, or 0 when none is in progress.
-	Segment      uint64    `json:"segment"`
-	LinesSent    int       `json:"lines_sent"`
-	ReportedLoss spoolLoss `json:"reported_loss"`
-}
-
-// NewCollector builds a collector for the given JSONL path. The state file
-// defaults to <jsonlPath>.state.
 func NewCollector(jsonlPath string, abac ABACFlushClient, batchSize int) *Collector {
 	if batchSize <= 0 {
 		batchSize = 100
@@ -373,23 +340,19 @@ func NewCollector(jsonlPath string, abac ABACFlushClient, batchSize int) *Collec
 		jsonlPath:        jsonlPath,
 		statePath:        jsonlPath + ".state",
 		legacyOffsetPath: jsonlPath + ".offset",
-		// The collector never appends, so the cap does not apply to it.
-		spool:     newAuditSpool(jsonlPath, 0),
-		abac:      abac,
-		batchSize: batchSize,
-		logger:    slog.Default(),
-		open:      os.Open,
+		spool:            NewAuditSpool(jsonlPath, 0),
+		FlushClient:      abac,
+		batchSize:        batchSize,
+		logger:           slog.Default(),
+		open:             os.Open,
 	}
 }
 
-// Run flushes all pending records and returns how many were sent.
 func (c *Collector) Run(ctx context.Context) (int, error) {
 	st, err := readCollectorState(c.statePath)
 	if err != nil {
-		// Resending is safe and a stuck collector is not: start over from the
-		// oldest segment rather than failing every poll.
 		c.logger.Warn("audit collector state unreadable; resending from the oldest segment", "path", c.statePath, "error", err)
-		st = collectorState{}
+		st = &collectorState{}
 	}
 	if _, err := os.Stat(filepath.Dir(c.jsonlPath)); os.IsNotExist(err) {
 		return 0, nil
@@ -400,7 +363,7 @@ func (c *Collector) Run(ctx context.Context) (int, error) {
 		loss spoolLoss
 	)
 	err = c.spool.withLock(func() error {
-		if err := c.migrateLegacyOffset(&st); err != nil {
+		if err := c.migrateLegacyOffset(st); err != nil {
 			return err
 		}
 		meta := c.spool.readMeta()
@@ -414,7 +377,7 @@ func (c *Collector) Run(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := c.reportLoss(&st, loss); err != nil {
+	if err := c.reportLoss(st, loss); err != nil {
 		return 0, err
 	}
 
@@ -422,7 +385,7 @@ func (c *Collector) Run(ctx context.Context) (int, error) {
 	var skipped skippedRecords
 	defer func() { skipped.log(c.logger, c.jsonlPath) }()
 	for _, seg := range segs {
-		n, err := c.shipSegment(ctx, seg, &st, &skipped)
+		n, err := c.shipSegment(ctx, seg, st, &skipped)
 		sent += n
 		if err != nil {
 			return sent, err
@@ -431,12 +394,6 @@ func (c *Collector) Run(ctx context.Context) (int, error) {
 	return sent, nil
 }
 
-// migrateLegacyOffset converts a pre-segment .offset file into segment state.
-// That count describes the single spool file as it existed before this
-// version, which becomes segment 1 when it is first rotated: by a writer
-// that crossed the segment size, or here. If segment 1 was since evicted,
-// those lines are gone and the count no longer applies. Called under the
-// spool lock.
 func (c *Collector) migrateLegacyOffset(st *collectorState) error {
 	data, err := os.ReadFile(c.legacyOffsetPath)
 	if err != nil {
@@ -446,7 +403,6 @@ func (c *Collector) migrateLegacyOffset(st *collectorState) error {
 		return fmt.Errorf("read legacy offset: %w", err)
 	}
 	if _, err := os.Stat(c.statePath); err == nil {
-		// Already migrated; the remove below was interrupted.
 		return removeFile(c.legacyOffsetPath)
 	}
 	sentCount, err := strconv.Atoi(strings.TrimSpace(string(data)))
@@ -463,8 +419,6 @@ func (c *Collector) migrateLegacyOffset(st *collectorState) error {
 	case len(segs) > 0 && segs[0].seq == 1:
 		*st = collectorState{Segment: 1, LinesSent: sentCount}
 	case len(segs) == 0 && meta.NextSeq <= 1:
-		// Nothing has rotated yet, so the legacy file is still the active
-		// file. Seal it now so the count is tied to that exact data.
 		seq, err := c.spool.sealActiveLocked(&meta, 1)
 		if err != nil {
 			return err
@@ -479,9 +433,6 @@ func (c *Collector) migrateLegacyOffset(st *collectorState) error {
 	return removeFile(c.legacyOffsetPath)
 }
 
-// reportLoss logs any spool loss since the last report. Eviction must never
-// be silent: the counters live in the spool sidecar and each increase is
-// logged once here.
 func (c *Collector) reportLoss(st *collectorState, loss spoolLoss) error {
 	if loss == st.ReportedLoss {
 		return nil
@@ -501,22 +452,28 @@ func (c *Collector) reportLoss(st *collectorState, loss spoolLoss) error {
 			"refused_records", loss.LifecycleRefused-prev.LifecycleRefused,
 			"refused_records_total", loss.LifecycleRefused)
 	}
+	if loss.HarnessToolRefused > prev.HarnessToolRefused {
+		c.logger.Warn("audit spool refused harness_tool records to keep space for decisions",
+			"path", c.jsonlPath,
+			"refused_records", loss.HarnessToolRefused-prev.HarnessToolRefused,
+			"refused_records_total", loss.HarnessToolRefused)
+	}
+	if loss.CredentialRefused > prev.CredentialRefused {
+		c.logger.Warn("audit spool refused credential records to keep space for decisions",
+			"path", c.jsonlPath,
+			"refused_records", loss.CredentialRefused-prev.CredentialRefused,
+			"refused_records_total", loss.CredentialRefused)
+	}
 	if loss.OversizeRefused > prev.OversizeRefused {
 		c.logger.Warn("audit spool refused records larger than its cap",
 			"path", c.jsonlPath,
 			"refused_records", loss.OversizeRefused-prev.OversizeRefused,
 			"refused_records_total", loss.OversizeRefused)
 	}
-	// A reset sidecar lowers the counters; adopt them without logging.
 	st.ReportedLoss = loss
 	return c.writeState(*st)
 }
 
-// shipSegment streams one sealed segment in batches, resuming after the lines
-// already acknowledged when st points at it, and deletes it once every line
-// has been handled. A segment evicted before or during the read is skipped or
-// finished from the open descriptor; either way its loss was counted by the
-// writer that evicted it.
 func (c *Collector) shipSegment(ctx context.Context, seg spoolSegment, st *collectorState, skipped *skippedRecords) (int, error) {
 	skip := 0
 	if st.Segment == seg.seq {
@@ -540,8 +497,6 @@ func (c *Collector) shipSegment(ctx context.Context, seg spoolSegment, st *colle
 		if err != nil {
 			return err
 		}
-		// Advance past every line in this batch (valid or malformed) so we
-		// never re-send or re-parse them.
 		st.Segment, st.LinesSent = seg.seq, lineNo
 		batch = batch[:0]
 		return c.writeState(*st)
@@ -571,8 +526,6 @@ func (c *Collector) shipSegment(ctx context.Context, seg spoolSegment, st *colle
 		}
 	}
 
-	// Clear the position before deleting: a crash in between re-sends this
-	// segment, which is safe, rather than applying its position to another.
 	st.Segment, st.LinesSent = 0, 0
 	if err := c.writeState(*st); err != nil {
 		return sent, err
@@ -583,26 +536,37 @@ func (c *Collector) shipSegment(ctx context.Context, seg spoolSegment, st *colle
 	return sent, nil
 }
 
-// skippedRecords counts spool lines a run consumed without sending them to
-// the decision endpoint. They are logged as counts only, never contents.
 type skippedRecords struct {
-	lifecycle int
-	unknown   int
-	malformed int
+	lifecycle   int
+	harnessTool int
+	credential  int
+	unknown     int
+	malformed   int
 }
 
-func (s *skippedRecords) add(b parsedBatch, lifecycleShipped bool) {
+func (s *skippedRecords) add(b parsedBatch, lifecycleShipped, harnessToolShipped, credentialShipped bool) {
 	if !lifecycleShipped {
 		s.lifecycle += len(b.lifecycle)
+	}
+	if !harnessToolShipped {
+		s.harnessTool += len(b.harnessTool)
+	}
+	if !credentialShipped {
+		s.credential += len(b.credential)
 	}
 	s.unknown += b.unknown
 	s.malformed += b.malformed
 }
 
-// log reports what a run skipped so a record never disappears silently.
 func (s skippedRecords) log(logger *slog.Logger, path string) {
 	if s.lifecycle > 0 {
 		logger.Warn("audit collector skipped lifecycle records; no lifecycle flush route is configured", "path", path, "records", s.lifecycle)
+	}
+	if s.harnessTool > 0 {
+		logger.Warn("audit collector skipped harness_tool records; no harness_tool flush route is configured", "path", path, "records", s.harnessTool)
+	}
+	if s.credential > 0 {
+		logger.Warn("audit collector skipped credential records; no credential flush route is configured", "path", path, "records", s.credential)
 	}
 	if s.unknown > 0 {
 		logger.Warn("audit collector skipped records with an unknown event_class", "path", path, "records", s.unknown)
@@ -612,32 +576,39 @@ func (s skippedRecords) log(logger *slog.Logger, path string) {
 	}
 }
 
-// flushBatch sends a parsed batch's decisions to ABAC and its lifecycle
-// records to the lifecycle route when one is configured. It returns the
-// number of decisions sent. Flushes are idempotent, so a batch that fails
-// part way is safe to resend whole.
 func (c *Collector) flushBatch(ctx context.Context, b parsedBatch, skipped *skippedRecords) (int, error) {
-	if len(b.decisions) > 0 {
+	if len(b.decisions) > 0 && c.FlushClient != nil {
 		payload, _ := json.Marshal(map[string][]DecisionEvent{"records": b.decisions})
-		if _, err := c.abac.Flush(ctx, b.decisions); err != nil {
+		if _, err := c.FlushClient.Flush(ctx, b.decisions); err != nil {
 			return 0, err
 		}
-		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", eventClassDecision, "records_sent", len(b.decisions), "payload_bytes", len(payload))
+		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassDecision, "records_sent", len(b.decisions), "payload_bytes", len(payload))
 	}
-	if len(b.lifecycle) > 0 && c.lifecycle != nil {
+	if len(b.lifecycle) > 0 && c.LifecycleClient != nil {
 		payload, _ := json.Marshal(map[string][]json.RawMessage{"records": b.lifecycle})
-		if _, err := c.lifecycle.FlushLifecycle(ctx, b.lifecycle); err != nil {
+		if _, err := c.LifecycleClient.FlushLifecycle(ctx, b.lifecycle); err != nil {
 			return len(b.decisions), err
 		}
-		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", eventClassLifecycle, "events_sent", len(b.lifecycle), "payload_bytes", len(payload))
+		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassLifecycle, "events_sent", len(b.lifecycle), "payload_bytes", len(payload))
 	}
-	skipped.add(b, c.lifecycle != nil)
+	if len(b.harnessTool) > 0 && c.HarnessToolClient != nil {
+		payload, _ := json.Marshal(map[string][]json.RawMessage{"records": b.harnessTool})
+		if _, err := c.HarnessToolClient.FlushHarnessTool(ctx, b.harnessTool); err != nil {
+			return len(b.decisions), err
+		}
+		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassHarnessTool, "events_sent", len(b.harnessTool), "payload_bytes", len(payload))
+	}
+	if len(b.credential) > 0 && c.CredentialClient != nil {
+		payload, _ := json.Marshal(map[string][]json.RawMessage{"records": b.credential})
+		if _, err := c.CredentialClient.FlushCredential(ctx, b.credential); err != nil {
+			return len(b.decisions), err
+		}
+		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassCredential, "events_sent", len(b.credential), "payload_bytes", len(payload))
+	}
+	skipped.add(b, c.LifecycleClient != nil, c.HarnessToolClient != nil, c.CredentialClient != nil)
 	return len(b.decisions), nil
 }
 
-// RunPolling runs the collector repeatedly until ctx is cancelled. A failed
-// run leaves the offset unchanged; the next tick retries the same records.
-// Polling is optional so the existing one-shot CLI remains compatible.
 func (c *Collector) RunPolling(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		interval = time.Minute
@@ -714,15 +685,6 @@ func (c *Collector) RunPolling(ctx context.Context, interval time.Duration) erro
 	}
 }
 
-// pendingStats returns the backlog size and age of its oldest valid record.
-// These values are emitted as structured fields so a runtime can scrape them
-// as metrics without making the collector's authorization path depend on a
-// metrics server.
-//
-// The backlog is measured in bytes and files from directory metadata rather
-// than by counting records, so reporting it never reads the spool. The age
-// comes from the first pending decision in the oldest file, which is the
-// oldest record in append order; only the lines up to it are read.
 func (c *Collector) pendingStats() (pendingBytes int64, pendingFiles int, oldestAgeSeconds int64) {
 	st, _ := readCollectorState(c.statePath)
 	segs, _ := c.spool.segments()
@@ -753,8 +715,6 @@ func (c *Collector) pendingStats() (pendingBytes int64, pendingFiles int, oldest
 	return pendingBytes, pendingFiles, int64(age)
 }
 
-// firstPendingDecisionTime returns invoked_at of the first decision after
-// skip lines, reading no further than that record.
 func firstPendingDecisionTime(path string, skip int) time.Time {
 	f, err := os.Open(path)
 	if err != nil {
@@ -776,23 +736,6 @@ func firstPendingDecisionTime(path string, skip int) time.Time {
 	}
 }
 
-// readCollectorState loads the collector position. A missing file is the
-// zero state: start at the oldest segment.
-func readCollectorState(path string) (collectorState, error) {
-	var st collectorState
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return st, nil
-		}
-		return st, fmt.Errorf("read state: %w", err)
-	}
-	if err := json.Unmarshal(data, &st); err != nil {
-		return collectorState{}, fmt.Errorf("parse state: %w", err)
-	}
-	return st, nil
-}
-
 func (c *Collector) writeState(st collectorState) error {
 	data, err := json.Marshal(st)
 	if err != nil {
@@ -804,36 +747,15 @@ func (c *Collector) writeState(st collectorState) error {
 	return nil
 }
 
-func removeFile(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-// Decision and lifecycle records share one spool file and are told apart by
-// event_class. A line with no event_class is a decision: every line written
-// before the discriminator existed has none, and DecisionEvent itself never
-// carries one, so a decision still forwards to ABAC unchanged.
-const (
-	eventClassDecision  = "decision"
-	eventClassLifecycle = "lifecycle"
-)
-
-// parsedBatch is one batch of spool lines split by event class. Only
-// decisions are ever sent to the decision flush endpoint.
 type parsedBatch struct {
-	decisions []DecisionEvent
-	lifecycle []json.RawMessage
-	unknown   int
-	malformed int
+	decisions   []DecisionEvent
+	lifecycle   []json.RawMessage
+	harnessTool []json.RawMessage
+	credential  []json.RawMessage
+	unknown     int
+	malformed   int
 }
 
-// parseBatch decodes raw lines and splits them by event_class: absent or
-// "decision" is a DecisionEvent, "lifecycle" is a lifecycle record, and any
-// other class is unknown. Non-object and undecodable lines are malformed.
-// Anything that is not unambiguously a decision is never returned as one,
-// because the decision decoder would zero-fill it into a blank audit record.
 func parseBatch(lines []string) parsedBatch {
 	var out parsedBatch
 	for _, l := range lines {
@@ -849,20 +771,24 @@ func parseBatch(lines []string) parsedBatch {
 			out.malformed++
 			continue
 		}
-		class := eventClassDecision
+		class := EventClassDecision
 		if probe.EventClass != nil {
 			class = *probe.EventClass
 		}
 		switch class {
-		case eventClassDecision:
-			e, ok := parseAuditLine(l)
+		case EventClassDecision:
+			e, ok := ParseAuditLine(l)
 			if !ok {
 				out.malformed++
 				continue
 			}
 			out.decisions = append(out.decisions, e)
-		case eventClassLifecycle:
+		case EventClassLifecycle:
 			out.lifecycle = append(out.lifecycle, json.RawMessage(raw))
+		case EventClassHarnessTool:
+			out.harnessTool = append(out.harnessTool, json.RawMessage(raw))
+		case EventClassCredential:
+			out.credential = append(out.credential, json.RawMessage(raw))
 		default:
 			out.unknown++
 		}
@@ -870,59 +796,18 @@ func parseBatch(lines []string) parsedBatch {
 	return out
 }
 
-func runCollector(args []string) int {
-	fs := flag.NewFlagSet("collector", flag.ContinueOnError)
-	jsonlPath := fs.String("jsonl", "", "audit JSONL file path (default $KEI_PROXY_AUDIT)")
-	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
-	batchSize := fs.Int("batch-size", 100, "records per flush batch")
-	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
-	poll := fs.Bool("poll", false, "poll for new records until terminated")
-	pollInterval := fs.Duration("poll-interval", time.Minute, "poll interval when --poll is enabled")
-
-	if err := fs.Parse(args); err != nil {
-		return 1
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if value == "" {
+		return 0
 	}
-
-	cfg := configFromEnv()
-	if *jsonlPath == "" {
-		*jsonlPath = cfg.AuditPath
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
 	}
-	if *abacURL != "" {
-		cfg.ABACURL = *abacURL
-		// In runtime mode the collector targets the runtime flush endpoint on
-		// the control-plane gateway; honor an explicit override there too.
-		if cfg.IsRuntime() {
-			cfg.RuntimeControlPlaneURL = *abacURL
-		}
-	}
-	if *jsonlPath == "" {
-		fmt.Fprintln(os.Stderr, "Error: --jsonl or KEI_PROXY_AUDIT is required")
-		return 1
-	}
-	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid collector configuration: %v\n", err)
-		return 1
-	}
-
-	client := NewABACFlushClientFromConfig(cfg, time.Duration(*timeout)*time.Second)
-	lifecycleClient := NewLifecycleFlushClientFromConfig(cfg, time.Duration(*timeout)*time.Second)
-	collector := NewCollector(*jsonlPath, client, *batchSize)
-	collector.lifecycle = lifecycleClient
-	if *poll {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		if err := collector.RunPolling(ctx, *pollInterval); err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+	if parsed, err := time.Parse(time.RFC1123, value); err == nil {
+		if d := parsed.Sub(now); d > 0 {
+			return d
 		}
 		return 0
 	}
-
-	sent, err := collector.Run(context.Background())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
-	}
-	_, _ = fmt.Fprintf(os.Stdout, "flushed %d records\n", sent)
 	return 0
 }

@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -11,8 +11,24 @@ import (
 	"time"
 )
 
-// TestEnvConfigLoadsAuditPath verifies the documented KEI_PROXY_AUDIT env var
-// populates the audit path for both the authorize subcommand and the collector.
+// mockCollectorConfig implements CollectorConfig so tests can exercise the
+// flush-client factories without importing the root Config type.
+type mockCollectorConfig struct {
+	runtimeURL  string
+	token       string
+	flushURL    string
+	flushSecret string
+}
+
+func (m mockCollectorConfig) IsRuntime() bool         { return m.token != "" }
+func (m mockCollectorConfig) Token() string           { return m.token }
+func (m mockCollectorConfig) ControlPlaneURL() string { return m.runtimeURL }
+func (m mockCollectorConfig) FlushURL() string        { return m.flushURL }
+func (m mockCollectorConfig) FlushSecret() string     { return m.flushSecret }
+
+// TestLifecycleFlushPacesRequestsAndCapturesRetryAfter verifies the lifecycle
+// flush client rate-limits itself to one request per 100ms and surfaces the
+// Retry-After header from a 429 response.
 func TestLifecycleFlushPacesRequestsAndCapturesRetryAfter(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,14 +77,6 @@ func TestLifecycleRetryDelayFallbackAndCap(t *testing.T) {
 	}
 }
 
-func TestEnvConfigLoadsAuditPath(t *testing.T) {
-	t.Setenv("KEI_PROXY_AUDIT", "/var/lib/kei/audit.jsonl")
-	cfg := configFromEnv()
-	if cfg.AuditPath != "/var/lib/kei/audit.jsonl" {
-		t.Fatalf("AuditPath = %q, want /var/lib/kei/audit.jsonl", cfg.AuditPath)
-	}
-}
-
 // TestFlushClientRuntimeMode verifies a runtime-mode collector flushes to the
 // runtime control-plane path and authenticates with the installation token as
 // an Authorization bearer, never the internal API secret.
@@ -82,11 +90,11 @@ func TestFlushClientRuntimeMode(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := Config{
-		RuntimeControlPlaneURL: srv.URL,
-		RuntimeToken:           "rt-token",
-		ABACURL:                "http://internal-abac:8080",
-		ABACSecret:             "internal-secret",
+	cfg := mockCollectorConfig{
+		runtimeURL:  srv.URL,
+		token:       "rt-token",
+		flushURL:    "http://internal-abac:8080",
+		flushSecret: "internal-secret",
 	}
 	client := NewABACFlushClientFromConfig(cfg, 5*time.Second)
 	n, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-1", Decision: "allow"}})
@@ -121,7 +129,7 @@ func TestFlushClientLegacyMode(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		cfg := Config{ABACURL: srv.URL, ABACSecret: "legacy-secret"}
+		cfg := mockCollectorConfig{flushURL: srv.URL, flushSecret: "legacy-secret"}
 		client := NewABACFlushClientFromConfig(cfg, 5*time.Second)
 		n, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-2", Decision: "deny"}})
 		if err != nil {
@@ -149,7 +157,7 @@ func TestFlushClientLegacyMode(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		cfg := Config{ABACURL: srv.URL}
+		cfg := mockCollectorConfig{flushURL: srv.URL}
 		client := NewABACFlushClientFromConfig(cfg, 5*time.Second)
 		if _, err := client.Flush(context.Background(), nil); err != nil {
 			t.Fatalf("flush: %v", err)
@@ -191,7 +199,7 @@ func TestFlushClientRejectsNonOK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := Config{ABACURL: srv.URL}
+	cfg := mockCollectorConfig{flushURL: srv.URL}
 	client := NewABACFlushClientFromConfig(cfg, 5*time.Second)
 	_, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-3"}})
 	if err == nil || !strings.Contains(err.Error(), "401") {
@@ -222,9 +230,9 @@ func TestLifecycleFlushFailureLogsAllowlistedMetadataOnly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewLifecycleFlushClientFromConfig(Config{
-		RuntimeControlPlaneURL: srv.URL,
-		RuntimeToken:           tokenSentinel,
+	client := NewLifecycleFlushClientFromConfig(mockCollectorConfig{
+		runtimeURL: srv.URL,
+		token:      tokenSentinel,
 	}, 5*time.Second)
 	err := func() error {
 		_, err := client.FlushLifecycle(context.Background(), []json.RawMessage{json.RawMessage(`{"event_type":"` + requestSentinel + `"}`)})

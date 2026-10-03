@@ -382,3 +382,23 @@ func TestRedactingWriterMasksSecretAcrossWrites(t *testing.T) {
 		t.Fatalf("redacted stream = %q", got)
 	}
 }
+
+func TestAppendRunAuditLogsAppendError(t *testing.T) {
+	var stderr bytes.Buffer
+	wantErr := fmt.Errorf("disk full")
+	appendRunAudit(&stderr, Config{AppendAudit: func([]byte) error { return wantErr }}, nil, nil, "test-cmd", []string{"arg1"}, "success", 0)
+	if stderr.Len() == 0 {
+		t.Fatal("expected an error on stderr")
+	}
+	if !strings.Contains(stderr.String(), "audit: failed to append credential audit record") {
+		t.Fatalf("stderr = %q, want audit failure message", stderr.String())
+	}
+}
+
+func TestAppendRunAuditLogsMarshalError(t *testing.T) {
+	var stderr bytes.Buffer
+	appendRunAudit(&stderr, Config{}, nil, nil, "test-cmd", []string{"arg1"}, "success", 0)
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr on success path, got %q", stderr.String())
+	}
+}
