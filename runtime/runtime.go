@@ -1,7 +1,10 @@
 // Package runtime contains customer-runtime control-plane operations.
 package runtime
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 // ErrInstallationRevoked is returned when the runtime installation has been
 // revoked or is inactive. Callers should clear local policy state.
@@ -45,3 +48,28 @@ type IdentityFunc func() (*Identity, error)
 // for the given identity. The caller supplies the closure from the root
 // package where syncPolicyBundle and Config live.
 type SyncBundleFunc func(identity *Identity) error
+
+// HeartbeatClient is the subset of the root RuntimeClient that the heartbeat
+// loop needs, abstracted so runtime/ never imports the root package.
+type HeartbeatClient interface {
+	Heartbeat(ctx context.Context, token string, report HeartbeatReport) error
+}
+
+// HeartbeatAgent is one whoami agent assignment on the identity event.
+type HeartbeatAgent struct {
+	AgentID   string `json:"agent_id"`
+	IsDefault bool   `json:"is_default"`
+}
+
+// HeartbeatIdentity is the subset of RuntimeIdentity that the heartbeat
+// emitter serialises for the identity stdout event.
+type HeartbeatIdentity struct {
+	ID            string
+	OrgID         string
+	WorkspaceID   *string
+	Platform      string
+	Status        string
+	BindingStatus string
+	AgentID       string
+	Agents        []HeartbeatAgent
+}

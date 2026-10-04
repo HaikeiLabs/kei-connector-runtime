@@ -16,6 +16,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/crypto"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 // runRuntime provides the startup contract used by a Bot Runtime image. The
@@ -120,7 +121,7 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	if *parentStdin {
 		var cancel context.CancelFunc
-		ctx, cancel = watchParentStdin(ctx, stdin)
+		ctx, cancel = keiruntime.WatchParentStdin(ctx, stdin)
 		defer cancel()
 	}
 	if *output == "jsonl" {
@@ -144,20 +145,20 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
 	}
 	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
-	loop := &heartbeatLoop{
-		client:   newClient(cfg.RuntimeControlPlaneURL, *timeout),
-		token:    cfg.RuntimeToken,
-		report:   HeartbeatReport{RuntimeVersion: version},
-		interval: *interval,
-		warn:     stderr,
-		now:      time.Now,
-		jitter:   jitterInterval,
-		appendLifecycle: func(e LifecycleEvent) error {
+	loop := &keiruntime.HeartbeatLoop{
+		Client:   newClient(cfg.RuntimeControlPlaneURL, *timeout),
+		Token:    cfg.RuntimeToken,
+		Report:   HeartbeatReport{RuntimeVersion: version},
+		Interval: *interval,
+		Warn:     stderr,
+		Now:      time.Now,
+		Jitter:   keiruntime.JitterInterval,
+		AppendLifecycle: func(e keiruntime.LifecycleEvent) error {
 			return appendLifecycleEvent(auditPath, auditMax, e)
 		},
-		policyBundle: func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) },
+		PolicyBundle: func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) },
 	}
-	if err := loop.run(ctx, false); err != nil {
+	if err := loop.Run(ctx, false); err != nil {
 		if IsRuntimeRevocation(err) {
 			RevokePolicyState(cfg)
 		}
@@ -169,37 +170,38 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 
 func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(string) string, stdout, stderr io.Writer, timeout, interval time.Duration, attached bool, newClient runtimeClientFactory) int {
 	started := time.Now()
-	runID, runIDErr := heartbeatRunID(getenv)
+	runID, runIDErr := keiruntime.HeartbeatRunID(getenv)
 	if runIDErr != nil {
 		runID = uuid.NewString()
 	}
-	events := &heartbeatEmitter{out: stdout, runID: runID}
-	envelope, err := harnessEnvelopeFromEnv(getenv)
-	if err == nil {
-		err = runIDErr
+	events := keiruntime.NewHeartbeatEmitter(stdout, runID)
+	envelope, envErr := keiruntime.HarnessEnvelopeFromEnv(getenv)
+	if envErr == nil {
+		envErr = runIDErr
 	}
-	if err == nil && !cfg.IsRuntime() {
-		err = errors.New("KEI_RUNTIME_TOKEN is required for runtime heartbeat")
+	if envErr == nil && !cfg.IsRuntime() {
+		envErr = errors.New("KEI_RUNTIME_TOKEN is required for runtime heartbeat")
 	}
-	if err == nil {
-		err = cfg.Validate()
+	if envErr == nil {
+		envErr = cfg.Validate()
 	}
-	if err != nil {
-		events.terminal(heartbeatReasonConfigInvalid)
-		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", err)
+	if envErr != nil {
+		events.Terminal(keiruntime.ReasonConfigInvalid)
+		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", envErr)
 		return heartbeatExitConfig
 	}
 	if attached {
 		if envelope == nil {
-			envelope = &HarnessEnvelope{}
+			envelope = &keiruntime.HarnessEnvelope{}
 		}
 		envelope.Link = "attached"
 	}
+	client := newClient(cfg.RuntimeControlPlaneURL, timeout)
 	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
-	loop := &heartbeatLoop{
-		client: newClient(cfg.RuntimeControlPlaneURL, timeout),
-		token:  cfg.RuntimeToken,
-		report: HeartbeatReport{
+	loop := &keiruntime.HeartbeatLoop{
+		Client: client,
+		Token:  cfg.RuntimeToken,
+		Report: keiruntime.HeartbeatReport{
 			RuntimeVersion:   version,
 			SchemaVersion:    2,
 			RunID:            runID,
@@ -207,17 +209,17 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 			RuntimeStartedAt: started.UTC().Format(time.RFC3339),
 			Harness:          envelope,
 		},
-		versioned: true,
-		interval:  interval,
-		events:    events,
-		warn:      stderr,
-		now:       time.Now,
-		jitter:    jitterInterval,
-		appendLifecycle: func(e LifecycleEvent) error {
+		Versioned: true,
+		Interval:  interval,
+		Events:    events,
+		Warn:      stderr,
+		Now:       time.Now,
+		Jitter:    keiruntime.JitterInterval,
+		AppendLifecycle: func(e keiruntime.LifecycleEvent) error {
 			return appendLifecycleEvent(auditPath, auditMax, e)
 		},
 	}
-	identity, code := loop.resolveIdentity(ctx, cfg)
+	identity, code := resolveIdentity(ctx, client, loop, cfg)
 	if identity == nil {
 		if code == heartbeatExitUnauthorized {
 			RevokePolicyState(cfg)
@@ -227,67 +229,14 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 	if err := SyncPolicyBundle(ctx, cfg, identity, timeout); err != nil {
 		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
 	}
-	loop.policyBundle = func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) }
-	events.identity(identity)
+	loop.PolicyBundle = func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) }
+	events.Identity(toHeartbeatIdentity(identity), version)
 	// The first beat is sent at once and stands in for bootstrap's heartbeat.
-	err = loop.run(ctx, true)
+	err := loop.Run(ctx, true)
 	if IsRuntimeRevocation(err) {
 		RevokePolicyState(cfg)
 	}
 	return heartbeatExitFor(err, events)
-}
-
-// resolveIdentity fetches the authoritative installation identity from whoami.
-// The token is the only identity source; nothing declared by the harness is
-// consulted. A transient failure is reported as a beat without a seq and
-// retried each interval, so a catalog outage at startup reads as a catalog
-// problem rather than a crash-looping runtime. It returns a nil identity and
-// the exit code when it gives up or ctx ends.
-func (l *heartbeatLoop) resolveIdentity(ctx context.Context, cfg Config) (*RuntimeIdentity, int) {
-	for {
-		started := l.now()
-		identity, err := l.client.WhoAmI(ctx, l.token)
-		if err != nil && retryableInTick(classifyWhoamiError(err)) {
-			if !sleepContext(ctx, l.retryDelay()) {
-				return nil, heartbeatExitOK
-			}
-			identity, err = l.client.WhoAmI(ctx, l.token)
-		}
-		if ctx.Err() != nil {
-			return nil, heartbeatExitOK
-		}
-		if err == nil {
-			if identity == nil {
-				l.events.terminal(heartbeatReasonContractMismatch)
-				return nil, heartbeatExitContract
-			}
-			if err := registerCredentialSyncKey(ctx, l.client, cfg); err != nil {
-				fmt.Fprintf(l.warn, "runtime heartbeat failed: %v\n", err)
-				return nil, heartbeatExitTransient
-			}
-			return identity, heartbeatExitOK
-		}
-		outcome := classifyWhoamiError(err)
-		switch {
-		case outcome == HeartbeatUnauthorized:
-			l.events.terminal(string(HeartbeatUnauthorized))
-			return nil, heartbeatExitUnauthorized
-		case !outcome.transient():
-			l.events.terminal(heartbeatReasonContractMismatch)
-			return nil, heartbeatExitContract
-		}
-		wait := l.jitter(l.interval)
-		var failure *WhoamiFailure
-		status := 0
-		if errors.As(err, &failure) {
-			status = failure.StatusCode
-		}
-		latency, next := l.now().Sub(started).Milliseconds(), wait.Milliseconds()
-		l.events.emit(heartbeatEvent{Event: "beat", At: started.UTC().Format(time.RFC3339), Outcome: outcome, HTTPStatus: status, LatencyMS: &latency, NextInMS: &next})
-		if !sleepContext(ctx, wait) {
-			return nil, heartbeatExitOK
-		}
-	}
 }
 
 // classifyWhoamiError places a whoami failure on the runtime -> catalog leg. A
@@ -310,17 +259,17 @@ func classifyWhoamiError(err error) HeartbeatOutcome {
 
 // heartbeatExitFor emits the terminal event for a loop result and maps it to
 // the supervised exit code.
-func heartbeatExitFor(err error, events *heartbeatEmitter) int {
+func heartbeatExitFor(err error, events *keiruntime.HeartbeatEmitter) int {
 	if err == nil {
 		return heartbeatExitOK
 	}
-	failure := classifyHeartbeatError(err)
+	failure := keiruntime.ClassifyHeartbeatError(err)
 	switch failure.Outcome {
 	case HeartbeatUnauthorized:
-		events.terminal(string(HeartbeatUnauthorized))
+		events.Terminal(string(HeartbeatUnauthorized))
 		return heartbeatExitUnauthorized
 	case HeartbeatCatalogRejected:
-		events.terminal(string(HeartbeatCatalogRejected))
+		events.Terminal(string(HeartbeatCatalogRejected))
 		return heartbeatExitContract
 	default:
 		return heartbeatExitTransient
