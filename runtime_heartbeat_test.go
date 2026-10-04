@@ -158,6 +158,7 @@ type fakeCatalog struct {
 	rawBodies       []string
 	bodies          []map[string]any
 	hangHeartbeats  chan struct{}
+	whoamiCalls     int
 }
 
 func newFakeCatalog(t *testing.T) (*fakeCatalog, *httptest.Server) {
@@ -169,27 +170,37 @@ func newFakeCatalog(t *testing.T) (*fakeCatalog, *httptest.Server) {
 		heartbeatStatus: http.StatusNoContent,
 	}
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c.mu.Lock()
-		body, _ := io.ReadAll(r.Body)
-		r.Body.Close()
-		raw := string(body)
-		c.rawBodies = append(c.rawBodies, raw)
-		var parsed map[string]any
-		json.Unmarshal(body, &parsed)
-		c.bodies = append(c.bodies, parsed)
-		whoami := c.whoami
-		status := c.heartbeatStatus
-		c.mu.Unlock()
-
-		if strings.HasSuffix(r.URL.Path, "/whoami") {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/whoami"):
+			c.mu.Lock()
+			c.whoamiCalls++
+			whoami := c.whoami
+			c.mu.Unlock()
 			whoami(w)
-			return
-		}
-		if status != http.StatusNoContent {
+
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			c.mu.Lock()
+			body, _ := io.ReadAll(r.Body)
+			r.Body.Close()
+			raw := string(body)
+			c.rawBodies = append(c.rawBodies, raw)
+			var parsed map[string]any
+			json.Unmarshal(body, &parsed)
+			c.bodies = append(c.bodies, parsed)
+			status, hang := c.heartbeatStatus, c.hangHeartbeats
+			c.mu.Unlock()
+
+			if hang != nil {
+				select {
+				case <-hang:
+				case <-r.Context().Done():
+				}
+			}
 			w.WriteHeader(status)
-			return
+
+		default:
+			t.Errorf("unexpected runtime path %q", r.URL.Path)
 		}
-		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(s.Close)
 	return c, s
@@ -204,7 +215,7 @@ func (c *fakeCatalog) heartbeats() int {
 func (c *fakeCatalog) whoamis() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.rawBodies)
+	return c.whoamiCalls
 }
 
 var supervisedEnv = map[string]string{
@@ -216,22 +227,14 @@ var supervisedEnv = map[string]string{
 	"KEI_DEPLOYMENT_ENV":        "test",
 }
 
-func startHeartbeat(t *testing.T, server *httptest.Server, stdin io.Reader, extraEnv map[string]string, extraArgs ...string) *heartbeatRun {
+func startHeartbeat(t *testing.T, server *httptest.Server, stdin io.Reader, env map[string]string, args ...string) *heartbeatRun {
 	t.Helper()
-	env := envMap(extraEnv)
-	cfg := Config{
-		RuntimeToken:           heartbeatTestToken,
-		RuntimeControlPlaneURL: server.URL,
-	}
-	args := append([]string{"heartbeat"}, extraArgs...)
-	run := &heartbeatRun{
-		code: make(chan int, 1),
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	run.cancel = cancel
+	run := &heartbeatRun{code: make(chan int, 1), cancel: cancel}
+	t.Cleanup(cancel)
+	cfg := Config{RuntimeToken: heartbeatTestToken, RuntimeControlPlaneURL: server.URL}
 	go func() {
-		code := runRuntimeHeartbeat(ctx, args, stdin, &run.stdout, &run.stderr, cfg, func(key string) string { return env[key] }, NewRuntimeClient)
-		run.code <- code
+		run.code <- runRuntimeHeartbeat(ctx, append([]string{"--interval", "1s", "--timeout", "1s"}, args...), stdin, &run.stdout, &run.stderr, cfg, envMap(env), NewRuntimeClient)
 	}()
 	return run
 }
@@ -245,34 +248,27 @@ type heartbeatRun struct {
 
 func (r *heartbeatRun) exit(t *testing.T) int {
 	t.Helper()
-	r.cancel()
 	select {
 	case code := <-r.code:
 		return code
-	case <-time.After(time.Second):
-		t.Fatal("heartbeat did not exit within 1s of cancellation")
+	case <-time.After(3 * time.Second):
+		t.Fatal("runtime heartbeat did not exit")
 		return -1
 	}
 }
 
-func envMap(extra map[string]string) map[string]string {
-	env := make(map[string]string, len(extra)+len(supervisedEnv))
-	for k, v := range supervisedEnv {
-		env[k] = v
-	}
-	for k, v := range extra {
-		env[k] = v
-	}
-	return env
+func envMap(values map[string]string) func(string) string {
+	return func(key string) string { return values[key] }
 }
 
 func TestRuntimeHeartbeatJSONLReportsIdentityAndV2Beat(t *testing.T) {
 	catalog, server := newFakeCatalog(t)
 	run := startHeartbeat(t, server, nil, supervisedEnv, "--output", "jsonl")
-	waitFor(t, "a heartbeat", func() bool { return catalog.heartbeats() > 0 })
+	waitFor(t, "the first beat event", func() bool { return len(eventsOf(heartbeatEvents(t, run.stdout.String()), "beat")) > 0 })
 	run.cancel()
-	run.exit(t)
-
+	if code := run.exit(t); code != heartbeatExitOK {
+		t.Fatalf("exit = %d, want 0 on cancellation; stderr=%s", code, run.stderr.String())
+	}
 	events := heartbeatEvents(t, run.stdout.String())
 	if len(events) < 2 {
 		t.Fatalf("got %d events, want at least 2 (identity + beat)", len(events))
