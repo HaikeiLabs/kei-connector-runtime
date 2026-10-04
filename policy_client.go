@@ -21,6 +21,7 @@ import (
 
 var (
 	ErrPolicyInstallationRevoked = errors.New("runtime installation is revoked or inactive")
+	ErrPolicyAuthorizationDenied = errors.New("runtime policy endpoint denied authorization")
 	ErrPolicyBundleNotReady      = errors.New("policy bundle is not ready")
 )
 
@@ -99,7 +100,7 @@ func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (bod
 	defer resp.Body.Close()
 	version, _ = strconv.ParseInt(resp.Header.Get("Kei-Policy-Bundle-Version"), 10, 64)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		err = ErrPolicyInstallationRevoked
+		err = fmt.Errorf("%w: bundle endpoint returned HTTP %d", ErrPolicyAuthorizationDenied, resp.StatusCode)
 		return
 	}
 	if resp.StatusCode == http.StatusConflict {
@@ -149,7 +150,7 @@ func (c *policyControlClient) ResolveSubject(ctx context.Context, req subjectRes
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return policybundle.Subject{}, ErrPolicyInstallationRevoked
+		return policybundle.Subject{}, fmt.Errorf("%w: subject resolution endpoint returned HTTP %d", ErrPolicyAuthorizationDenied, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return policybundle.Subject{}, fmt.Errorf("subject resolution returned status %d", resp.StatusCode)
@@ -198,6 +199,10 @@ func SyncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity
 	}
 	if errors.Is(err, ErrPolicyInstallationRevoked) {
 		_ = store.Revoke(time.Now().UTC())
+		return err
+	}
+	if errors.Is(err, ErrPolicyAuthorizationDenied) {
+		_ = store.RefreshFailed(time.Now().UTC())
 		return err
 	}
 	if err != nil {
