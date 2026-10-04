@@ -64,12 +64,16 @@ func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
 	}
 }
 
-func TestRunAuthorizeRejectsInvokingSubjectFlag(t *testing.T) {
+func TestRunAuthorizeAcceptsInvokingSubjectFlag(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
-	code := runAuthorize([]string{"--tool", "web_search", "--invoking-subject", "victim"})
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1 (unknown flag --invoking-subject)", code)
+	stderr := captureStderr(func() {
+		if code := runAuthorize([]string{"--tool", "web_search", "--invoking-subject", "victim"}); code != 1 {
+			t.Fatalf("exit = %d, want startup failure", code)
+		}
+	})
+	if strings.Contains(stderr, "flag provided but not defined") {
+		t.Fatalf("invoking-subject flag rejected: %s", stderr)
 	}
 }
 

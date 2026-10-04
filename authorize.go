@@ -56,6 +56,7 @@ func runAuthorize(args []string) int {
 	resources := fs.String("resources", envOr("KEI_PROXY_RESOURCES", ""), "comma-separated resources touched (defaults to --resource)")
 
 	userID := fs.String("user-id", "", "user_id to authorize as (alias for --user)")
+	invokingSubjectFlag := fs.String("invoking-subject", "", "canonical invoking subject for audit identity propagation")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -150,8 +151,8 @@ func runAuthorize(args []string) int {
 		}
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, reason, err)
 	}
-	invokingSubject := ""
-	if cfg.IsRuntime() {
+	invokingSubject := *invokingSubjectFlag
+	if invokingSubject == "" && cfg.IsRuntime() {
 		if s, err := session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken).Subject(context.Background()); err == nil {
 			invokingSubject = s
 		}

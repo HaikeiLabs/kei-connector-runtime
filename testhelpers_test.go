@@ -6,6 +6,19 @@ import (
 	"os"
 )
 
+func captureStderr(f func()) string {
+	orig := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	f()
+	_ = w.Close()
+	os.Stderr = orig
+	var b bytes.Buffer
+	_, _ = io.Copy(&b, r)
+	_ = r.Close()
+	return b.String()
+}
+
 func captureStdout(f func()) string {
 	orig := os.Stdout
 	r, w, _ := os.Pipe()

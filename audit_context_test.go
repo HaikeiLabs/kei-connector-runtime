@@ -47,6 +47,26 @@ func TestBuildDecisionEventPreservesCanonicalContext(t *testing.T) {
 	}
 }
 
+func TestBuildDecisionEventInvokingSubjectFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, invokingSubject, user, want string
+	}{
+		{name: "explicit caller", invokingSubject: "human:42", user: "user:7", want: "human:42"},
+		{name: "omitted caller", user: "user:7", want: "user:7"},
+		{name: "empty caller", invokingSubject: "", user: "user:7", want: "user:7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
+				InvokingSubject: tc.invokingSubject,
+				User:            tc.user,
+			}, &AuthorizeResponse{}, AuthorizeOutput{Decision: "allow"}, "")
+			if event.InvokingSubject != tc.want {
+				t.Fatalf("invoking_subject=%q, want %q", event.InvokingSubject, tc.want)
+			}
+		})
+	}
+}
+
 func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
 	event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
 		SpanID: "span-1",
