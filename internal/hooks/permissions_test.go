@@ -120,3 +120,158 @@ func TestCanonicalJSONSortsObjectKeys(t *testing.T) {
 		t.Fatalf("canonical JSON = %s", got)
 	}
 }
+
+// TestOpencodeSkillTaggingAcrossSession verifies that an opencode skill tool
+// call sets the session's active skill and that subsequent tool calls in the
+// same session are tagged with it.
+func TestOpencodeSkillTaggingAcrossSession(t *testing.T) {
+	stateDir := t.TempDir()
+	var spool []byte
+	cfg := Config{
+		RuntimeStateDir: stateDir,
+		AppendAudit: func(record []byte) error {
+			spool = append(spool, record...)
+			spool = append(spool, '\n')
+			return nil
+		},
+	}
+	report := func(input string) {
+		t.Helper()
+		var stdout bytes.Buffer
+		if code := ReportPermissions([]string{"opencode", "--harness", "h1"}, strings.NewReader(input), &stdout, cfg); code != 0 {
+			t.Fatalf("exit = %d", code)
+		}
+	}
+	report(`{"tool_name":"skill","tool_input":{"skill":"pdf"},"session_id":"s1","native_decision":"allow"}`)
+	report(`{"tool_name":"bash","tool_input":{"command":"git status"},"session_id":"s1","native_decision":"allow"}`)
+	report(`{"tool_name":"read","tool_input":{"file_path":"/tmp/x"},"session_id":"s1","native_decision":"allow"}`)
+
+	lines := strings.Split(strings.TrimSpace(string(spool)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("spool lines = %d, want 3", len(lines))
+	}
+	for i, line := range lines {
+		var ev permissionEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal line %d: %v", i, err)
+		}
+		if ev.Skill != "pdf" {
+			t.Fatalf("line %d skill = %q, want pdf", i, ev.Skill)
+		}
+	}
+}
+
+// TestOpencodeSkillChangesAcrossSessions verifies the active skill is keyed by
+// session: a second session keeps its own skill, and a later skill call in the
+// first session updates it.
+func TestOpencodeSkillChangesAcrossSessions(t *testing.T) {
+	stateDir := t.TempDir()
+	var spool []byte
+	cfg := Config{
+		RuntimeStateDir: stateDir,
+		AppendAudit: func(record []byte) error {
+			spool = append(spool, record...)
+			spool = append(spool, '\n')
+			return nil
+		},
+	}
+	report := func(input string) {
+		t.Helper()
+		var stdout bytes.Buffer
+		if code := ReportPermissions([]string{"opencode", "--harness", "h1"}, strings.NewReader(input), &stdout, cfg); code != 0 {
+			t.Fatalf("exit = %d", code)
+		}
+	}
+	report(`{"tool_name":"skill","tool_input":{"skill":"pdf"},"session_id":"s1","native_decision":"allow"}`)
+	report(`{"tool_name":"skill","tool_input":{"skill":"docx"},"session_id":"s2","native_decision":"allow"}`)
+	report(`{"tool_name":"bash","tool_input":{"command":"ls"},"session_id":"s1","native_decision":"allow"}`)
+	report(`{"tool_name":"bash","tool_input":{"command":"ls"},"session_id":"s2","native_decision":"allow"}`)
+
+	lines := strings.Split(strings.TrimSpace(string(spool)), "\n")
+	want := []string{"pdf", "docx", "pdf", "docx"}
+	if len(lines) != len(want) {
+		t.Fatalf("spool lines = %d, want %d", len(lines), len(want))
+	}
+	for i, line := range lines {
+		var ev permissionEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal line %d: %v", i, err)
+		}
+		if ev.Skill != want[i] {
+			t.Fatalf("line %d skill = %q, want %q", i, ev.Skill, want[i])
+		}
+	}
+}
+
+// TestNonOpencodeHarnessesHaveNoSkill verifies claude and codex never carry a
+// skill, even when the input is a skill-shaped tool call.
+func TestNonOpencodeHarnessesHaveNoSkill(t *testing.T) {
+	stateDir := t.TempDir()
+	for _, kind := range []string{"claude", "codex"} {
+		t.Run(kind, func(t *testing.T) {
+			var spool []byte
+			cfg := Config{
+				RuntimeStateDir: stateDir,
+				AppendAudit: func(record []byte) error {
+					spool = append(spool, record...)
+					return nil
+				},
+			}
+			var stdout bytes.Buffer
+			input := `{"tool_name":"skill","tool_input":{"skill":"pdf"},"session_id":"s1","native_decision":"allow"}`
+			if code := ReportPermissions([]string{kind, "--harness", "h1"}, strings.NewReader(input), &stdout, cfg); code != 0 {
+				t.Fatalf("exit = %d", code)
+			}
+			var ev permissionEvent
+			if err := json.Unmarshal(spool, &ev); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if ev.Skill != "" {
+				t.Fatalf("skill = %q, want empty for %s", ev.Skill, kind)
+			}
+			// The skill field (not the "tool":"skill" name) must be omitted.
+			if bytes.Contains(spool, []byte(`"skill":"`)) {
+				t.Fatalf("skill field present in spool: %s", spool)
+			}
+		})
+	}
+}
+
+// TestActiveSkillStorePersists verifies the store survives across store
+// instances (simulating separate hook processes) and is keyed by session.
+func TestActiveSkillStorePersists(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenActiveSkillStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("s1", "pdf"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("s2", "docx"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh instance reads the same values back.
+	store2, err := OpenActiveSkillStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store2.Get("s1"); got != "pdf" {
+		t.Fatalf("Get(s1) = %q, want pdf", got)
+	}
+	if got, _ := store2.Get("s2"); got != "docx" {
+		t.Fatalf("Get(s2) = %q, want docx", got)
+	}
+	if got, _ := store2.Get("unknown"); got != "" {
+		t.Fatalf("Get(unknown) = %q, want empty", got)
+	}
+}
+
+// TestActiveSkillStoreBlankDirFailsClosed verifies a blank state directory is
+// an error rather than silently dropping attribution.
+func TestActiveSkillStoreBlankDirFailsClosed(t *testing.T) {
+	if _, err := OpenActiveSkillStore("   "); err == nil {
+		t.Fatal("expected an error for a blank state directory")
+	}
+}

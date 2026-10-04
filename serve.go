@@ -124,6 +124,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	if cfg.AuditPath != "" {
 		audit := keiruntime.NewCollector(cfg.AuditPath, keiruntime.NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
 		audit.LifecycleClient = keiruntime.NewLifecycleFlushClientFromConfig(cfg, shutdownFlushTimeout)
+		audit.HarnessToolClient = keiruntime.NewHarnessToolFlushClientFromConfig(cfg, shutdownFlushTimeout)
 		stopCollector = collector.Service{
 			Flusher:           audit,
 			Path:              cfg.AuditPath,

@@ -131,11 +131,22 @@ func (e *lifecycleFlushHTTPError) Error() string {
 }
 
 func lifecycleRetryDelay(err error) (time.Duration, bool) {
-	var flushErr *lifecycleFlushHTTPError
-	if !errors.As(err, &flushErr) || flushErr.statusCode != http.StatusTooManyRequests {
+	var lifecycleErr *lifecycleFlushHTTPError
+	if errors.As(err, &lifecycleErr) {
+		return throttleDelay(lifecycleErr.statusCode, lifecycleErr.retryAfter)
+	}
+	var harnessErr *harnessToolFlushHTTPError
+	if errors.As(err, &harnessErr) {
+		return throttleDelay(harnessErr.statusCode, harnessErr.retryAfter)
+	}
+	return 0, false
+}
+
+func throttleDelay(statusCode int, retryAfter time.Duration) (time.Duration, bool) {
+	if statusCode != http.StatusTooManyRequests {
 		return 0, false
 	}
-	delay := flushErr.retryAfter
+	delay := retryAfter
 	if delay <= 0 {
 		delay = time.Second
 	}
@@ -266,8 +277,158 @@ func NewLifecycleFlushClientFromConfig(cfg CollectorConfig, timeout time.Duratio
 	}
 }
 
-func NewHarnessToolFlushClientFromConfig(CollectorConfig, time.Duration) HarnessToolFlushClient {
-	return nil
+// harnessToolBatchMax is the catalog's hard cap on events per
+// harness-tool-events:batchCreate request.
+const harnessToolBatchMax = 500
+
+// harnessToolIngestEvent is the only shape the skill-tool-mappings ingest
+// endpoint accepts. It is built field-by-field from the spool record so that
+// args_digest, args_ciphertext, tool_input, and any future field can never be
+// forwarded.
+type harnessToolIngestEvent struct {
+	Tool        string `json:"tool"`
+	Skill       string `json:"skill,omitempty"`
+	HarnessKind string `json:"harness_kind"`
+	ObservedAt  string `json:"observed_at"`
+}
+
+// rawHarnessToolRecord decodes only the four ingest fields from a spool
+// harness_tool record. Every other field on the record is ignored on purpose.
+type rawHarnessToolRecord struct {
+	Tool        string `json:"tool"`
+	Skill       string `json:"skill,omitempty"`
+	HarnessKind string `json:"harness_kind"`
+	ObservedAt  string `json:"observed_at"`
+}
+
+type harnessToolFlushClient struct {
+	baseURL     string
+	path        string
+	headers     map[string]string
+	client      *http.Client
+	requestMu   sync.Mutex
+	nextRequest time.Time
+}
+
+type harnessToolFlushHTTPError struct {
+	statusCode int
+	retryAfter time.Duration
+}
+
+func (e *harnessToolFlushHTTPError) Error() string {
+	return fmt.Sprintf("harness_tool flush returned status %d", e.statusCode)
+}
+
+func harnessToolFlushResponseError(resp *http.Response) error {
+	e := &harnessToolFlushHTTPError{statusCode: resp.StatusCode}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		e.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	return e
+}
+
+func NewHarnessToolFlushClientFromConfig(cfg CollectorConfig, timeout time.Duration) HarnessToolFlushClient {
+	if cfg.Token() == "" {
+		return nil
+	}
+	base := cfg.ControlPlaneURL()
+	if base == "" {
+		base = cfg.FlushURL()
+	}
+	return &harnessToolFlushClient{
+		baseURL: base,
+		path:    "/api/v1/runtime/harness-tool-events:batchCreate",
+		headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
+		client:  &http.Client{Timeout: timeout},
+	}
+}
+
+// canonicalHarnessKind maps the runtime's internal harness kind to the catalog
+// domain. The spool records "claude"; the catalog expects "claude_code".
+func canonicalHarnessKind(kind string) string {
+	switch kind {
+	case "claude":
+		return "claude_code"
+	default:
+		return kind
+	}
+}
+
+// FlushHarnessTool reduces each raw spool record to the four ingest fields,
+// maps the harness kind, and POSTs them to the catalog in batches of at most
+// harnessToolBatchMax. Delivery is at-least-once: a failed batch returns an
+// error so the collector retains the spool and retries.
+func (c *harnessToolFlushClient) FlushHarnessTool(ctx context.Context, records []json.RawMessage) (int, error) {
+	events := make([]harnessToolIngestEvent, 0, len(records))
+	for _, raw := range records {
+		var rec rawHarnessToolRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			continue
+		}
+		events = append(events, harnessToolIngestEvent{
+			Tool:        rec.Tool,
+			Skill:       rec.Skill,
+			HarnessKind: canonicalHarnessKind(rec.HarnessKind),
+			ObservedAt:  rec.ObservedAt,
+		})
+	}
+	total := 0
+	for start := 0; start < len(events); start += harnessToolBatchMax {
+		end := start + harnessToolBatchMax
+		if end > len(events) {
+			end = len(events)
+		}
+		n, err := c.flushHarnessToolChunk(ctx, events[start:end])
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+func (c *harnessToolFlushClient) flushHarnessToolChunk(ctx context.Context, events []harnessToolIngestEvent) (int, error) {
+	body, err := json.Marshal(map[string][]harnessToolIngestEvent{"events": events})
+	if err != nil {
+		return 0, fmt.Errorf("marshal harness_tool flush: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.path, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("build harness_tool flush request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+	if wait := time.Until(c.nextRequest); wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	resp, err := c.client.Do(req)
+	c.nextRequest = time.Now().Add(100 * time.Millisecond)
+	if err != nil {
+		return 0, fmt.Errorf("harness_tool flush request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, harnessToolFlushResponseError(resp)
+	}
+	var out struct {
+		Upserted int `json:"upserted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, fmt.Errorf("decode harness_tool flush response: %w", err)
+	}
+	return out.Upserted, nil
 }
 
 func NewCredentialFlushClientFromConfig(CollectorConfig, time.Duration) CredentialFlushClient {

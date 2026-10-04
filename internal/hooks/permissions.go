@@ -22,6 +22,7 @@ type permissionEvent struct {
 	ToolUseID         string    `json:"tool_use_id,omitempty"`
 	Phase             string    `json:"phase"`
 	Tool              string    `json:"tool"`
+	Skill             string    `json:"skill,omitempty"`
 	ArgsDigest        string    `json:"args_digest"`
 	DigestKeyID       string    `json:"digest_key_id,omitempty"`
 	ArgsCiphertext    string    `json:"args_ciphertext,omitempty"`
@@ -83,7 +84,8 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 		decision = "unknown"
 	}
 	tool, argv0 := reportedTool(in.ToolName, in.ToolInput)
-	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
+	skill := activeSkillFor(kind, in.SessionID, in.ToolName, in.ToolInput, cfg.RuntimeStateDir)
+	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {
 		WriteAudit(cfg, data)
@@ -120,4 +122,39 @@ func reportedTool(name string, raw json.RawMessage) (string, string) {
 		tool = "shell"
 	}
 	return tool, argv0
+}
+
+// activeSkillFor returns the invoking skill to tag a reported tool call with.
+// Attribution is opencode-only: when an opencode skill tool call is observed it
+// sets the session's active skill, and every opencode tool call in that session
+// (including the skill call itself) is tagged with it. Claude and codex have no
+// discrete skill tool, so their skill is always empty.
+func activeSkillFor(kind, sessionID, toolName string, toolInput json.RawMessage, stateDir string) string {
+	if kind != "opencode" || sessionID == "" || stateDir == "" {
+		return ""
+	}
+	store, err := OpenActiveSkillStore(stateDir)
+	if err != nil {
+		return ""
+	}
+	if skillName, ok := skillToolName(toolName, toolInput); ok {
+		_ = store.Set(sessionID, skillName)
+	}
+	skill, _ := store.Get(sessionID)
+	return skill
+}
+
+// skillToolName reports whether a tool call is an opencode skill invocation and
+// returns the skill name from its input.
+func skillToolName(name string, raw json.RawMessage) (string, bool) {
+	if !strings.EqualFold(name, "skill") {
+		return "", false
+	}
+	var input struct {
+		Skill string `json:"skill"`
+	}
+	if json.Unmarshal(raw, &input) != nil || input.Skill == "" {
+		return "", false
+	}
+	return input.Skill, true
 }
