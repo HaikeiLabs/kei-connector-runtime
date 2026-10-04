@@ -2,7 +2,6 @@ package connectorruntime
 
 import (
 	"encoding/json"
-	"time"
 
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
@@ -10,17 +9,7 @@ import (
 // LifecycleEvent is a runtime lifecycle audit record written by the heartbeat
 // loop. It is appended as a single JSON line to the same local JSONL spool as
 // decisions, where the collector routes it to the lifecycle flush endpoint.
-type LifecycleEvent struct {
-	EventClass     string            `json:"event_class"`
-	SchemaVersion  int               `json:"schema_version"`
-	EventType      string            `json:"event_type"`
-	Outcome        HeartbeatOutcome  `json:"outcome"`
-	ObservedAt     time.Time         `json:"observed_at"`
-	RuntimeVersion string            `json:"runtime_version"`
-	RunID          string            `json:"run_id"`
-	Seq            uint64            `json:"seq"`
-	Attrs          map[string]string `json:"attrs,omitempty"`
-}
+type LifecycleEvent = keiruntime.LifecycleEvent
 
 // appendLifecycleEvent marshals e and appends it to the audit spool at path,
 // capped by maxBytes. A lifecycle record is refused if the spool nears its cap
