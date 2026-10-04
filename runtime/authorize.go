@@ -323,7 +323,16 @@ func WritePolicyStateDenial(stdout, stderr io.Writer, reason string, err error) 
 	}
 	_ = WriteJSON(stdout, AuthorizeOutput{Decision: "deny", ReasonCode: reason, DenySource: source, Reason: reason})
 	if err != nil {
-		fmt.Fprintf(stderr, "authorization denied (%s): %v\n", reason, err)
+		var failure *SubjectResolutionFailure
+		if reason == "subject_resolution_unavailable" && errors.As(err, &failure) {
+			if failure.HTTPStatus != 0 {
+				fmt.Fprintf(stderr, "authorization denied (%s): category=%s http_status=%d\n", reason, failure.Category, failure.HTTPStatus)
+			} else {
+				fmt.Fprintf(stderr, "authorization denied (%s): category=%s\n", reason, failure.Category)
+			}
+		} else {
+			fmt.Fprintf(stderr, "authorization denied (%s): %v\n", reason, err)
+		}
 	}
 	return 1
 }
