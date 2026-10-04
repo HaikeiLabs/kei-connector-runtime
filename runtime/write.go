@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 )
 
-func writeJSON(w interface{ Write([]byte) (int, error) }, v any) error {
+func WriteJSON(w interface{ Write([]byte) (int, error) }, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err

@@ -8,38 +8,16 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
-
-// CredentialDescriptor is non-secret metadata resolved from the Kei control
-// plane. The secret value is fetched separately from the customer's store.
-type CredentialDescriptor struct {
-	ID                  string         `json:"id"`
-	OrgID               string         `json:"org_id"`
-	UserID              string         `json:"user_id"`
-	Service             string         `json:"service"`
-	SecretBackend       string         `json:"secret_backend"`
-	SecretRef           string         `json:"secret_ref"`
-	CredentialType      string         `json:"credential_type,omitempty"`
-	InjectionType       string         `json:"injection_type,omitempty"`
-	InjectionHeader     string         `json:"injection_header,omitempty"`
-	InjectionQueryParam string         `json:"injection_query_param,omitempty"`
-	Status              string         `json:"status"`
-	Version             int            `json:"version"`
-	Metadata            map[string]any `json:"metadata,omitempty"`
-}
-
-var errCredentialBindingNotFound = fmt.Errorf("credential binding not found")
-
-type CredentialBindingClient interface {
-	Resolve(ctx context.Context, runtimeToken, userID, service string) (*CredentialDescriptor, error)
-}
 
 type credentialBindingClient struct {
 	baseURL string
 	client  *http.Client
 }
 
-func NewCredentialBindingClient(baseURL string, timeout time.Duration) CredentialBindingClient {
+func NewCredentialBindingClient(baseURL string, timeout time.Duration) keiruntime.CredentialResolver {
 	return &credentialBindingClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		client:  &http.Client{Timeout: timeout},

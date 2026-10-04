@@ -45,7 +45,7 @@ func RunPolicySync(ctx context.Context, args []string, stdout, stderr io.Writer,
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
-	if err := writeJSON(stdout, status); err != nil {
+	if err := WriteJSON(stdout, status); err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
@@ -67,7 +67,7 @@ func RunPolicyShow(args []string, stdout, stderr io.Writer, cfg PolicyConfig) in
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
-	if err := writeJSON(stdout, status); err != nil {
+	if err := WriteJSON(stdout, status); err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}

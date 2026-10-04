@@ -10,18 +10,11 @@ import (
 	"sync"
 	"time"
 
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 	"golang.org/x/sync/singleflight"
 )
 
-// OIDCBridgeClient fetches OAuth tokens from the OIDC bridge over HTTP.
-// It is used for provider-backed tools like GitHub where the token comes
-// from an OAuth flow rather than a static API key.
-type OIDCBridgeClient interface {
-	// GetOAuthToken returns the stored OAuth access token for userID+provider, or
-	// (nil, nil) when no token exists (404).
-	GetOAuthToken(ctx context.Context, userID, provider string) (*OAuthTokenResponse, error)
-}
-
+// cachedToken holds a cached OAuth token response with expiration.
 type cachedToken struct {
 	response *OAuthTokenResponse
 	expires  time.Time
@@ -38,7 +31,7 @@ type oidcBridgeClient struct {
 	cacheTTL time.Duration
 }
 
-func NewOIDCBridgeClient(baseURL, secret string, timeout time.Duration) OIDCBridgeClient {
+func NewOIDCBridgeClient(baseURL, secret string, timeout time.Duration) keiruntime.OIDCTokenProvider {
 	return &oidcBridgeClient{
 		baseURL:  baseURL,
 		secret:   secret,
@@ -47,18 +40,6 @@ func NewOIDCBridgeClient(baseURL, secret string, timeout time.Duration) OIDCBrid
 		cacheTTL: 5 * time.Minute, // Default cache TTL
 	}
 }
-
-type OAuthTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	Provider    string `json:"provider"`
-	Identity    string `json:"identity"`
-}
-
-// GetOAuthToken returns the cached or fresh OAuth token for userID+provider.
-// Uses single-flight to prevent concurrent requests for the same token.
-// Returns ErrEnrollmentRequired for 404 (no token), 409 (refresh failed), or bridge unreachable.
-var ErrEnrollmentRequired = fmt.Errorf("enrollment required")
 
 func (c *oidcBridgeClient) GetOAuthToken(ctx context.Context, userID, provider string) (*OAuthTokenResponse, error) {
 	cacheKey := userID + "/" + provider
