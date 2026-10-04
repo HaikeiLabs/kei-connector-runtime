@@ -765,6 +765,23 @@ func TestRuntimeHTTPHandlerIgnoresInvokingSubjectHeader(t *testing.T) {
 	workspace := "ws-fixture-0001"
 
 	var subjectUserID string
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/runtime/subject-attributes:resolve" {
+			t.Errorf("unexpected catalog request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		var req keiruntime.SubjectResolveRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode subject resolve request: %v", err)
+		}
+		subjectUserID = req.UserID
+		_ = json.NewEncoder(w).Encode(policybundle.Subject{
+			Status: "linked_approved", UserID: req.UserID,
+			EffectiveGroups: []string{"members"}, OrgRoles: []string{"member"}, MaxAgeSeconds: 60,
+		})
+	}))
+	defer catalog.Close()
 	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/whoami":
@@ -780,16 +797,6 @@ func TestRuntimeHTTPHandlerIgnoresInvokingSubjectHeader(t *testing.T) {
 				"display_name": "Test model", "endpoint": "http://127.0.0.1:1",
 				"default_model": "m1", "auth_type": "none", "status": "active",
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runtime/subject-attributes:resolve":
-			var req keiruntime.SubjectResolveRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Errorf("decode subject resolve request: %v", err)
-			}
-			subjectUserID = req.UserID
-			_ = json.NewEncoder(w).Encode(policybundle.Subject{
-				Status: "linked_approved", UserID: req.UserID,
-				EffectiveGroups: []string{"members"}, OrgRoles: []string{"member"}, MaxAgeSeconds: 60,
-			})
 		default:
 			t.Errorf("unexpected control plane request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -804,6 +811,7 @@ func TestRuntimeHTTPHandlerIgnoresInvokingSubjectHeader(t *testing.T) {
 
 	handler := newRuntimeHTTPHandler(Config{
 		RuntimeControlPlaneURL: controlPlane.URL,
+		ABACURL:                catalog.URL,
 		RuntimeToken:           runtimeToken,
 		RuntimeStateDir:        stateDir,
 	}, sessions)
