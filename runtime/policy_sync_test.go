@@ -208,7 +208,7 @@ func TestPolicySyncRejectsInvalidSchemaExampleAndStaysDenyOnly(t *testing.T) {
 	}
 }
 
-func TestPolicySyncRevokedCredentialClearsState(t *testing.T) {
+func TestPolicyBundleForbiddenDoesNotClaimInstallationRevoked(t *testing.T) {
 	catalog := &fakePolicyCatalog{body: unsignedExampleBundle(t, time.Now().UTC())}
 	server := httptest.NewServer(catalog)
 	defer server.Close()
@@ -231,7 +231,7 @@ func TestPolicySyncRevokedCredentialClearsState(t *testing.T) {
 		t.Fatalf("first sync exit=%d %s", code, stderr.String())
 	}
 	catalog.mu.Lock()
-	catalog.whoamiCode = http.StatusForbidden
+	catalog.status = http.StatusForbidden
 	catalog.mu.Unlock()
 	stdout.Reset()
 	if code := keiruntime.RunPolicySync(context.Background(), nil, &stdout, &stderr, cfg, idFunc, syncFn, connectorruntime.IsRuntimeRevocation, func() { connectorruntime.RevokePolicyState(cfg) }); code == 0 {
@@ -239,11 +239,11 @@ func TestPolicySyncRevokedCredentialClearsState(t *testing.T) {
 	}
 	stdout.Reset()
 	_ = keiruntime.RunPolicyShow(nil, &stdout, &stderr, cfg)
-	if st := decodeStatus(t, stdout.Bytes()); st.State != policybundle.Revoked {
-		t.Fatalf("state = %s, want revoked", st.State)
+	if st := decodeStatus(t, stdout.Bytes()); st.State != policybundle.Active {
+		t.Fatalf("state = %s, want active with refresh failure recorded", st.State)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "policy", "bundle.json")); !os.IsNotExist(err) {
-		t.Fatal("revocation kept the persisted bundle")
+	if _, err := os.Stat(filepath.Join(dir, "policy", "bundle.json")); err != nil {
+		t.Fatalf("authorization failure removed valid persisted bundle: %v", err)
 	}
 }
 
@@ -333,7 +333,7 @@ func TestPolicyBundleStateMachine(t *testing.T) {
 
 	catalog.set(nil, http.StatusUnauthorized, false)
 	_ = sync()
-	expect("revoked", false, "installation_revoked", 0)
+	expect("bundle endpoint authorization denied", false, "policy_bundle_expired", 0)
 }
 
 func TestPolicyRefresherPollsAtBundleIntervalAndHoldsTheLock(t *testing.T) {
