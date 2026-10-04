@@ -159,38 +159,45 @@ type SubjectResolveRequest struct {
 	UserID         string `json:"user_id,omitempty"`
 }
 
+type SubjectResolutionFailure struct {
+	Category   string
+	HTTPStatus int
+}
+
+func (e *SubjectResolutionFailure) Error() string { return "subject resolution failed" }
+
 func (c *policyControlClient) ResolveSubject(ctx context.Context, req SubjectResolveRequest) (policybundle.Subject, error) {
 	b, _ := json.Marshal(req)
 	resp, err := c.request(ctx, http.MethodPost, "/api/v1/runtime/subject-attributes:resolve", b)
 	if err != nil {
-		return policybundle.Subject{}, fmt.Errorf("resolve subject attributes: %w", err)
+		return policybundle.Subject{}, &SubjectResolutionFailure{Category: "transport"}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return policybundle.Subject{}, fmt.Errorf("%w: subject resolution endpoint returned HTTP %d", ErrPolicyAuthorizationDenied, resp.StatusCode)
+		return policybundle.Subject{}, fmt.Errorf("%w: %w", ErrPolicyAuthorizationDenied, &SubjectResolutionFailure{Category: "http_status", HTTPStatus: resp.StatusCode})
 	}
 	if resp.StatusCode != http.StatusOK {
-		return policybundle.Subject{}, fmt.Errorf("subject resolution returned status %d", resp.StatusCode)
+		return policybundle.Subject{}, &SubjectResolutionFailure{Category: "http_status", HTTPStatus: resp.StatusCode}
 	}
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	var subject policybundle.Subject
 	if err := decoder.Decode(&subject); err != nil {
-		return subject, fmt.Errorf("decode subject attributes: %w", err)
+		return subject, &SubjectResolutionFailure{Category: "decode"}
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return subject, errors.New("subject resolution response contains trailing data")
+		return subject, &SubjectResolutionFailure{Category: "decode"}
 	}
 	allowed := map[string]bool{"linked_approved": true, "unlinked": true, "linked_unassigned": true, "linked_unapproved": true, "linked_pending": true, "linked_denied": true, "linked_approved_other_workspace": true}
 	if !allowed[subject.Status] || subject.MaxAgeSeconds < 0 || subject.MaxAgeSeconds > 60 {
-		return subject, errors.New("subject resolution response is unsupported")
+		return subject, &SubjectResolutionFailure{Category: "invalid_response"}
 	}
 	if subject.Status == "linked_approved" && subject.UserID == "" {
-		return subject, errors.New("approved subject response has no user id")
+		return subject, &SubjectResolutionFailure{Category: "invalid_response"}
 	}
 	if subject.Status != "linked_approved" && len(subject.EffectiveGroups) > 0 {
-		return subject, errors.New("unapproved subject response included groups")
+		return subject, &SubjectResolutionFailure{Category: "invalid_response"}
 	}
 	return subject, nil
 }
