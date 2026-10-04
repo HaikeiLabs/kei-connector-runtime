@@ -13,18 +13,18 @@ func TestBuildDecisionEventPreservesCanonicalContext(t *testing.T) {
 	policyID := "policy-1"
 	respWorkspaceID := "workspace-from-abac"
 
-	event := buildDecisionEvent(authorizeParams{
-		spanID:          "span-1",
-		invokingSubject: "user-1",
-		parentSpan:      "parent-1",
-		delegationDepth: 2,
-		agentID:         "agent-1",
-		agentVersion:    "1.2.3",
-		framework:       "agentware",
-		tool:            "search_wiki",
-		toolArgsDigest:  "digest-1",
-		resources:       []string{"repo:acme/widgets"},
-		workspaceID:     workspaceID,
+	event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
+		SpanID:          "span-1",
+		InvokingSubject: "user-1",
+		ParentSpan:      "parent-1",
+		DelegationDepth: 2,
+		AgentID:         "agent-1",
+		AgentVersion:    "1.2.3",
+		Framework:       "agentware",
+		Tool:            "search_wiki",
+		ToolArgsDigest:  "digest-1",
+		Resources:       []string{"repo:acme/widgets"},
+		WorkspaceID:     workspaceID,
 	}, &AuthorizeResponse{
 		PolicyID:    policyID,
 		WorkspaceID: &respWorkspaceID,
@@ -48,9 +48,9 @@ func TestBuildDecisionEventPreservesCanonicalContext(t *testing.T) {
 }
 
 func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
-	event := buildDecisionEvent(authorizeParams{
-		spanID: "span-1",
-		tool:   "github.create_pr",
+	event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
+		SpanID: "span-1",
+		Tool:   "github.create_pr",
 	}, &AuthorizeResponse{}, AuthorizeOutput{Decision: "allow"}, "repo:acme")
 
 	root := t.TempDir()
@@ -81,7 +81,7 @@ func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
 }
 
 func TestAppendDecisionEventEmptyPathIsNoop(t *testing.T) {
-	if err := keiruntime.AppendDecisionEvent("", 0, buildDecisionEvent(authorizeParams{}, &AuthorizeResponse{}, AuthorizeOutput{}, "")); err != nil {
+	if err := keiruntime.AppendDecisionEvent("", 0, keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{}, &AuthorizeResponse{}, AuthorizeOutput{}, "")); err != nil {
 		t.Fatalf("empty path should be a no-op, got: %v", err)
 	}
 }

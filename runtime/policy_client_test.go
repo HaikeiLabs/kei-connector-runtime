@@ -146,7 +146,7 @@ func TestSyncPolicyBundleFailsClosedOnIntegrityHeaderMismatch(t *testing.T) {
 	}
 }
 
-func TestPolicyBundleEndpointRevocationDeletesPersistedEnforcementState(t *testing.T) {
+func TestPolicyBundleEndpointAuthorizationDenialDoesNotRevokeState(t *testing.T) {
 	now := time.Now().UTC()
 	stateDir := t.TempDir()
 	_, store := mustActivateTestBundle(t, stateDir, now)
@@ -163,8 +163,8 @@ func TestPolicyBundleEndpointRevocationDeletesPersistedEnforcementState(t *testi
 	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err == nil {
 		t.Fatal("expected revoked control-plane request to fail")
 	}
-	if _, state, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); err == nil || state != policybundle.Revoked {
-		t.Fatalf("after revocation state=%s err=%v", state, err)
+	if _, state, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); err != nil || state != policybundle.Active {
+		t.Fatalf("after authorization denial state=%s err=%v", state, err)
 	}
 }
 
