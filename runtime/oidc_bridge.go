@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -31,7 +30,7 @@ type oidcBridgeClient struct {
 	cacheTTL time.Duration
 }
 
-func NewOIDCBridgeClient(baseURL, secret string, timeout time.Duration) keiruntime.OIDCTokenProvider {
+func NewOIDCBridgeClient(baseURL, secret string, timeout time.Duration) OIDCTokenProvider {
 	return &oidcBridgeClient{
 		baseURL:  baseURL,
 		secret:   secret,

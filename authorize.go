@@ -111,7 +111,7 @@ func runAuthorize(args []string) int {
 	}
 	var oidcBridge keiruntime.OIDCTokenProvider
 	if !cfg.IsRuntime() || os.Getenv("OIDC_BRIDGE_URL") != "" {
-		oidcBridge = NewOIDCBridgeClient(cfg.OIDCBridgeURL, cfg.OIDCBridgeSecret, time.Duration(*timeout)*time.Second)
+		oidcBridge = keiruntime.NewOIDCBridgeClient(cfg.OIDCBridgeURL, cfg.OIDCBridgeSecret, time.Duration(*timeout)*time.Second)
 	}
 	var credentialBinding keiruntime.CredentialResolver
 	var secretStore keiruntime.SecretGetter

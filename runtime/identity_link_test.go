@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bytes"
@@ -35,14 +35,26 @@ func (c *identityClaimTestClient) StartIdentityClaim(_ context.Context, token st
 }
 func (c *identityClaimTestClient) SyncTools(context.Context, string, *ToolManifest) error { return nil }
 
+type testRuntimeConfig struct {
+	token           string
+	controlPlaneURL string
+	flushURL        string
+}
+
+func (c testRuntimeConfig) IsRuntime() bool         { return c.token != "" }
+func (c testRuntimeConfig) Validate() error         { return ValidateRuntimeTokenFormat(c.token) }
+func (c testRuntimeConfig) Token() string           { return c.token }
+func (c testRuntimeConfig) ControlPlaneURL() string { return c.controlPlaneURL }
+func (c testRuntimeConfig) FlushURL() string        { return c.flushURL }
+
 func TestIdentityLinkBeginWritesOnlyClaimJSONAndUsesRuntimeConfiguration(t *testing.T) {
 	const token = "kh_live_runtime_test_token_1234567890"
 	client := &identityClaimTestClient{resp: &IdentityClaimStartResponse{ClaimURL: "https://kei.example/claim#claim=secret", ExpiresAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)}}
-	cfg := Config{RuntimeToken: token, RuntimeControlPlaneURL: "https://control.example", CredentialStoreInstallationID: "not-an-override"}
+	cfg := testRuntimeConfig{token: token, controlPlaneURL: "https://control.example"}
 	var stdout, stderr bytes.Buffer
 	code := runIdentityLink([]string{"--platform", "discord", "--platform-user-id", "u-123", "--timeout", "3s"}, &stdout, &stderr, cfg,
 		func(base string, timeout time.Duration) RuntimeClient {
-			if base != cfg.RuntimeControlPlaneURL || timeout != 3*time.Second {
+			if base != cfg.controlPlaneURL || timeout != 3*time.Second {
 				t.Fatalf("factory args = %q, %v", base, timeout)
 			}
 			return client
@@ -62,7 +74,7 @@ func TestIdentityLinkBeginAcceptsTenantAndRejectsScopeOverrides(t *testing.T) {
 	client := &identityClaimTestClient{resp: &IdentityClaimStartResponse{ClaimURL: "https://kei.example/claim#claim=x", ExpiresAt: time.Now()}}
 	var stdout, stderr bytes.Buffer
 	code := runIdentityLink([]string{"--platform", "slack", "--platform-user-id", "u", "--tenant-id", "team"}, &stdout, &stderr,
-		Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://control.example"},
+		testRuntimeConfig{token: "kh_live_runtime_test_token_1234567890", controlPlaneURL: "https://control.example"},
 		func(string, time.Duration) RuntimeClient { return client })
 	if code != 0 || client.input.TenantID != "team" {
 		t.Fatalf("exit=%d tenant=%q stderr=%q", code, client.input.TenantID, stderr.String())
@@ -70,7 +82,7 @@ func TestIdentityLinkBeginAcceptsTenantAndRejectsScopeOverrides(t *testing.T) {
 	for _, flag := range []string{"--installation-id", "--workspace-id"} {
 		stdout.Reset()
 		stderr.Reset()
-		code = runIdentityLink([]string{"--platform", "discord", "--platform-user-id", "u", flag, "override"}, &stdout, &stderr, Config{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
+		code = runIdentityLink([]string{"--platform", "discord", "--platform-user-id", "u", flag, "override"}, &stdout, &stderr, testRuntimeConfig{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
 		if code != 2 || stdout.Len() != 0 {
 			t.Fatalf("override %s: exit=%d stdout=%q", flag, code, stdout.String())
 		}
@@ -80,15 +92,15 @@ func TestIdentityLinkBeginAcceptsTenantAndRejectsScopeOverrides(t *testing.T) {
 func TestIdentityLinkBeginErrorsAreSecretSafe(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		cfg      Config
+		cfg      testRuntimeConfig
 		response *IdentityClaimStartResponse
 		err      error
 		want     string
 	}{
-		{name: "missing token", cfg: Config{RuntimeControlPlaneURL: "https://control.example"}, want: "KEI_RUNTIME_TOKEN"},
-		{name: "invalid credential", cfg: Config{RuntimeToken: "secret-token", RuntimeControlPlaneURL: "https://control.example"}, want: "KEI_RUNTIME_TOKEN"},
-		{name: "request failure", cfg: Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://control.example"}, err: errors.New("secret response"), want: "failed"},
-		{name: "empty response", cfg: Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeControlPlaneURL: "https://control.example"}, want: "empty control-plane response"},
+		{name: "missing token", cfg: testRuntimeConfig{controlPlaneURL: "https://control.example"}, want: "KEI_RUNTIME_TOKEN"},
+		{name: "invalid credential", cfg: testRuntimeConfig{token: "secret-token", controlPlaneURL: "https://control.example"}, want: "KEI_RUNTIME_TOKEN"},
+		{name: "request failure", cfg: testRuntimeConfig{token: "kh_live_runtime_test_token_1234567890", controlPlaneURL: "https://control.example"}, err: errors.New("secret response"), want: "failed"},
+		{name: "empty response", cfg: testRuntimeConfig{token: "kh_live_runtime_test_token_1234567890", controlPlaneURL: "https://control.example"}, want: "empty control-plane response"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &identityClaimTestClient{resp: tc.response, err: tc.err}
@@ -104,7 +116,7 @@ func TestIdentityLinkBeginErrorsAreSecretSafe(t *testing.T) {
 func TestIdentityLinkBeginRequiresIdentityArguments(t *testing.T) {
 	for _, args := range [][]string{{"--platform", "discord"}, {"--platform-user-id", "u"}, {"--platform", "discord", "--platform-user-id", "u", "unexpected"}, {"--platform", "discord", "--platform-user-id", "u", "--timeout", "0"}} {
 		var stdout, stderr bytes.Buffer
-		code := runIdentityLink(args, &stdout, &stderr, Config{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
+		code := runIdentityLink(args, &stdout, &stderr, testRuntimeConfig{}, func(string, time.Duration) RuntimeClient { t.Fatal("client must not be created"); return nil })
 		if code != 2 || stdout.Len() == 0 && stderr.Len() == 0 {
 			t.Fatalf("args=%v exit=%d", args, code)
 		}
