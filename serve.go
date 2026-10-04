@@ -403,7 +403,7 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	}
 	var attrs *policybundle.Subject
 	if invokingSubject != "" || h.cfg.ProviderUserID != "" {
-		client := keiruntime.NewPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
+		client := keiruntime.NewPolicyControlClient(h.cfg.ABACURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
 		req := keiruntime.SubjectResolveRequest{}
 		if invokingSubject != "" {
 			req.UserID = invokingSubject
