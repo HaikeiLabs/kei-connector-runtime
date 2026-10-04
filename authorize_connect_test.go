@@ -44,6 +44,7 @@ func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
 	defer control.Close()
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
+	t.Setenv("ABAC_URL", control.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	t.Setenv("KEI_PROXY_PLATFORM_TENANT_ID", "")
@@ -61,6 +62,57 @@ func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
 	}
 	if subjectCalls != 1 {
 		t.Fatalf("subject resolutions=%d; want 1", subjectCalls)
+	}
+}
+
+func TestAuthorizeResolvesSubjectAtCatalogNotControlPlane(t *testing.T) {
+	stateDir := t.TempDir()
+	mustActivateTestBundle(t, stateDir, time.Now().UTC())
+	workspace := "ws-fixture-0001"
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runtime/whoami":
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace, Platform: "discord", Status: "active", BindingStatus: "verified"})
+		case "/api/v1/runtime/heartbeat":
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/v1/runtime/subject-attributes:resolve":
+			t.Errorf("subject resolution unexpectedly used control-plane URL")
+			http.Error(w, "wrong endpoint", http.StatusUnauthorized)
+		default:
+			t.Errorf("unexpected control-plane request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer controlPlane.Close()
+	catalogCalls := 0
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/runtime/subject-attributes:resolve" {
+			t.Errorf("unexpected catalog request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		catalogCalls++
+		if got := r.Header.Get("Authorization"); got != "Bearer kh_live_runtime_test_token_1234567890" {
+			t.Errorf("catalog authorization header missing installation token")
+		}
+		_ = json.NewEncoder(w).Encode(policybundle.Subject{Status: "linked_approved", UserID: "user-member-0001", EffectiveGroups: []string{"members"}, OrgRoles: []string{"member"}, MaxAgeSeconds: 60})
+	}))
+	defer catalog.Close()
+
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
+	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", controlPlane.URL)
+	t.Setenv("ABAC_URL", catalog.URL)
+	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
+	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
+	var code int
+	stdout := captureStdout(func() {
+		code = runAuthorize([]string{"--tool", "web_search", "--provider-user", "discord-member-0001"})
+	})
+	if code != 0 {
+		t.Fatalf("local web_search denied: exit=%d stdout=%s", code, stdout)
+	}
+	if catalogCalls != 1 {
+		t.Fatalf("catalog subject resolutions=%d; want 1", catalogCalls)
 	}
 }
 
@@ -110,6 +162,7 @@ func TestAuthorizeUsesPersistedBundleAndOnlineSubjectForUserDefault(t *testing.T
 	defer control.Close()
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
+	t.Setenv("ABAC_URL", control.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	var code int
