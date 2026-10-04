@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
@@ -25,7 +26,7 @@ func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/v1/runtime/subject-attributes:resolve":
 			subjectCalls++
-			var req subjectResolveRequest
+			var req keiruntime.SubjectResolveRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode subject request: %v", err)
 			}
@@ -87,7 +88,7 @@ func TestAuthorizeUsesPersistedBundleAndOnlineSubjectForUserDefault(t *testing.T
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/v1/runtime/subject-attributes:resolve":
 			subjectCalls++
-			var req subjectResolveRequest
+			var req keiruntime.SubjectResolveRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode subject request: %v", err)
 			}

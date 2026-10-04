@@ -781,7 +781,7 @@ func TestRuntimeHTTPHandlerIgnoresInvokingSubjectHeader(t *testing.T) {
 				"default_model": "m1", "auth_type": "none", "status": "active",
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runtime/subject-attributes:resolve":
-			var req subjectResolveRequest
+			var req keiruntime.SubjectResolveRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode subject resolve request: %v", err)
 			}

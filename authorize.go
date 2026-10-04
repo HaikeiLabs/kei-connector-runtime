@@ -419,8 +419,8 @@ func runAuthorize(args []string) int {
 	subjectProviderID := cfg.ProviderUserID
 	var subject *policybundle.Subject
 	if *user != "" || subjectProviderID != "" {
-		control := newPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
-		req := subjectResolveRequest{}
+		control := keiruntime.NewPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
+		req := keiruntime.SubjectResolveRequest{}
 		if *user != "" {
 			req.UserID = *user
 		} else {
