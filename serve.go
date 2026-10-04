@@ -403,8 +403,8 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	}
 	var attrs *policybundle.Subject
 	if invokingSubject != "" || h.cfg.ProviderUserID != "" {
-		client := newPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
-		req := subjectResolveRequest{}
+		client := keiruntime.NewPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
+		req := keiruntime.SubjectResolveRequest{}
 		if invokingSubject != "" {
 			req.UserID = invokingSubject
 		} else {
@@ -436,7 +436,7 @@ func (h *runtimeHTTPHandler) runtimeConfigError() error {
 	if h.cfg.RuntimeControlPlaneURL == "" {
 		return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required")
 	}
-	if err := validatePolicyControlPlaneURL(h.cfg.RuntimeControlPlaneURL, !h.cfg.IsProduction()); err != nil {
+	if err := keiruntime.ValidatePolicyControlPlaneURL(h.cfg.RuntimeControlPlaneURL, !h.cfg.IsProduction()); err != nil {
 		return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
 	}
 	return nil

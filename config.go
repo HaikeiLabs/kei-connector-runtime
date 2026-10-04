@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 type Config struct {
@@ -110,16 +112,7 @@ func (c Config) IsProduction() bool {
 // leaking its value. A malformed token is always a misconfiguration regardless
 // of environment.
 func ValidateRuntimeTokenFormat(token string) error {
-	if token == "" {
-		return errors.New("KEI_RUNTIME_TOKEN must not be empty")
-	}
-	if !strings.HasPrefix(token, "kh_live_") {
-		return errors.New("KEI_RUNTIME_TOKEN must start with kh_live_")
-	}
-	if len(token) < 20 {
-		return errors.New("KEI_RUNTIME_TOKEN is too short")
-	}
-	return nil
+	return keiruntime.ValidateRuntimeTokenFormat(token)
 }
 
 // Validate fails closed when required service-to-service authentication is
@@ -135,7 +128,7 @@ func (c Config) Validate() error {
 		if c.RuntimeControlPlaneURL == "" {
 			return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required when KEI_RUNTIME_TOKEN is set")
 		}
-		if err := validatePolicyControlPlaneURL(c.RuntimeControlPlaneURL, !c.IsProduction()); err != nil {
+		if err := keiruntime.ValidatePolicyControlPlaneURL(c.RuntimeControlPlaneURL, !c.IsProduction()); err != nil {
 			return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
 		}
 		return nil
