@@ -110,6 +110,7 @@ type LocalPDP struct {
 	emit      EmitAuditFunc
 	keychain  SessionKeychain
 	creds     *credrelease.Store
+	invoker   http.Handler
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
@@ -127,14 +128,37 @@ func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = stor
 // errCredentialReleaseOff is returned by UseCredential in legacy mode.
 var errCredentialReleaseOff = errors.New("session credential release is not enabled")
 
-// UseCredential runs fn with the current session's credential for provider,
-// inside the daemon (ADR-034 option A). It is the only way to reach a held
+// UseCredential runs fn with the credential for provider held for the session
+// of subject (a user id), inside the daemon (ADR-034 option A). It is the only way to reach a held
 // credential; no socket route returns one. See credrelease.Store.Use.
-func (l *LocalPDP) UseCredential(ctx context.Context, provider string, fn func(token string) error) error {
+func (l *LocalPDP) UseCredential(ctx context.Context, subject, provider string, fn func(token string) error) error {
 	if l.creds == nil {
 		return errCredentialReleaseOff
 	}
-	return l.creds.Use(ctx, provider, fn)
+	return l.creds.Use(ctx, subject, provider, fn)
+}
+
+// SetConnectorInvoker serves POST /v1/connectors:invoke with h (HAI-346 L3b),
+// behind the socket's config and runtime-token checks. Without one the route
+// is not served.
+func (l *LocalPDP) SetConnectorInvoker(h http.Handler) { l.invoker = h }
+
+// AuthorizeConnector decides a connector call with the local PDP and the
+// session subject, and returns the runtime identity it was decided under.
+// Before the identity resolves, every call denies policy_bundle_missing. The
+// error is non-nil only when ctx is done.
+func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp.ConnectorGrant, *Identity, error) {
+	e, id := l.evaluator.Load(), l.identity.Load()
+	if e == nil || id == nil {
+		g := pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}}
+		if sub, ok := l.Sessions.Current(); ok {
+			sub.Token, sub.Enrollment = "", nil
+			g.Subject, g.HasSession = sub, true
+		}
+		return g, nil, ctx.Err()
+	}
+	g, err := e.EvaluateConnector(ctx, req)
+	return g, id, err
 }
 
 // Close flushes held session credentials. The serve daemon calls it on exit.
@@ -185,6 +209,7 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
+		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -200,6 +225,8 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize":
 			l.handleAuthorize(w, r)
+		case r.URL.Path == "/v1/connectors:invoke":
+			l.invoker.ServeHTTP(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:
@@ -273,7 +300,7 @@ func (l *LocalPDP) loadCredentials(ctx context.Context, sub pdp.Subject) {
 	if l.creds == nil || sub.Status != pdp.StatusLinked || sub.Token == "" {
 		return
 	}
-	if err := l.creds.Load(ctx, sub.Token); err != nil {
+	if err := l.creds.Load(ctx, sub.UserID, sub.Token); err != nil {
 		slog.Warn("session_credentials_unavailable", "error", err)
 		return
 	}

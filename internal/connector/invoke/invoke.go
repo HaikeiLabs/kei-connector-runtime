@@ -90,6 +90,12 @@ type Env struct {
 	// Audit appends one audit record (a JSON line) to the local spool.
 	Audit func(record []byte) error
 
+	// DaemonSocket, when set (KEI_CREDENTIAL_RELEASE=identity), makes the
+	// command a thin client of the serve daemon's POST /v1/connectors:invoke
+	// on this Unix socket: no control-plane call, no credential in this
+	// process, and the subject comes from the daemon's session.
+	DaemonSocket string
+
 	// Test seams: nil means the real network, DNS, and clock.
 	CatalogTransport  http.RoundTripper
 	ProviderTransport http.RoundTripper
@@ -186,6 +192,8 @@ type connectorInvokePlan struct {
 	abacSecret string
 	timeout    time.Duration
 	input      string
+	// explicitSubject is set when --user-id/--user/--provider-user was given.
+	explicitSubject bool
 }
 
 // parseConnectorInvokeArgs maps CLI flags and the identity-propagation
@@ -212,6 +220,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		return connectorInvokePlan{}, err
 	}
 
+	explicitSubject := *userID != "" || *user != "" || *providerUser != ""
 	if *userID == "" && *user != "" {
 		*userID = *user
 	}
@@ -256,10 +265,11 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 			Framework:      *framework,
 			ProviderUserID: *providerUser,
 		},
-		abacURL:    abacURLValue,
-		abacSecret: secret,
-		timeout:    time.Duration(*timeout) * time.Second,
-		input:      *inputArg,
+		abacURL:         abacURLValue,
+		abacSecret:      secret,
+		timeout:         time.Duration(*timeout) * time.Second,
+		input:           *inputArg,
+		explicitSubject: explicitSubject,
 	}, nil
 }
 
@@ -294,6 +304,9 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
+	}
+	if env.DaemonSocket != "" {
+		return runViaDaemon(plan, env, stdout, stderr)
 	}
 	if env.SubjectSource != nil {
 		subject, subErr := env.SubjectSource.Subject(context.Background())

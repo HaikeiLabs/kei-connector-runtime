@@ -16,6 +16,7 @@ import (
 
 const (
 	testRuntimeToken = "kh_live_runtime_test_token_1234567890"
+	testSubject      = "u-test-subject"
 	testSubjectToken = "subject-token-for-test"
 	canary           = "kei-canary-7f3e9b21-credential"
 )
@@ -108,14 +109,14 @@ var errProvider401 = fmt.Errorf("github api: %w", ErrProviderUnauthorized)
 
 func TestStoreMakesExactlyOneI11CallAcrossManyUses(t *testing.T) {
 	s, f := newTestStore(t, credentials(map[string]string{"github": canary, "gmail": "gmail-token"}, nil))
-	if err := s.Load(context.Background(), testSubjectToken); err != nil {
+	if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
 		t.Fatal(err)
 	}
 	const n = 50
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			err := s.Use(context.Background(), "github", func(token string) error {
+			err := s.Use(context.Background(), testSubject, "github", func(token string) error {
 				if token != canary {
 					return errors.New("wrong token")
 				}
@@ -137,12 +138,12 @@ func TestStoreMakesExactlyOneI11CallAcrossManyUses(t *testing.T) {
 
 func TestStoreUnheldProviderDeniesWithoutFetch(t *testing.T) {
 	s, f := newTestStore(t, credentials(map[string]string{"github": canary}, map[string]string{"linear": ReasonReconnectRequired}))
-	if err := s.Load(context.Background(), testSubjectToken); err != nil {
+	if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
 		t.Fatal(err)
 	}
 	for provider, want := range map[string]string{"linear": ReasonReconnectRequired, "slack": ReasonNotConnected} {
 		called := false
-		err := s.Use(context.Background(), provider, func(string) error { called = true; return nil })
+		err := s.Use(context.Background(), testSubject, provider, func(string) error { called = true; return nil })
 		var denied *DeniedError
 		if !errors.As(err, &denied) || denied.Reason != want || !denied.Connect() {
 			t.Fatalf("%s: err = %v, want connect denial %s", provider, err, want)
@@ -158,7 +159,7 @@ func TestStoreUnheldProviderDeniesWithoutFetch(t *testing.T) {
 
 func TestStoreFlushZeroesAndDrops(t *testing.T) {
 	s, f := newTestStore(t, credentials(map[string]string{"github": canary}, nil))
-	if err := s.Load(context.Background(), testSubjectToken); err != nil {
+	if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
@@ -170,7 +171,7 @@ func TestStoreFlushZeroesAndDrops(t *testing.T) {
 			t.Fatalf("flushed credential bytes not zeroed: %q", held)
 		}
 	}
-	err := s.Use(context.Background(), "github", func(string) error { t.Fatal("callback ran after flush"); return nil })
+	err := s.Use(context.Background(), testSubject, "github", func(string) error { t.Fatal("callback ran after flush"); return nil })
 	var denied *DeniedError
 	if !errors.As(err, &denied) || denied.Reason != ReasonNoSession {
 		t.Fatalf("after flush err = %v, want %s", err, ReasonNoSession)
@@ -188,11 +189,11 @@ func TestStoreProvider401RefetchesOnceRetriesOnceThenDenies(t *testing.T) {
 		credentials(map[string]string{"github": "stale-token"}, nil),
 		credentials(map[string]string{"github": canary}, nil),
 	)
-	if err := s.Load(context.Background(), testSubjectToken); err != nil {
+	if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
 		t.Fatal(err)
 	}
 	var seen []string
-	err := s.Use(context.Background(), "github", func(token string) error {
+	err := s.Use(context.Background(), testSubject, "github", func(token string) error {
 		seen = append(seen, token)
 		return errProvider401
 	})
@@ -212,6 +213,32 @@ func TestStoreProvider401RefetchesOnceRetriesOnceThenDenies(t *testing.T) {
 	if strings.Contains(err.Error(), canary) {
 		t.Fatal("denial error carries the credential")
 	}
+	// The rejected re-fetched credential is dropped: later uses deny
+	// without another fetch.
+	err = s.Use(context.Background(), testSubject, "github", func(string) error { t.Fatal("callback ran"); return nil })
+	if !errors.As(err, &denied) || denied.Reason != ReasonProviderUnauthorized {
+		t.Fatalf("later use err = %v", err)
+	}
+	if got := f.count(); got != 2 {
+		t.Fatalf("I11 calls = %d after the denial, want 2", got)
+	}
+}
+
+func TestStoreUseDeniesForAnotherSubject(t *testing.T) {
+	s, f := newTestStore(t, credentials(map[string]string{"github": canary}, nil))
+	if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
+		t.Fatal(err)
+	}
+	for _, subject := range []string{"", "u-someone-else"} {
+		err := s.Use(context.Background(), subject, "github", func(string) error { t.Fatal("callback ran"); return nil })
+		var denied *DeniedError
+		if !errors.As(err, &denied) || denied.Reason != ReasonNoSession {
+			t.Fatalf("subject %q: err = %v, want %s", subject, err, ReasonNoSession)
+		}
+	}
+	if got := f.count(); got != 1 {
+		t.Fatalf("I11 calls = %d, want 1", got)
+	}
 }
 
 func TestStoreProvider401RefetchSucceedsAndRetrySucceeds(t *testing.T) {
@@ -219,10 +246,10 @@ func TestStoreProvider401RefetchSucceedsAndRetrySucceeds(t *testing.T) {
 		credentials(map[string]string{"github": "stale-token"}, nil),
 		credentials(map[string]string{"github": canary}, nil),
 	)
-	if err := s.Load(context.Background(), testSubjectToken); err != nil {
+	if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
 		t.Fatal(err)
 	}
-	err := s.Use(context.Background(), "github", func(token string) error {
+	err := s.Use(context.Background(), testSubject, "github", func(token string) error {
 		if token == "stale-token" {
 			return errProvider401
 		}
@@ -232,7 +259,7 @@ func TestStoreProvider401RefetchSucceedsAndRetrySucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The re-fetched credential is now held; later uses do not fetch.
-	if err := s.Use(context.Background(), "github", func(token string) error {
+	if err := s.Use(context.Background(), testSubject, "github", func(token string) error {
 		if token != canary {
 			return errors.New("re-fetched credential not held")
 		}
@@ -254,11 +281,11 @@ func TestStoreProvider401RefetchFailureDenies(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, f := newTestStore(t, credentials(map[string]string{"github": canary}, nil), reply)
-			if err := s.Load(context.Background(), testSubjectToken); err != nil {
+			if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
 				t.Fatal(err)
 			}
 			calls := 0
-			err := s.Use(context.Background(), "github", func(string) error { calls++; return errProvider401 })
+			err := s.Use(context.Background(), testSubject, "github", func(string) error { calls++; return errProvider401 })
 			var denied *DeniedError
 			if !errors.As(err, &denied) || denied.Reason != name {
 				t.Fatalf("err = %v, want denial %s", err, name)
@@ -267,7 +294,7 @@ func TestStoreProvider401RefetchFailureDenies(t *testing.T) {
 				t.Fatalf("callback ran %d times, want 1 (no retry after a failed re-fetch)", calls)
 			}
 			// The rejected credential is gone and is not fetched again.
-			_ = s.Use(context.Background(), "github", func(string) error { t.Fatal("callback ran"); return nil })
+			_ = s.Use(context.Background(), testSubject, "github", func(string) error { t.Fatal("callback ran"); return nil })
 			if got := f.count(); got != 2 {
 				t.Fatalf("I11 calls = %d, want 2", got)
 			}
@@ -280,12 +307,12 @@ func TestStoreProvider401RefetchFailureDenies(t *testing.T) {
 
 func TestStoreNon401CallbackErrorIsNotRetried(t *testing.T) {
 	s, f := newTestStore(t, credentials(map[string]string{"github": canary}, nil))
-	if err := s.Load(context.Background(), testSubjectToken); err != nil {
+	if err := s.Load(context.Background(), testSubject, testSubjectToken); err != nil {
 		t.Fatal(err)
 	}
 	boom := errors.New("provider 500")
 	calls := 0
-	if err := s.Use(context.Background(), "github", func(string) error { calls++; return boom }); !errors.Is(err, boom) {
+	if err := s.Use(context.Background(), testSubject, "github", func(string) error { calls++; return boom }); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
 	if calls != 1 || f.count() != 1 {
@@ -302,7 +329,7 @@ func TestStoreLoadErrorsDenyAndNeverCarryBody(t *testing.T) {
 		http.StatusInternalServerError: ErrUnavailable,
 	} {
 		s, _ := newTestStore(t, status(code))
-		err := s.Load(context.Background(), testSubjectToken)
+		err := s.Load(context.Background(), testSubject, testSubjectToken)
 		if !errors.Is(err, want) {
 			t.Fatalf("%d: err = %v, want %v", code, err, want)
 		}
@@ -310,7 +337,7 @@ func TestStoreLoadErrorsDenyAndNeverCarryBody(t *testing.T) {
 			t.Fatalf("%d: load error carries I11 body", code)
 		}
 		var denied *DeniedError
-		if err := s.Use(context.Background(), "github", func(string) error { return nil }); !errors.As(err, &denied) || denied.Connect() {
+		if err := s.Use(context.Background(), testSubject, "github", func(string) error { return nil }); !errors.As(err, &denied) || denied.Connect() {
 			t.Fatalf("%d: use err = %v, want non-connect denial", code, err)
 		}
 	}
@@ -320,7 +347,7 @@ func TestStoreMalformedResponseDoesNotLeak(t *testing.T) {
 	s, _ := newTestStore(t, func(w http.ResponseWriter) {
 		_, _ = io.WriteString(w, `{"credentials":[{"provider":"github","access_token":"`+canary+`"`)
 	})
-	err := s.Load(context.Background(), testSubjectToken)
+	err := s.Load(context.Background(), testSubject, testSubjectToken)
 	if !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), canary) {
 		t.Fatalf("err = %v", err)
 	}
@@ -335,14 +362,14 @@ func TestStoreFlushDuringLoadDiscardsResult(t *testing.T) {
 		credentials(map[string]string{"github": canary}, nil)(w)
 	})
 	done := make(chan error, 1)
-	go func() { done <- s.Load(context.Background(), testSubjectToken) }()
+	go func() { done <- s.Load(context.Background(), testSubject, testSubjectToken) }()
 	<-entered
 	s.Flush()
 	close(release)
 	if err := <-done; err == nil {
 		t.Fatal("load after flush reported success")
 	}
-	if err := s.Use(context.Background(), "github", func(string) error { t.Fatal("callback ran"); return nil }); err == nil {
+	if err := s.Use(context.Background(), testSubject, "github", func(string) error { t.Fatal("callback ran"); return nil }); err == nil {
 		t.Fatal("credential installed after flush")
 	}
 }
