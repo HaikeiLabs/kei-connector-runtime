@@ -328,7 +328,7 @@ func WritePolicyStateDenial(stdout, stderr io.Writer, reason string, err error) 
 			if failure.HTTPStatus != 0 {
 				fmt.Fprintf(stderr, "authorization denied (%s): category=%s http_status=%d\n", reason, failure.Category, failure.HTTPStatus)
 			} else if failure.TransportKind != "" {
-				fmt.Fprintf(stderr, "authorization denied (%s): category=%s transport_kind=%s\n", reason, failure.Category, failure.TransportKind)
+				fmt.Fprintf(stderr, "authorization denied (%s): category=%s transport_phase=%s transport_kind=%s\n", reason, failure.Category, failure.TransportPhase, failure.TransportKind)
 			} else {
 				fmt.Fprintf(stderr, "authorization denied (%s): category=%s\n", reason, failure.Category)
 			}

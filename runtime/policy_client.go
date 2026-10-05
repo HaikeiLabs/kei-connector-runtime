@@ -163,9 +163,10 @@ type SubjectResolveRequest struct {
 }
 
 type SubjectResolutionFailure struct {
-	Category      string
-	HTTPStatus    int
-	TransportKind string
+	Category       string
+	HTTPStatus     int
+	TransportPhase string
+	TransportKind  string
 }
 
 // classifySubjectResolutionTransportError returns a bounded diagnostic label;
@@ -208,11 +209,23 @@ func (e *SubjectResolutionFailure) Error() string { return "subject resolution f
 
 func (c *policyControlClient) ResolveSubject(ctx context.Context, req SubjectResolveRequest) (policybundle.Subject, error) {
 	b, _ := json.Marshal(req)
-	resp, err := c.request(ctx, http.MethodPost, "/api/v1/runtime/subject-attributes:resolve", b)
+	path := "/api/v1/runtime/subject-attributes:resolve"
+	httpReq, err := c.newRequest(ctx, http.MethodPost, path, b)
 	if err != nil {
 		return policybundle.Subject{}, &SubjectResolutionFailure{
-			Category:      "transport",
-			TransportKind: classifySubjectResolutionTransportError(err),
+			Category:       "transport",
+			TransportPhase: "request_build",
+			TransportKind:  "request_setup",
+		}
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return policybundle.Subject{}, &SubjectResolutionFailure{
+			Category:       "transport",
+			TransportPhase: "http_client_do",
+			TransportKind:  classifySubjectResolutionTransportError(err),
 		}
 	}
 	defer resp.Body.Close()
