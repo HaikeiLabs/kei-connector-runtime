@@ -12,22 +12,39 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-// DispatchRoute is the typed route contract expected from manifest v3. Keep
-// this runtime-owned abstraction independent of the manifest registration
-// package so route discovery can be integrated without coupling the planner to
-// untrusted wire data.
-type DispatchRoute interface{ isDispatchRoute() }
-
-type ConnectorDispatch struct {
-	ConnectorID          string
-	RequiredCapabilities []string
+// DispatchRoute is the v3/policy-set v2 typed route union. Exactly one arm is
+// populated; connector routes carry their registered requirements and
+// harness-native routes carry only their executor reference. It is runtime
+// registration data, never accepted from a preflight caller.
+type DispatchRoute struct {
+	ConnectorBinding *ConnectorBindingRoute `json:"connector_binding,omitempty"`
+	HarnessExecutor  *HarnessExecutorRoute  `json:"harness_executor,omitempty"`
+}
+type ConnectorBindingRoute struct {
+	ConnectorID          string         `json:"connector_id"`
+	RequiredCapabilities []string       `json:"required_capabilities"`
+	ResourceTypes        []ResourceType `json:"resource_types"`
+}
+type HarnessExecutorRoute struct {
+	ExecutorID string `json:"executor_id"`
+}
+type ResourceType struct {
+	Type       string `json:"type"`
+	ParentType string `json:"parent_type,omitempty"`
 }
 
-func (ConnectorDispatch) isDispatchRoute() {}
-
-type HarnessDispatch struct{}
-
-func (HarnessDispatch) isDispatchRoute() {}
+func (r DispatchRoute) valid() bool {
+	if (r.ConnectorBinding == nil) == (r.HarnessExecutor == nil) {
+		return false
+	}
+	if r.ConnectorBinding != nil {
+		if r.ConnectorBinding.ConnectorID == "" || len(r.ConnectorBinding.RequiredCapabilities) == 0 || len(r.ConnectorBinding.ResourceTypes) == 0 {
+			return false
+		}
+		return r.HarnessExecutor == nil
+	}
+	return r.HarnessExecutor.ExecutorID != ""
+}
 
 // Operation is one exact provider operation approved by policy.
 type Operation = policybundle.Operation
@@ -51,6 +68,15 @@ type BindingContext struct {
 // plans; callers must split those workflows into separately preflighted calls.
 type OperationPlanner interface {
 	Plan(validatedArgs []byte, binding BindingContext) ([]Operation, error)
+}
+type InvocationArgsValidator interface {
+	ValidateArgs(raw []byte) ([]byte, error)
+}
+type ToolOperationRegistration struct {
+	AgentID   string
+	Route     DispatchRoute
+	Validator InvocationArgsValidator
+	Planner   OperationPlanner
 }
 
 // OperationAuthorizer is implemented by the local PDP integration. Each exact
@@ -105,10 +131,11 @@ func NewAuthorizationStore() *AuthorizationStore {
 // Preflight plans, authorizes every exact operation and atomically stores the
 // plan only after all checks succeed. No plan or handle is suitable for logs.
 func (s *AuthorizationStore) Preflight(in PreflightInput, ttl time.Duration) (PreflightResult, error) {
-	if in.Planner == nil || in.Authorizer == nil || len(in.ValidatedArgs) == 0 || in.Binding.InstallationID == "" || in.Binding.BundleDigest == "" || in.Binding.Subject == "" || in.Binding.AgentID == "" || in.Binding.Tool == "" || in.Binding.Route == nil || ttl < minAuthorizationTTL || ttl > maxAuthorizationTTL {
+	in.Binding = cloneBinding(in.Binding)
+	if in.Planner == nil || in.Authorizer == nil || len(in.ValidatedArgs) == 0 || in.Binding.InstallationID == "" || in.Binding.BundleDigest == "" || in.Binding.Subject == "" || in.Binding.AgentID == "" || in.Binding.Tool == "" || !in.Binding.Route.valid() || ttl < minAuthorizationTTL || ttl > maxAuthorizationTTL {
 		return PreflightResult{}, ErrPreflightDenied
 	}
-	ops, err := in.Planner.Plan(append([]byte(nil), in.ValidatedArgs...), in.Binding)
+	ops, err := in.Planner.Plan(append([]byte(nil), in.ValidatedArgs...), cloneBinding(in.Binding))
 	if err != nil || len(ops) == 0 {
 		return PreflightResult{}, ErrPlanInvalid
 	}
@@ -132,7 +159,7 @@ func (s *AuthorizationStore) Preflight(in PreflightInput, ttl time.Duration) (Pr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeLocked(s.now())
-	s.entries[keyString] = &authorizationEntry{binding: in.Binding, digest: in.Binding.BundleDigest, operations: append([]Operation(nil), ops...), consumed: make([]bool, len(ops)), expires: expires}
+	s.entries[keyString] = &authorizationEntry{binding: cloneBinding(in.Binding), digest: in.Binding.BundleDigest, operations: append([]Operation(nil), ops...), consumed: make([]bool, len(ops)), expires: expires}
 	return PreflightResult{Handle: handle, ExpiresAt: expires}, nil
 }
 
@@ -163,6 +190,12 @@ func (s *AuthorizationStore) Consume(handle string, binding BindingContext, oper
 	return ErrAuthorizationInvalid
 }
 
+func (s *AuthorizationStore) InvalidateAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.entries)
+}
+
 func (s *AuthorizationStore) purgeLocked(now time.Time) {
 	for key, e := range s.entries {
 		if !now.Before(e.expires) {
@@ -170,19 +203,39 @@ func (s *AuthorizationStore) purgeLocked(now time.Time) {
 		}
 	}
 }
+func cloneBinding(in BindingContext) BindingContext {
+	if in.Route.ConnectorBinding != nil {
+		c := *in.Route.ConnectorBinding
+		c.RequiredCapabilities = append([]string(nil), c.RequiredCapabilities...)
+		c.ResourceTypes = append([]ResourceType(nil), c.ResourceTypes...)
+		in.Route = DispatchRoute{ConnectorBinding: &c}
+	}
+	if in.Route.HarnessExecutor != nil {
+		h := *in.Route.HarnessExecutor
+		in.Route = DispatchRoute{HarnessExecutor: &h}
+	}
+	return in
+}
 func sameBinding(a, b BindingContext) bool {
 	return a.InstallationID == b.InstallationID && a.BundleDigest == b.BundleDigest && a.Subject == b.Subject && a.AgentID == b.AgentID && a.Tool == b.Tool && a.ParentSpan == b.ParentSpan && a.DelegationDepth == b.DelegationDepth && routeEqual(a.Route, b.Route)
 }
 func routeEqual(a, b DispatchRoute) bool {
-	switch x := a.(type) {
-	case ConnectorDispatch:
-		y, ok := b.(ConnectorDispatch)
-		return ok && x.ConnectorID == y.ConnectorID && equalStrings(x.RequiredCapabilities, y.RequiredCapabilities)
-	case HarnessDispatch:
-		_, ok := b.(HarnessDispatch)
-		return ok
+	if !a.valid() || !b.valid() {
+		return false
 	}
-	return false
+	if a.ConnectorBinding != nil && b.ConnectorBinding != nil {
+		x, y := a.ConnectorBinding, b.ConnectorBinding
+		if x.ConnectorID != y.ConnectorID || !equalStrings(x.RequiredCapabilities, y.RequiredCapabilities) || len(x.ResourceTypes) != len(y.ResourceTypes) {
+			return false
+		}
+		for i := range x.ResourceTypes {
+			if x.ResourceTypes[i] != y.ResourceTypes[i] {
+				return false
+			}
+		}
+		return true
+	}
+	return a.HarnessExecutor != nil && b.HarnessExecutor != nil && a.HarnessExecutor.ExecutorID == b.HarnessExecutor.ExecutorID
 }
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
@@ -196,12 +249,17 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 func validatePlan(route DispatchRoute, ops []Operation) error {
-	r, ok := route.(ConnectorDispatch)
-	if !ok {
+	if !route.valid() || route.ConnectorBinding == nil {
 		return ErrPlanInvalid
 	}
-	if r.ConnectorID == "" || len(r.RequiredCapabilities) == 0 {
+	r := route.ConnectorBinding
+	if r.ConnectorID == "" || len(r.RequiredCapabilities) == 0 || len(r.ResourceTypes) == 0 {
 		return ErrPlanInvalid
+	}
+	for _, t := range r.ResourceTypes {
+		if t.Type == "" {
+			return ErrPlanInvalid
+		}
 	}
 	seenCaps := map[string]bool{}
 	for _, c := range r.RequiredCapabilities {
@@ -212,7 +270,14 @@ func validatePlan(route DispatchRoute, ops []Operation) error {
 	}
 	covered := map[string]bool{}
 	for _, op := range ops {
-		if op.ConnectorID != r.ConnectorID || op.Capability == "" || op.Action == "" || op.Resource == "" || !seenCaps[op.Capability] {
+		declaredResourceType := false
+		for _, resourceType := range r.ResourceTypes {
+			if resourceType.Type == op.ResourceType && resourceType.ParentType == op.ResourceParentType {
+				declaredResourceType = true
+				break
+			}
+		}
+		if op.ConnectorID != r.ConnectorID || op.Capability == "" || op.Action == "" || op.Resource == "" || op.ResourceType == "" || !declaredResourceType || !seenCaps[op.Capability] {
 			return ErrPlanInvalid
 		}
 		covered[op.Capability] = true

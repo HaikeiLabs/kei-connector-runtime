@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -90,15 +91,18 @@ type socketDecisionEvent struct {
 }
 
 type LocalPDP struct {
-	cfg       PolicyConfig
-	Sessions  *pdp.Sessions
-	evaluator atomic.Pointer[pdp.Evaluator]
-	identity  atomic.Pointer[Identity]
-	emit      EmitAuditFunc
+	cfg             PolicyConfig
+	authorizations  *AuthorizationStore
+	registrationsMu sync.RWMutex
+	registrations   map[string]ToolOperationRegistration
+	Sessions        *pdp.Sessions
+	evaluator       atomic.Pointer[pdp.Evaluator]
+	identity        atomic.Pointer[Identity]
+	emit            EmitAuditFunc
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
-	return &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit}
+	return &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, authorizations: NewAuthorizationStore(), registrations: make(map[string]ToolOperationRegistration)}
 }
 
 func (l *LocalPDP) SetIdentity(identity *Identity) {
@@ -110,11 +114,15 @@ func (l *LocalPDP) SetIdentity(identity *Identity) {
 		slog.Error("local policy evaluator unavailable; socket authorize denies", "error", err)
 		return
 	}
+	if old := l.identity.Load(); old == nil || old.ID != identity.ID || old.OrgID != identity.OrgID || old.WorkspaceID == nil || *old.WorkspaceID != *identity.WorkspaceID {
+		l.authorizations.InvalidateAll()
+	}
 	l.identity.Store(identity)
 	l.evaluator.Store(e)
 }
 
 func (l *LocalPDP) AfterSync(err error) {
+	l.authorizations.InvalidateAll()
 	e := l.evaluator.Load()
 	if errors.Is(err, ErrInstallationRevoked) {
 		if e != nil {
@@ -132,7 +140,7 @@ func (l *LocalPDP) AfterSync(err error) {
 func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, checkAuth func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
+		case (r.URL.Path == "/v1/authorize" || r.URL.Path == "/v1/preflight" || r.URL.Path == "/v1/consume") && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
 		default:
 			next.ServeHTTP(w, r)
@@ -149,6 +157,10 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize":
 			l.handleAuthorize(w, r)
+		case r.URL.Path == "/v1/preflight":
+			l.handlePreflight(w, r)
+		case r.URL.Path == "/v1/consume":
+			l.handleConsume(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:

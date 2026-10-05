@@ -116,6 +116,18 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	return out, nil
 }
 
+// CurrentBundleDigest returns the digest from a currently valid audience-checked bundle.
+func (e *Evaluator) CurrentBundleDigest(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	v, _, err := e.check()
+	if err != nil {
+		return "", err
+	}
+	return v.Digest, nil
+}
+
 // AuthorizeOperation implements runtime.OperationAuthorizer without importing
 // runtime (which depends on this package). Callers provide trusted identity
 // fields and an exact planner-produced operation.

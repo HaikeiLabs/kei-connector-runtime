@@ -16,10 +16,14 @@ type Subject struct {
 	MaxAgeSeconds   int             `json:"max_age_seconds,omitempty"`
 }
 type Operation struct {
-	ConnectorID string
-	Capability  string
-	Action      string
-	Resource    string
+	ConnectorID        string `json:"connector_id"`
+	Capability         string `json:"capability"`
+	Action             string `json:"action"`
+	Resource           string `json:"resource"`
+	ResourceType       string `json:"resource_type"`
+	ResourceID         string `json:"resource_id,omitempty"`
+	ResourceParent     string `json:"resource_parent,omitempty"`
+	ResourceParentType string `json:"resource_parent_type,omitempty"`
 }
 type Call struct {
 	Tool, Action, Resource, AgentID, ConnectorID, Capability, UserID, Email string

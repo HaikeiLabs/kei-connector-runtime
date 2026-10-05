@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
@@ -40,7 +41,10 @@ func runConnector(args []string) int {
 			},
 		}
 		if cfg.IsRuntime() {
-			env.SubjectSource = session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken)
+			socketPath := runtimeSocketPathFromEnv()
+			env.SubjectSource = session.NewSocketSubjectSource(socketPath, cfg.RuntimeToken)
+			depth, _ := strconv.Atoi(envOr("KEI_PROXY_DELEGATION_DEPTH", "0"))
+			env.PlanAuthorization = invoke.NewSocketPlanAuthorization(socketPath, cfg.RuntimeToken, envOr("KEI_PROXY_PARENT_SPAN", ""), depth)
 		}
 		return invoke.Run(args[1:], env, os.Stdout, os.Stderr)
 	}

@@ -96,6 +96,25 @@ func TestSocketSessionGetReturns404WhenNoSession(t *testing.T) {
 	}
 }
 
+func TestSocketPreflightDeniesWhenPlannerIsUnregistered(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example"}, nil)
+	handler := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(`{"schema":"kei.tool-preflight-request/v1","tool":"t","args":{}}`))
+	handler.ServeHTTP(rec, req)
+	var out struct {
+		Schema     string `json:"schema"`
+		Decision   string `json:"decision"`
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || out.Schema != "kei.tool-preflight-response/v1" || out.Decision != "deny" || out.ReasonCode != "planner_unavailable" {
+		t.Fatalf("status %d response %+v", rec.Code, out)
+	}
+}
+
 func TestSocketAuthorizeDeniesBeforeIdentityResolves(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{
 		RuntimeToken:           policyTestToken,

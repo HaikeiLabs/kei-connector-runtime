@@ -22,6 +22,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/google/uuid"
 )
@@ -95,10 +96,15 @@ type Env struct {
 	ProviderTransport http.RoundTripper
 	LookupIP          func(context.Context, string) ([]net.IP, error)
 	Now               func() time.Time
+	PlanAuthorization PlanAuthorization
 }
 
 // isRuntime reports customer-runtime mode, which the runtime token decides.
 func (e Env) isRuntime() bool { return e.RuntimeToken != "" }
+
+type PlanAuthorization interface {
+	Consume(handle, tool, agentID string, operation policybundle.Operation) error
+}
 
 // Client calls the control plane's governed connector endpoint.
 type Client struct {
@@ -181,11 +187,17 @@ type connectorInvokeArgs struct {
 // the request plus the ABAC endpoint, credential, and timeout the caller
 // should use, after applying CLI overrides and the runtime relay rules.
 type connectorInvokePlan struct {
-	req        Request
-	abacURL    string
-	abacSecret string
-	timeout    time.Duration
-	input      string
+	req                 Request
+	abacURL             string
+	abacSecret          string
+	timeout             time.Duration
+	input               string
+	authorizationHandle string
+	toolName            string
+	resourceType        string
+	resourceID          string
+	resourceParent      string
+	resourceParentType  string
 }
 
 // parseConnectorInvokeArgs maps CLI flags and the identity-propagation
@@ -203,6 +215,12 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	user := fs.String("user", "", "alias for --user-id")
 	agentID := fs.String("agent-id", envOr("KEI_PROXY_AGENT_ID", ""), "agent id making the call")
 	framework := fs.String("framework", envOr("KEI_PROXY_FRAMEWORK", ""), "agent framework (e.g. claude, codex)")
+	authorizationHandle := fs.String("authorization-handle", "", "opaque runtime preflight handle")
+	toolName := fs.String("tool", "", "registered tool name authorized by preflight")
+	resourceType := fs.String("resource-type", "", "resource type for the planned operation")
+	resourceID := fs.String("resource-id", "", "exact resource id for the planned operation")
+	resourceParent := fs.String("resource-parent", "", "exact parent resource for the planned operation")
+	resourceParentType := fs.String("resource-parent-type", "", "exact parent resource type")
 	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
 	inputArg := fs.String("input", "", "capability input: a JSON object, @<file>, or - for stdin (default {})")
@@ -256,10 +274,16 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 			Framework:      *framework,
 			ProviderUserID: *providerUser,
 		},
-		abacURL:    abacURLValue,
-		abacSecret: secret,
-		timeout:    time.Duration(*timeout) * time.Second,
-		input:      *inputArg,
+		abacURL:             abacURLValue,
+		abacSecret:          secret,
+		timeout:             time.Duration(*timeout) * time.Second,
+		input:               *inputArg,
+		authorizationHandle: *authorizationHandle,
+		toolName:            *toolName,
+		resourceType:        *resourceType,
+		resourceID:          *resourceID,
+		resourceParent:      *resourceParent,
+		resourceParentType:  *resourceParentType,
 	}, nil
 }
 
@@ -334,6 +358,15 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		return finish(deny("input_invalid", "input must be one JSON object of at most 16 KiB"))
 	}
 	out.Audit = &outputAudit{InputDigest: plan.req.InputDigest}
+	if env.PlanAuthorization != nil {
+		if plan.authorizationHandle == "" || plan.toolName == "" || plan.resourceType == "" {
+			return finish(deny("preflight_required", "a runtime preflight authorization is required"))
+		}
+		op := policybundle.Operation{ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability, Action: plan.req.Action, Resource: plan.req.Resource, ResourceType: plan.resourceType, ResourceID: plan.resourceID, ResourceParent: plan.resourceParent, ResourceParentType: plan.resourceParentType}
+		if err := env.PlanAuthorization.Consume(plan.authorizationHandle, plan.toolName, plan.req.AgentID, op); err != nil {
+			return finish(deny("preflight_invalid", "runtime preflight authorization is invalid or already consumed"))
+		}
+	}
 
 	catalogCtx, cancelCatalog := context.WithTimeout(ctx, catalogTimeout)
 	resp, err := NewClient(plan.abacURL, plan.abacSecret, plan.timeout).withTransport(env.CatalogTransport).Invoke(catalogCtx, plan.req)

@@ -90,7 +90,8 @@ func (v *Verified) EvaluateSession(call Call, subject *SessionSubject, members M
 	}
 	var reg tool
 	for _, t := range set.Tools {
-		if (call.ConnectorInvocation && t.ConnectorID == call.ConnectorID && t.Capability == call.Capability) ||
+		if (call.ConnectorInvocation && call.Tool != "" && t.Name == call.Tool && t.ConnectorID == call.ConnectorID && t.Capability == call.Capability) ||
+			(call.ConnectorInvocation && call.Tool == "" && t.ConnectorID == call.ConnectorID && t.Capability == call.Capability) ||
 			(!call.ConnectorInvocation && t.Name == call.Tool) {
 			reg = t
 			break
