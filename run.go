@@ -115,9 +115,21 @@ func runHook(args []string) int {
 func runProxyRun(args []string) int {
 	cfg := configFromEnv()
 	socketPath := runtimeSocketPathFromEnv()
+	daemonSocket := ""
+	switch cfg.CredentialRelease {
+	case "", CredentialReleaseLegacy:
+	case CredentialReleaseIdentity:
+		// The serve daemon resolves the references from the session and
+		// spawns the child; this process is only its socket client.
+		daemonSocket = socketPath
+	default:
+		fmt.Fprintf(os.Stderr, "Error: KEI_CREDENTIAL_RELEASE must be %q or %q\n", CredentialReleaseIdentity, CredentialReleaseLegacy)
+		return 1
+	}
 	auditProv := auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken)
 	return runcommand.Run(args, os.Stdout, os.Stderr, runcommand.Config{
-		ABACURL: cfg.ABACURL, ABACSecret: cfg.ABACSecret, RuntimeToken: cfg.RuntimeToken,
+		DaemonSocket: daemonSocket,
+		ABACURL:      cfg.ABACURL, ABACSecret: cfg.ABACSecret, RuntimeToken: cfg.RuntimeToken,
 		RuntimeStateDir: cfg.RuntimeStateDir, ProviderUserID: cfg.ProviderUserID,
 		ControlPlaneURL: cfg.RuntimeControlPlaneURL, SocketPath: socketPath,
 		AuditCrypto: auditProv,

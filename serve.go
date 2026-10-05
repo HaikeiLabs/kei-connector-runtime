@@ -16,10 +16,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -195,6 +197,15 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 			},
 			Authorize:     connectorAuthorizer(local),
 			UseCredential: local.UseCredential,
+		})
+		local.SetCommandRunner(&runcommand.Daemon{
+			Authorize:     connectorAuthorizer(local),
+			UseCredential: local.UseCredential,
+			AppendAudit: func(record []byte) error {
+				emitFunc(record)
+				return nil
+			},
+			AuditCrypto: auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken),
 		})
 	}
 	return local, nil

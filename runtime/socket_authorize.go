@@ -111,6 +111,7 @@ type LocalPDP struct {
 	keychain  SessionKeychain
 	creds     *credrelease.Store
 	invoker   http.Handler
+	runner    http.Handler
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
@@ -142,6 +143,11 @@ func (l *LocalPDP) UseCredential(ctx context.Context, subject, provider string, 
 // behind the socket's config and runtime-token checks. Without one the route
 // is not served.
 func (l *LocalPDP) SetConnectorInvoker(h http.Handler) { l.invoker = h }
+
+// SetCommandRunner serves POST /v1/commands:run with h (HAI-346 L3c), behind
+// the socket's config and runtime-token checks. Without one the route is not
+// served.
+func (l *LocalPDP) SetCommandRunner(h http.Handler) { l.runner = h }
 
 // AuthorizeConnector decides a connector call with the local PDP and the
 // session subject, and returns the runtime identity it was decided under.
@@ -210,6 +216,7 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
 		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
+		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -227,6 +234,8 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 			l.handleAuthorize(w, r)
 		case r.URL.Path == "/v1/connectors:invoke":
 			l.invoker.ServeHTTP(w, r)
+		case r.URL.Path == "/v1/commands:run":
+			l.runner.ServeHTTP(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:

@@ -208,8 +208,17 @@ func connectorTestBundle(t *testing.T) []byte {
 		tool("github.pull_request_read", "github", "github:admin", invokeConnector, "pull_request.read"),
 		tool("linear.team_read", "linear", "linear:read", "conn-linear-0001", "team.read"),
 		tool("notion.page_read", "notion", "notion:read", "conn-notion-0001", "page.read"),
+		// L3c: kei-proxy run credential references.
+		tool("github.credential", "github", "github:credential", invokeConnector, "credential"),
+		tool("linear.credential", "linear", "linear:credential", "conn-linear-0001", "credential"),
+		tool("notion.credential", "notion", "notion:credential", "conn-notion-0001", "credential"),
 	}
-	ps["policies"] = []any{policy("pol-github-read", "capability:repository.read"), policy("pol-linear-read", "capability:team.read"), policy("pol-notion-read", "capability:page.read")}
+	ps["policies"] = []any{
+		policy("pol-github-read", "capability:repository.read"), policy("pol-linear-read", "capability:team.read"), policy("pol-notion-read", "capability:page.read"),
+		policy("pol-github-token", "resource:kei://connectors/"+invokeConnector+"/token"),
+		policy("pol-linear-token", "resource:kei://connectors/conn-linear-0001/token"),
+		policy("pol-notion-token", "resource:kei://connectors/conn-notion-0001/token"),
+	}
 	capability := func(names ...string) []any {
 		var out []any
 		for _, n := range names {
@@ -218,14 +227,14 @@ func connectorTestBundle(t *testing.T) []byte {
 		return out
 	}
 	ps["connectors"] = []any{
-		map[string]any{"id": invokeConnector, "provider": "github", "capabilities": capability("repository.read", "pull_request.read")},
-		map[string]any{"id": "conn-linear-0001", "provider": "linear", "capabilities": capability("team.read")},
-		map[string]any{"id": "conn-notion-0001", "provider": "notion", "capabilities": capability("page.read")},
+		map[string]any{"id": invokeConnector, "provider": "github", "capabilities": capability("repository.read", "pull_request.read", "credential")},
+		map[string]any{"id": "conn-linear-0001", "provider": "linear", "capabilities": capability("team.read", "credential")},
+		map[string]any{"id": "conn-notion-0001", "provider": "notion", "capabilities": capability("page.read", "credential")},
 	}
 	doc["agent_connector_bindings"] = []any{
-		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": invokeConnector, "capabilities": []string{"repository.read", "pull_request.read"}},
-		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-linear-0001", "capabilities": []string{"team.read"}},
-		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-notion-0001", "capabilities": []string{"page.read"}},
+		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": invokeConnector, "capabilities": []string{"repository.read", "pull_request.read", "credential"}},
+		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-linear-0001", "capabilities": []string{"team.read", "credential"}},
+		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-notion-0001", "capabilities": []string{"page.read", "credential"}},
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
