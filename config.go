@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
@@ -59,17 +60,12 @@ func auditMaxBytesFromEnv() int64 {
 
 const defaultAuditMaxBytes int64 = 100 << 20
 
-// DefaultRuntimeStateDir is the default directory for persisted policy bundle
-// and runtime state. Per ADR-026 §5 the directory must be created with mode
-// 0700 and its files with mode 0600.
-const DefaultRuntimeStateDir = "/var/lib/kei-proxy"
-
 func configFromEnv() Config {
 	return Config{
 		ABACURL:                       envOr("ABAC_URL", "http://localhost:8080"),
 		RuntimeControlPlaneURL:        os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
 		RuntimeToken:                  os.Getenv("KEI_RUNTIME_TOKEN"),
-		RuntimeStateDir:               envOr("KEI_RUNTIME_STATE_DIR", DefaultRuntimeStateDir),
+		RuntimeStateDir:               envOr("KEI_RUNTIME_STATE_DIR", statedir.DefaultPathOS()),
 		CredentialSyncKeyID:           os.Getenv("KEI_CREDENTIAL_SYNC_KEY_ID"),
 		CredentialSyncPrivateKey:      os.Getenv("KEI_CREDENTIAL_SYNC_PRIVATE_KEY"),
 		CredentialStoreInstallationID: os.Getenv("KEI_CREDENTIAL_STORE_INSTALLATION_ID"),

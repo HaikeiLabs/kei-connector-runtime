@@ -4,7 +4,13 @@
 
 ## Bootstrap and state
 
-Set `KEI_RUNTIME_TOKEN`, `KEI_RUNTIME_CONTROL_PLANE_URL`, and a writable `KEI_RUNTIME_STATE_DIR` (default `/var/lib/kei-proxy`). The control-plane URL must be an HTTPS origin without userinfo, path, query, or fragment. Requests use the installation bearer token, follow no redirects, and rely on Go's standard TLS certificate and hostname validation. HTTP is permitted only for loopback test/development servers; non-loopback HTTP is rejected.
+Set `KEI_RUNTIME_TOKEN`, `KEI_RUNTIME_CONTROL_PLANE_URL`, and a writable `KEI_RUNTIME_STATE_DIR`. The default depends on the operating system:
+
+- **macOS**: `$HOME/Library/Application Support/kei-proxy`
+- **Linux** (with `$XDG_STATE_HOME` set, non-root): `$XDG_STATE_HOME/kei-proxy`
+- **Linux** (no `XDG_STATE_HOME`, or running as root): `/var/lib/kei-proxy`
+
+The control-plane URL must be an HTTPS origin without userinfo, path, query, or fragment. Requests use the installation bearer token, follow no redirects, and rely on Go's standard TLS certificate and hostname validation. HTTP is permitted only for loopback test/development servers; non-loopback HTTP is rejected.
 
 The bundle endpoint returns the canonical JSON body with content type `application/vnd.kei.policy-bundle.v1+json`, a strong ETag exactly `"sha256:<lowercase hex digest of exact response bytes>"`, and a monotonically increasing bundle-version header. The runtime checks the exact raw-byte digest against the ETag before schema validation, then checks the header version against the validated payload before atomically activating it. No signature, signing key, TOFU state, or signing-key endpoint is required.
 

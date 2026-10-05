@@ -210,7 +210,7 @@ Environment:
   KEI_PROXY_AUDIT           audit JSONL file path (authorize appends, collector ships)
   KEI_PROXY_AUDIT_MAX_BYTES total audit spool cap in bytes (default 104857600, 100 MiB)
   KEI_RUNTIME_SOCKET_PATH   local HTTP Unix socket (serve; default platform-dependent, see docs/unix-socket.md)
-  KEI_RUNTIME_STATE_DIR     protected policy bundle state directory (default /var/lib/kei-proxy)
+  KEI_RUNTIME_STATE_DIR     protected policy bundle state directory (default platform-dependent, see docs/policy-bundles.md)
   KEI_PROXY_SPAN_ID         span id for the invocation (stable dedupe key)
   KEI_PROXY_PARENT_SPAN     parent span id (delegation chain)
   KEI_PROXY_DELEGATION_DEPTH delegation depth (0 = direct)

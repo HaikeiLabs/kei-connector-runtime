@@ -19,6 +19,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/crypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
 )
 
 // Config is what one sync needs from the runtime environment.
@@ -315,7 +316,7 @@ func Sync(ctx context.Context, cfg Config, store secrets.Store, installation Ins
 		if cfg.ConnectorIndexPath == "" {
 			stateDir := os.Getenv("KEI_RUNTIME_STATE_DIR")
 			if stateDir == "" {
-				stateDir = "/var/lib/kei-proxy"
+				stateDir = statedir.DefaultPathOS()
 			}
 			cfg.ConnectorIndexPath = filepath.Join(stateDir, "connector-credentials.json")
 		}
