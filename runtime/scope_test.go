@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"testing"
