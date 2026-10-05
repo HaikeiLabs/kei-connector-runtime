@@ -6,9 +6,11 @@
 //
 // Resolution rules:
 //   - darwin: $HOME/Library/Application Support/kei-proxy
-//   - linux (and everything else): $XDG_STATE_HOME/kei-proxy when
-//     XDG_STATE_HOME is set and the process is not root, otherwise
-//     /var/lib/kei-proxy
+//   - linux (and everything else), root: /var/lib/kei-proxy
+//   - linux (and everything else), non-root, XDG_STATE_HOME set:
+//     $XDG_STATE_HOME/kei-proxy
+//   - linux (and everything else), non-root, XDG_STATE_HOME unset:
+//     $HOME/.local/state/kei-proxy (the XDG default state home)
 package statedir
 
 import (
@@ -26,10 +28,16 @@ func DefaultPath(goos, homeDir, xdgStateHome string, isRoot bool) string {
 	case "darwin":
 		return filepath.Join(homeDir, "Library", "Application Support", "kei-proxy")
 	default:
-		if xdgStateHome != "" && !isRoot {
+		if isRoot {
+			return "/var/lib/kei-proxy"
+		}
+		if xdgStateHome != "" {
 			return filepath.Join(xdgStateHome, "kei-proxy")
 		}
-		return "/var/lib/kei-proxy"
+		if homeDir == "" {
+			return "/var/lib/kei-proxy"
+		}
+		return filepath.Join(homeDir, ".local", "state", "kei-proxy")
 	}
 }
 

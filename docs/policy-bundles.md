@@ -7,8 +7,9 @@
 Set `KEI_RUNTIME_TOKEN`, `KEI_RUNTIME_CONTROL_PLANE_URL`, and a writable `KEI_RUNTIME_STATE_DIR`. The default depends on the operating system:
 
 - **macOS**: `$HOME/Library/Application Support/kei-proxy`
-- **Linux** (with `$XDG_STATE_HOME` set, non-root): `$XDG_STATE_HOME/kei-proxy`
-- **Linux** (no `XDG_STATE_HOME`, or running as root): `/var/lib/kei-proxy`
+- **Linux** (running as root): `/var/lib/kei-proxy`
+- **Linux** (non-root, with `$XDG_STATE_HOME` set): `$XDG_STATE_HOME/kei-proxy`
+- **Linux** (non-root, no `$XDG_STATE_HOME`): `$HOME/.local/state/kei-proxy` (the XDG default state home)
 
 The control-plane URL must be an HTTPS origin without userinfo, path, query, or fragment. Requests use the installation bearer token, follow no redirects, and rely on Go's standard TLS certificate and hostname validation. HTTP is permitted only for loopback test/development servers; non-loopback HTTP is rejected.
 
