@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
@@ -55,7 +56,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		slog.Warn("runtime_core_limit_failed", "error", err)
 	}
-	local, err := newServeLocalPDP(cfg)
+	local, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		slog.Error("runtime_credential_release_invalid", "error", err)
 		return 1
@@ -160,10 +161,16 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	return exitCode
 }
 
+// serveSeams are test seams for the daemon; the zero value is production.
+type serveSeams struct {
+	providerTransport http.RoundTripper
+}
+
 // newServeLocalPDP builds the daemon's local PDP: decision audit goes to the
 // spool and, with KEI_CREDENTIAL_RELEASE=identity, linked sessions hold their
-// connector credentials in its store. The caller must Close it on exit.
-func newServeLocalPDP(cfg Config) (*keiruntime.LocalPDP, error) {
+// connector credentials in its store and POST /v1/connectors:invoke runs
+// governed connector calls with them. The caller must Close it on exit.
+func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error) {
 	creds, err := newSessionCredentialStore(cfg)
 	if err != nil {
 		return nil, err
@@ -177,8 +184,48 @@ func newServeLocalPDP(cfg Config) (*keiruntime.LocalPDP, error) {
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
 	if creds != nil {
 		local.SetCredentialStore(creds)
+		local.SetConnectorInvoker(&invoke.Daemon{
+			Env: invoke.Env{
+				RuntimeToken:      cfg.RuntimeToken,
+				ProviderTransport: seams.providerTransport,
+				Audit: func(record []byte) error {
+					emitFunc(record)
+					return nil
+				},
+			},
+			Authorize:     connectorAuthorizer(local),
+			UseCredential: local.UseCredential,
+		})
 	}
 	return local, nil
+}
+
+// connectorAuthorizer adapts the local PDP's connector decision to the
+// daemon's invoke route.
+func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invoke.DaemonCall) (invoke.Grant, error) {
+	return func(ctx context.Context, c invoke.DaemonCall) (invoke.Grant, error) {
+		g, id, err := local.AuthorizeConnector(ctx, pdp.Request{
+			Resource: c.Resource, AgentID: c.AgentID,
+			Connector: &pdp.ConnectorTarget{ConnectorID: c.ConnectorID, Capability: c.Capability},
+		})
+		if err != nil {
+			return invoke.Grant{}, err
+		}
+		out := invoke.Grant{Allow: g.Allow, ReasonCode: g.ReasonCode, Reason: g.Reason, Enrollment: g.Enrollment, HasSession: g.HasSession}
+		if g.HasSession && g.Subject.Status == pdp.StatusLinked {
+			out.Subject = g.Subject.UserID
+		}
+		if g.Connector != nil {
+			out.Provider = g.Connector.Provider
+			for _, capability := range g.Connector.Capabilities {
+				out.Capabilities = append(out.Capabilities, capability.Name)
+			}
+		}
+		if id != nil && id.WorkspaceID != nil {
+			out.TenantID, out.WorkspaceID = id.OrgID, *id.WorkspaceID
+		}
+		return out, nil
+	}
 }
 
 // newServeHandlers builds the TCP handler and the Unix socket handler (the

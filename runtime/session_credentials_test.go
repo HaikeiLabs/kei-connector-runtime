@@ -54,9 +54,9 @@ func newCredentialPDP(t *testing.T, stateDir string) (*keiruntime.LocalPDP, *ses
 }
 
 // requireHeld asserts the session holds the github credential.
-func requireHeld(t *testing.T, l *keiruntime.LocalPDP) {
+func requireHeld(t *testing.T, l *keiruntime.LocalPDP, subject string) {
 	t.Helper()
-	err := l.UseCredential(context.Background(), "github", func(token string) error {
+	err := l.UseCredential(context.Background(), subject, "github", func(token string) error {
 		if token != "gh-session-token" {
 			return errors.New("unexpected credential")
 		}
@@ -68,9 +68,9 @@ func requireHeld(t *testing.T, l *keiruntime.LocalPDP) {
 }
 
 // requireFlushed asserts the session holds no credential.
-func requireFlushed(t *testing.T, l *keiruntime.LocalPDP) {
+func requireFlushed(t *testing.T, l *keiruntime.LocalPDP, subject string) {
 	t.Helper()
-	err := l.UseCredential(context.Background(), "github", func(string) error {
+	err := l.UseCredential(context.Background(), subject, "github", func(string) error {
 		t.Fatal("callback ran with a flushed credential")
 		return nil
 	})
@@ -89,7 +89,7 @@ func TestSessionCredentialsFetchedOnceForLinkedCLISession(t *testing.T) {
 		t.Fatalf("PUT = %d %s", rec.Code, rec.Body.String())
 	}
 	for range 20 {
-		requireHeld(t, l)
+		requireHeld(t, l, "u-1")
 	}
 	if got := f.calls(); len(got) != 1 || got[0] != "cli-subject-token" {
 		t.Fatalf("I11 calls = %v, want one with the cli token", got)
@@ -130,9 +130,9 @@ func TestSessionCredentialsFlushOnEveryEndPath(t *testing.T) {
 			if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
 				t.Fatalf("PUT = %d", rec.Code)
 			}
-			requireHeld(t, l)
+			requireHeld(t, l, "u-1")
 			end(t, l, h)
-			requireFlushed(t, l)
+			requireFlushed(t, l, "u-1")
 			if got := len(f.calls()); got != 1 {
 				t.Fatalf("I11 calls = %d, want 1 (no fetch after the session ended)", got)
 			}
@@ -148,7 +148,7 @@ func TestSessionCredentialsNewLinkedPUTReplacesCredentials(t *testing.T) {
 	putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
 	kc.token = "second-token"
 	putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
-	requireHeld(t, l)
+	requireHeld(t, l, "u-1")
 	if got := f.calls(); len(got) != 2 || got[0] != "first-token" || got[1] != "second-token" {
 		t.Fatalf("I11 subject tokens = %v", got)
 	}
@@ -168,10 +168,10 @@ func TestSessionCredentialsBundleIdentityUsesItsSubjectToken(t *testing.T) {
 	if got := f.calls(); len(got) != 0 {
 		t.Fatalf("non-linked subject fetched credentials: %v", got)
 	}
-	requireFlushed(t, l)
+	requireFlushed(t, l, "u-alice")
 
 	putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-linked"}`)
-	requireHeld(t, l)
+	requireHeld(t, l, "u-alice")
 	if got := f.calls(); len(got) != 1 || got[0] != "es256-subject-alice" {
 		t.Fatalf("I11 subject tokens = %v", got)
 	}
@@ -186,7 +186,7 @@ func TestSessionCredentialsReconcileRevocationFlushes(t *testing.T) {
 	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")})
 	h := sessionHandler(t, l)
 	putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-linked"}`)
-	requireHeld(t, l)
+	requireHeld(t, l, "u-alice")
 
 	// The next bundle no longer grants the subject.
 	next := bundleWithIdentities(t, []policybundle.Identity{
@@ -194,7 +194,7 @@ func TestSessionCredentialsReconcileRevocationFlushes(t *testing.T) {
 	})
 	activateBundle(t, dir, bytes.Replace(next, []byte(`"bundle_version":1`), []byte(`"bundle_version":2`), 1))
 	l.AfterSync(nil)
-	requireFlushed(t, l)
+	requireFlushed(t, l, "u-alice")
 }
 
 func TestSessionCredentialsLegacyModeNeverFetches(t *testing.T) {
@@ -207,7 +207,7 @@ func TestSessionCredentialsLegacyModeNeverFetches(t *testing.T) {
 	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("PUT = %d", rec.Code)
 	}
-	if err := l.UseCredential(context.Background(), "github", func(string) error { return nil }); err == nil {
+	if err := l.UseCredential(context.Background(), "u-1", "github", func(string) error { return nil }); err == nil {
 		t.Fatal("legacy mode served a session credential")
 	}
 	if got := f.calls(); len(got) != 0 {

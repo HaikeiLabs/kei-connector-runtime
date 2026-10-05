@@ -26,10 +26,11 @@ type Decision struct {
 	Reason     string
 }
 type policySet struct {
-	Groups   []group  `json:"groups"`
-	Tools    []tool   `json:"tools"`
-	Agents   []agent  `json:"agents"`
-	Policies []policy `json:"policies"`
+	Groups     []group     `json:"groups"`
+	Tools      []tool      `json:"tools"`
+	Agents     []agent     `json:"agents"`
+	Policies   []policy    `json:"policies"`
+	Connectors []Connector `json:"connectors"`
 }
 type group struct {
 	ID       string   `json:"id"`

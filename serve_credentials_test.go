@@ -60,8 +60,8 @@ func canaryI11(t *testing.T, calls *atomic.Int32) *httptest.Server {
 }
 
 // serveSocketForTest serves the daemon's socket handler on a real Unix socket
-// and returns a client for it.
-func serveSocketForTest(t *testing.T, h http.Handler) *http.Client {
+// and returns a client for it and the socket path.
+func serveSocketForTest(t *testing.T, h http.Handler) (*http.Client, string) {
 	t.Helper()
 	path := filepath.Join(shortSocketTempDir(t), "runtime.sock")
 	l, err := socket.Listen(path)
@@ -75,7 +75,7 @@ func serveSocketForTest(t *testing.T, h http.Handler) *http.Client {
 		return (&net.Dialer{}).DialContext(ctx, "unix", path)
 	}}
 	t.Cleanup(tr.CloseIdleConnections)
-	return &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	return &http.Client{Transport: tr, Timeout: 5 * time.Second}, path
 }
 
 type socketResponse struct {
@@ -159,13 +159,13 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 	keychain := &canaryKeychain{token: subjectCanary}
 	stdout, stderr := captureFDs(t, func() {
 		func() {
-			local, err := newServeLocalPDP(cfg)
+			local, err := newServeLocalPDP(cfg, serveSeams{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			local.SetKeychain(keychain)
 			_, socketHandler := newServeHandlers(cfg, local)
-			c := serveSocketForTest(t, socketHandler)
+			c, _ := serveSocketForTest(t, socketHandler)
 
 			put := socketDo(t, c, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"cli"}`)
 			if put.code != http.StatusNoContent {
@@ -180,7 +180,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 
 			// The credential is held: in-daemon use sees it.
 			held := false
-			if err := local.UseCredential(context.Background(), "github", func(token string) error {
+			if err := local.UseCredential(context.Background(), "u-canary", "github", func(token string) error {
 				held = token == credentialCanary
 				return nil
 			}); err != nil || !held {
@@ -188,7 +188,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 			}
 			// Callback failures and denials, including the 401 path.
 			for _, provider := range []string{"github", "linear", "slack"} {
-				err := local.UseCredential(context.Background(), provider, func(token string) error {
+				err := local.UseCredential(context.Background(), "u-canary", provider, func(token string) error {
 					return fmt.Errorf("provider said 401: %w", credrelease.ErrProviderUnauthorized)
 				})
 				if err == nil {
@@ -237,14 +237,14 @@ func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 	var calls atomic.Int32
 	i11 := canaryI11(t, &calls)
 	cfg := identityServeConfig(t, i11.URL)
-	local, err := newServeLocalPDP(cfg)
+	local, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(local.Close)
 	local.SetKeychain(&canaryKeychain{token: subjectCanary})
 	_, socketHandler := newServeHandlers(cfg, local)
-	c := serveSocketForTest(t, socketHandler)
+	c, _ := serveSocketForTest(t, socketHandler)
 
 	if r := socketDo(t, c, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"cli"}`); r.code != http.StatusNoContent {
 		t.Fatalf("PUT = %s", r.dump)
@@ -254,9 +254,9 @@ func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 		if strings.Contains(resp.dump, credentialCanary) || strings.Contains(resp.dump, subjectCanary) {
 			t.Errorf("%s returned credential material:\n%s", resp.route, resp.dump)
 		}
-		if strings.Contains(r.path, "credential") || r.path == "/v1/connectors:invoke" || r.path == "/v1/commands:run" {
+		if strings.Contains(r.path, "credential") || r.path == "/v1/commands:run" {
 			if resp.code != http.StatusNotFound {
-				t.Errorf("%s = %d, want 404 (no credential route in L3a)", resp.route, resp.code)
+				t.Errorf("%s = %d, want 404 (no credential route)", resp.route, resp.code)
 			}
 		}
 	}
