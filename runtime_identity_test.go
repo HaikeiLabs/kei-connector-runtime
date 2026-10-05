@@ -22,7 +22,7 @@ func TestBootstrapRuntimeResolvesInstallationAndReportsHeartbeat(t *testing.T) {
 			}
 			requests++
 			json.NewEncoder(w).Encode(RuntimeIdentity{ID: "installation-1", OrgID: "org-1", AgentID: "agent-1", Platform: "teams", Status: "pending", BindingStatus: "unverified"})
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			if r.Method != http.MethodPost {
 				t.Fatalf("heartbeat method = %s", r.Method)
 			}

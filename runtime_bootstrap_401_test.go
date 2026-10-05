@@ -69,7 +69,7 @@ func TestRuntimeBootstrapExitsNonZeroWhenWhoAmIIsRejected(t *testing.T) {
 		case "/api/v1/runtime/whoami":
 			whoamiCalls++
 			w.WriteHeader(http.StatusUnauthorized)
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			heartbeatCalls++
 			w.WriteHeader(http.StatusNoContent)
 		default:

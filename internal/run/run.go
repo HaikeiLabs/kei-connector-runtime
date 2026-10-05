@@ -139,7 +139,7 @@ func newHTTPCredentialBindingClient(baseURL string) *httpCredentialBindingClient
 }
 
 func (c *httpCredentialBindingClient) Resolve(ctx context.Context, runtimeToken, userID, service string) (string, string, string, error) {
-	endpoint := c.baseURL + "/api/v1/runtime/credential-bindings/" + url.PathEscape(userID) + "/" + url.PathEscape(service)
+	endpoint := c.baseURL + "/api/v1/runtime/credential-bindings/" + url.PathEscape(userID) + "/services/" + url.PathEscape(service)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", "", "", fmt.Errorf("build request: %w", err)

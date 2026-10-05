@@ -18,9 +18,9 @@ func newDeliveryControlPlane(t *testing.T, runtimeID string, delivery pendingDel
 	var ack ackRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runtime/credential-delivery/claim":
+		case "/api/v1/runtime/credential-delivery:claim":
 			_ = json.NewEncoder(w).Encode(claimResponse{Delivery: &delivery})
-		case "/api/v1/runtime/credential-delivery/ack":
+		case "/api/v1/runtime/credential-delivery:ack":
 			body, _ := io.ReadAll(r.Body)
 			_ = json.Unmarshal(body, &ack)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "acknowledged"})

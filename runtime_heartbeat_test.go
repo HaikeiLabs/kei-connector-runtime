@@ -178,7 +178,7 @@ func newFakeCatalog(t *testing.T) (*fakeCatalog, *httptest.Server) {
 			c.mu.Unlock()
 			whoami(w)
 
-		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+		case strings.HasSuffix(r.URL.Path, ":heartbeat"):
 			c.mu.Lock()
 			body, _ := io.ReadAll(r.Body)
 			r.Body.Close()

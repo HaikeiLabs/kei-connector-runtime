@@ -15,7 +15,7 @@ func TestAuthorizeColdRuntimeDeniesWithoutCatalogDecision(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
 			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace, Platform: "discord", Status: "active", BindingStatus: "verified"})
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/v1/authorize":
 			authorizeCalls++
