@@ -96,6 +96,17 @@ func TestSocketSessionGetReturns404WhenNoSession(t *testing.T) {
 	}
 }
 
+func TestSocketPreflightRejectsCallerSuppliedAgent(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example"}, nil)
+	handler := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(`{"schema":"kei.tool-preflight-request/v1","tool":"t","agent_id":"attacker","args":{}}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("caller-supplied agent accepted: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSocketPreflightDeniesWhenPlannerIsUnregistered(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example"}, nil)
 	handler := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
