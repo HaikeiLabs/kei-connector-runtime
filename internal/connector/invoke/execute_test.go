@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 )
 
 // These tests drive `connector invoke` end to end against fakes: a fake
@@ -98,21 +99,24 @@ func (rt *routeTransport) callCount() int {
 }
 
 type execHarness struct {
-	t              *testing.T
-	catalogStatus  int
-	catalogBody    string
-	catalogReqs    []map[string]any
-	catalogCalled  int
-	controlPlane   string
-	store          *execSecretStore
-	transport      *routeTransport
-	assertionKey   *ecdsa.PrivateKey
-	withAssertion  bool
-	stdin          string
-	now            time.Time
-	lastStdout     string
-	lastStderr     string
-	lastAuditLines []string
+	t                *testing.T
+	catalogStatus    int
+	catalogBody      string
+	catalogReqs      []map[string]any
+	catalogCalled    int
+	controlPlane     string
+	store            *execSecretStore
+	transport        *routeTransport
+	assertionKey     *ecdsa.PrivateKey
+	withAssertion    bool
+	stdin            string
+	now              time.Time
+	lastStdout       string
+	lastStderr       string
+	lastAuditLines   []string
+	credReleaseURL   string
+	credReleaseToken string
+	subjectTokenFn   func(context.Context) (string, error)
 }
 
 func newExecHarness(t *testing.T) *execHarness {
@@ -182,6 +186,18 @@ func (h *execHarness) run(args ...string) (map[string]any, int) {
 	}
 	if h.withAssertion {
 		env.AssertionKey = crm.KeyConfig{Backend: execBackend, Ref: execAssertRef, KID: execAssertKID}
+	}
+	if h.credReleaseURL != "" {
+		if h.subjectTokenFn != nil {
+			env.SubjectToken = h.subjectTokenFn
+		} else {
+			token := h.credReleaseToken
+			if token == "" {
+				token = "test-subject-token"
+			}
+			env.SubjectToken = func(context.Context) (string, error) { return token, nil }
+		}
+		env.CredReleaseClient = credrelease.NewClient(h.credReleaseURL, "exec-runtime-token")
 	}
 	base := []string{"--connector", execConnector, "--trace-id", execTrace, "--framework", "pde"}
 	code := Run(append(base, args...), env, &stdout, &stderr)
@@ -853,4 +869,90 @@ func TestConnectorInvokeRejectsASecretRefForAnotherName(t *testing.T) {
 	}
 	out, code := h.run("--capability", "event.list", "--action", "read", "--resource", "tito/acme/events", "--user", execUser, "--input", `{"status":"upcoming"}`)
 	h.assertDeny(out, code, "descriptor_invalid")
+}
+
+// Identity mode: credential release client supplies credential.
+func TestConnectorInvokeIdentityModeCredRelease(t *testing.T) {
+	credReleaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/connectorCredentials:resolve" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"credential": "identity-mode-cred"})
+	}))
+	defer credReleaseServer.Close()
+
+	h := newExecHarness(t)
+	h.credReleaseURL = credReleaseServer.URL
+	h.gmailPerUserAllow()
+	h.transport.routes["gmail.googleapis.com"] = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer identity-mode-cred" {
+			t.Errorf("gmail authorization = %q, want Bearer identity-mode-cred", got)
+		}
+		_, _ = io.WriteString(w, `{"messages":[],"nextPageToken":"p-2"}`)
+	}
+	out, code := h.run("--capability", "message.search", "--action", "read", "--resource", "gmail/messages",
+		"--provider-user", "+15551234567", "--input", `{"query":"from:alice","page_size":5}`)
+	if code != 0 || out["decision"] != "allow" {
+		t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
+	}
+	for _, text := range []string{h.lastStdout, h.lastStderr, strings.Join(h.lastAuditLines, "\n")} {
+		if strings.Contains(text, "identity-mode-cred") {
+			t.Fatal("credrelease credential leaked in output")
+		}
+	}
+}
+
+// Identity mode: 401 on first resolve triggers subject re-resolution and retry.
+func TestConnectorInvokeIdentityModeRetriesOn401(t *testing.T) {
+	var callCount int
+	credReleaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"credential": "retry-cred"})
+	}))
+	defer credReleaseServer.Close()
+
+	h := newExecHarness(t)
+	h.credReleaseURL = credReleaseServer.URL
+	h.credReleaseToken = "subject-token-v1"
+	h.gmailPerUserAllow()
+	h.transport.routes["gmail.googleapis.com"] = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer retry-cred" {
+			t.Errorf("gmail authorization = %q, want Bearer retry-cred", got)
+		}
+		_, _ = io.WriteString(w, `{"messages":[],"nextPageToken":"p-2"}`)
+	}
+	out, code := h.run("--capability", "message.search", "--action", "read", "--resource", "gmail/messages",
+		"--provider-user", "+15551234567", "--input", `{"query":"from:alice"}`)
+	if code != 0 || out["decision"] != "allow" {
+		t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
+	}
+	if callCount != 2 {
+		t.Fatalf("credrelease calls = %d, want 2", callCount)
+	}
+	for _, text := range []string{h.lastStdout, h.lastStderr, strings.Join(h.lastAuditLines, "\n")} {
+		if strings.Contains(text, "retry-cred") {
+			t.Fatal("credrelease credential leaked in output")
+		}
+	}
+}
+
+// Identity mode: persistent 401 across retry returns denial.
+func TestConnectorInvokeIdentityMode401RetryFails(t *testing.T) {
+	credReleaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer credReleaseServer.Close()
+
+	h := newExecHarness(t)
+	h.credReleaseURL = credReleaseServer.URL
+	h.gmailPerUserAllow()
+	out, code := h.run("--capability", "message.search", "--action", "read", "--resource", "gmail/messages",
+		"--provider-user", "+15551234567", "--input", `{"query":"from:alice"}`)
+	h.assertDeny(out, code, "credential_unavailable")
 }

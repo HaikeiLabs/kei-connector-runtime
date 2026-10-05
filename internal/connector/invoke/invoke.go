@@ -22,6 +22,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/google/uuid"
 )
@@ -86,6 +87,16 @@ type Env struct {
 	// SubjectSource resolves the authenticated end-user subject for the current
 	// runtime session. When nil, InvokingSubject is left empty on the request.
 	SubjectSource session.SubjectSource
+
+	// SubjectToken resolves the authentication token for the current session
+	// subject. Set alongside CredReleaseClient for identity-mode credential
+	// release.
+	SubjectToken func(context.Context) (string, error)
+
+	// CredReleaseClient resolves connector credentials via the control plane's
+	// resolve endpoint. When set, execute uses identity-mode credential resolution
+	// instead of the local credential store.
+	CredReleaseClient *credrelease.Client
 
 	// Audit appends one audit record (a JSON line) to the local spool.
 	Audit func(record []byte) error
@@ -302,6 +313,11 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		}
 	}
 
+	var subjectToken string
+	if env.SubjectToken != nil {
+		subjectToken, _ = env.SubjectToken(context.Background())
+	}
+
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
 	defer cancel()
@@ -347,7 +363,7 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		return finish(deny(catalogReasonCode(resp), resp.Reason))
 	}
 
-	exec, d := env.execute(ctx, plan.req, canonical, resp, plan.abacURL)
+	exec, d := env.execute(ctx, plan.req, canonical, resp, plan.abacURL, subjectToken)
 	out.Provider = string(exec.provider)
 	if d != nil {
 		return finish(d)

@@ -248,6 +248,7 @@ type socketSessionResponse struct {
 	Schema string `json:"schema"`
 	UserID string `json:"user_id"`
 	Status string `json:"status"`
+	Token  string `json:"token"`
 }
 
 func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +261,7 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		Schema: sessionSchema,
 		UserID: subject.UserID,
 		Status: string(subject.Status),
+		Token:  subject.Token,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

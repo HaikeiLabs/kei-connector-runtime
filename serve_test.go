@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -81,6 +82,14 @@ func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("socket permissions = %04o, want 0600", got)
+	}
+
+	var rlim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_CORE, &rlim); err != nil {
+		t.Fatalf("Getrlimit failed: %v", err)
+	}
+	if rlim.Cur != 0 {
+		t.Fatalf("RLIMIT_CORE soft limit = %d, want 0", rlim.Cur)
 	}
 
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

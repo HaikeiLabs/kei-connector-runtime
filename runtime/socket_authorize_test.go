@@ -91,6 +91,7 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 		Schema     string `json:"schema"`
 		UserID     string `json:"user_id"`
 		Status     string `json:"status"`
+		Token      string `json:"token"`
 		Email      string `json:"email,omitempty"`
 		Enrollment any    `json:"enrollment,omitempty"`
 	}
@@ -99,6 +100,9 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 	}
 	if keys.Schema != "kei.session/v1" || keys.UserID != "user-abc" || keys.Status != "linked" {
 		t.Fatalf("response %+v", keys)
+	}
+	if keys.Token != "" {
+		t.Fatal("token leaked in GET /v1/session response")
 	}
 	if keys.Email != "" {
 		t.Fatal("email leaked in GET /v1/session response")

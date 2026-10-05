@@ -7,6 +7,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -40,7 +41,14 @@ func runConnector(args []string) int {
 			},
 		}
 		if cfg.IsRuntime() {
-			env.SubjectSource = session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken)
+			src := session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken)
+			env.SubjectSource = src
+			if cfg.CredentialReleaseMode == "identity" {
+				if tokSrc, ok := src.(session.SubjectTokenSource); ok {
+					env.SubjectToken = tokSrc.SubjectToken
+				}
+				env.CredReleaseClient = credrelease.NewClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken)
+			}
 		}
 		return invoke.Run(args[1:], env, os.Stdout, os.Stderr)
 	}

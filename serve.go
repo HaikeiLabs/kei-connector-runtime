@@ -50,6 +50,9 @@ func runtimeSocketPathFromEnv() string {
 }
 
 func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) int {
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
+		slog.Warn("runtime_core_limit_failed", "error", err)
+	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	unixListener, err := socket.Listen(socketPath)

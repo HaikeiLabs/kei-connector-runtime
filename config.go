@@ -27,6 +27,7 @@ type Config struct {
 	ABACSecret                    string
 	Env                           string
 	ToolManifestPath              string
+	CredentialReleaseMode         string
 }
 
 func envOr(key, fallback string) string {
@@ -82,6 +83,7 @@ func configFromEnv() Config {
 		ABACSecret:                    strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 		Env:                           os.Getenv("ENV"),
 		ToolManifestPath:              os.Getenv("KEI_TOOL_MANIFEST"),
+		CredentialReleaseMode:         envOr("KEI_CREDENTIAL_RELEASE", "legacy"),
 	}
 }
 

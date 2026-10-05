@@ -35,6 +35,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/linear"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/notion"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/tito"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 )
 
 const (
@@ -101,7 +102,7 @@ func (e Env) now() time.Time {
 
 // execute runs an allowed invocation. It returns the execution record even on
 // a deny, so audit carries whatever was known.
-func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp *Response, controlPlaneURL string) (*execution, *denial) {
+func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp *Response, controlPlaneURL string, subjectToken string) (*execution, *denial) {
 	exec := &execution{}
 	if resp.Connector == nil || resp.Envelope == nil {
 		return exec, deny("descriptor_invalid", "allow without a connector descriptor")
@@ -145,21 +146,9 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 	}
 	exec.credentialSubject = contract.CredentialSubject(meta, inv)
 
-	credential, err := credentials.Resolver{
-		Store: e.Store, BackendUnavailable: e.BackendUnavailable, Now: e.Now,
-	}.Resolve(ctx, credentials.Request{
-		Source: credentials.Source(meta.EffectiveCredentialSource()), Backend: resp.Connector.CredentialBackend,
-		Ref: meta.CredentialRef, SecretRef: resp.Connector.CredentialSecretRef, OAuth: resp.OAuth, ControlPlaneURL: controlPlaneURL,
-	})
-	if err != nil {
-		var ce *credentials.Error
-		if errors.As(err, &ce) {
-			return exec, deny(ce.Code, ce.Reason)
-		}
-		return exec, deny("credential_unavailable", "credential is not available")
-	}
-	if resp.OAuth != nil {
-		exec.accountEmailDigest = resp.OAuth.AccountEmailDigest
+	credential, d := e.resolveCredential(ctx, &meta, req, resp, controlPlaneURL, exec, subjectToken)
+	if d != nil {
+		return exec, d
 	}
 
 	providerCtx, cancel := context.WithTimeout(ctx, providerTimeout)
@@ -188,6 +177,43 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 	}
 	exec.result = result
 	return exec, nil
+}
+
+func (e Env) resolveCredential(ctx context.Context, meta *contract.Metadata, req Request, resp *Response, controlPlaneURL string, exec *execution, subjectToken string) (string, *denial) {
+	if e.CredReleaseClient != nil && e.SubjectToken != nil {
+		if subjectToken == "" {
+			return "", deny("subject_unlinked", "no session subject for credential release")
+		}
+		cred, err := e.CredReleaseClient.Resolve(ctx, subjectToken, meta.ID, req.Capability)
+		if errors.Is(err, credrelease.ErrSubjectUnauthorized) {
+			subjectToken, err = e.SubjectToken(ctx)
+			if err != nil || subjectToken == "" {
+				return "", deny("subject_unlinked", "subject re-resolution failed")
+			}
+			cred, err = e.CredReleaseClient.Resolve(ctx, subjectToken, meta.ID, req.Capability)
+		}
+		if err != nil {
+			return "", deny("credential_unavailable", err.Error())
+		}
+		return cred, nil
+	}
+	cred, err := credentials.Resolver{
+		Store: e.Store, BackendUnavailable: e.BackendUnavailable, Now: e.Now,
+	}.Resolve(ctx, credentials.Request{
+		Source: credentials.Source(meta.EffectiveCredentialSource()), Backend: resp.Connector.CredentialBackend,
+		Ref: meta.CredentialRef, SecretRef: resp.Connector.CredentialSecretRef, OAuth: resp.OAuth, ControlPlaneURL: controlPlaneURL,
+	})
+	if err != nil {
+		var ce *credentials.Error
+		if errors.As(err, &ce) {
+			return "", deny(ce.Code, ce.Reason)
+		}
+		return "", deny("credential_unavailable", "credential is not available")
+	}
+	if resp.OAuth != nil {
+		exec.accountEmailDigest = resp.OAuth.AccountEmailDigest
+	}
+	return cred, nil
 }
 
 func declaredCapability(meta contract.Metadata, name string) (contract.Capability, bool) {
