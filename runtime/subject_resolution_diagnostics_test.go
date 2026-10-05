@@ -16,6 +16,7 @@ func TestWritePolicyStateDenialLogsOnlySubjectDiagnostic(t *testing.T) {
 		want    string
 	}{
 		{"transport", &SubjectResolutionFailure{Category: "transport"}, "category=transport"},
+		{"transport phase only", &SubjectResolutionFailure{Category: "transport", TransportPhase: "http_client_do"}, "category=transport transport_phase=http_client_do"},
 		{"transport phase and kind", &SubjectResolutionFailure{Category: "transport", TransportPhase: "http_client_do", TransportKind: "dns"}, "category=transport transport_phase=http_client_do transport_kind=dns"},
 		{"request setup", &SubjectResolutionFailure{Category: "transport", TransportPhase: "request_build", TransportKind: "request_setup"}, "category=transport transport_phase=request_build transport_kind=request_setup"},
 		{"status", &SubjectResolutionFailure{Category: "http_status", HTTPStatus: 503}, "category=http_status http_status=503"},

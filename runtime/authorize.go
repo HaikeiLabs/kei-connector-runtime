@@ -327,8 +327,15 @@ func WritePolicyStateDenial(stdout, stderr io.Writer, reason string, err error) 
 		if reason == "subject_resolution_unavailable" && errors.As(err, &failure) {
 			if failure.HTTPStatus != 0 {
 				fmt.Fprintf(stderr, "authorization denied (%s): category=%s http_status=%d\n", reason, failure.Category, failure.HTTPStatus)
-			} else if failure.TransportKind != "" {
-				fmt.Fprintf(stderr, "authorization denied (%s): category=%s transport_phase=%s transport_kind=%s\n", reason, failure.Category, failure.TransportPhase, failure.TransportKind)
+			} else if failure.TransportPhase != "" || failure.TransportKind != "" {
+				diagnostic := fmt.Sprintf("authorization denied (%s): category=%s", reason, failure.Category)
+				if failure.TransportPhase != "" {
+					diagnostic += " transport_phase=" + failure.TransportPhase
+				}
+				if failure.TransportKind != "" {
+					diagnostic += " transport_kind=" + failure.TransportKind
+				}
+				fmt.Fprintln(stderr, diagnostic)
 			} else {
 				fmt.Fprintf(stderr, "authorization denied (%s): category=%s\n", reason, failure.Category)
 			}
