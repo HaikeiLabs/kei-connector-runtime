@@ -54,6 +54,7 @@ type Store struct {
 
 	mu           sync.Mutex
 	gen          uint64 // bumped by Flush and Load; a stale fetch is discarded
+	subject      string // the session subject (user id) the credentials belong to
 	subjectToken string
 	tokens       map[string][]byte
 	failures     map[string]string
@@ -66,9 +67,10 @@ func NewStore(client *Client) *Store {
 }
 
 // Load flushes any held credentials and makes the session's one I11 call
-// with subjectToken. On error the store stays empty, and every Use denies
-// until the next Load. A Flush during the call discards its result.
-func (s *Store) Load(ctx context.Context, subjectToken string) error {
+// for subject (the session's user id) with subjectToken. On error the store
+// stays empty, and every Use denies until the next Load. A Flush during the
+// call discards its result.
+func (s *Store) Load(ctx context.Context, subject, subjectToken string) error {
 	s.mu.Lock()
 	s.flushLocked()
 	gen := s.gen
@@ -86,7 +88,7 @@ func (s *Store) Load(ctx context.Context, subjectToken string) error {
 		s.loadErr = err
 		return err
 	}
-	s.subjectToken = subjectToken
+	s.subject, s.subjectToken = subject, subjectToken
 	s.tokens, s.failures = res.tokens, res.failures
 	return nil
 }
@@ -101,15 +103,17 @@ func (s *Store) Flush() {
 func (s *Store) flushLocked() {
 	s.gen++
 	zeroAll(s.tokens)
-	s.tokens, s.failures, s.subjectToken, s.loadErr = nil, nil, "", nil
+	s.tokens, s.failures, s.subject, s.subjectToken, s.loadErr = nil, nil, "", "", nil
 }
 
-// Use runs fn with the session's credential for provider. The token is a copy
+// Use runs fn with the session's credential for provider, if the held
+// credentials belong to subject; a caller passes the subject its decision was
+// made for, so a session that changed since then denies. The token is a copy
 // and fn must not retain or return it. If fn reports ErrProviderUnauthorized,
 // Use re-fetches that one provider through I11, retries fn once, and returns
 // a *DeniedError if the re-fetch or the retry fails. There is no other fetch.
-func (s *Store) Use(ctx context.Context, provider string, fn func(token string) error) error {
-	token, gen, err := s.take(provider)
+func (s *Store) Use(ctx context.Context, subject, provider string, fn func(token string) error) error {
+	token, gen, err := s.take(subject, provider)
 	if err != nil {
 		return err
 	}
@@ -122,14 +126,38 @@ func (s *Store) Use(ctx context.Context, provider string, fn func(token string) 
 	}
 	err = fn(token)
 	if errors.Is(err, ErrProviderUnauthorized) {
+		// The re-fetched credential was rejected too. Drop it so no later
+		// use loops through another re-fetch; the session must reconnect.
+		s.reject(provider, gen)
 		return &DeniedError{Provider: provider, Reason: ReasonProviderUnauthorized}
 	}
 	return err
 }
 
-func (s *Store) take(provider string) (string, uint64, error) {
+// reject drops provider's credential after a 401 on the retried call and
+// records the denial, unless the session changed since gen.
+func (s *Store) reject(provider string, gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.gen != gen {
+		return
+	}
+	if old, ok := s.tokens[provider]; ok {
+		zero(old)
+		delete(s.tokens, provider)
+	}
+	if s.failures == nil {
+		s.failures = map[string]string{}
+	}
+	s.failures[provider] = ReasonProviderUnauthorized
+}
+
+func (s *Store) take(subject, provider string) (string, uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if subject == "" || (s.subject != subject && s.loadErr == nil) {
+		return "", s.gen, &DeniedError{Provider: provider, Reason: ReasonNoSession}
+	}
 	if b, ok := s.tokens[provider]; ok {
 		return string(b), s.gen, nil
 	}

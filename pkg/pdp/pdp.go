@@ -86,16 +86,65 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	if err != nil {
 		return stateDenial(state), nil
 	}
+	d, _ := e.evaluate(v, state, req)
+	return d, nil
+}
+
+// Connector is a connector entry from the policy bundle.
+type Connector = policybundle.Connector
+
+// ConnectorGrant is a connector call's decision together with what the daemon
+// needs to run it, all from the same bundle and session snapshot.
+type ConnectorGrant struct {
+	Decision
+	// Connector is the bundle's entry for the requested connector, if any.
+	Connector *Connector
+	// Subject is the session subject the decision was made for (no token);
+	// HasSession is false when there was no session.
+	Subject    Subject
+	HasSession bool
+}
+
+// EvaluateConnector decides a connector call (req.Connector is required) and
+// returns the bundle connector and session subject it was decided with. The
+// error is non-nil only when ctx is done.
+func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (ConnectorGrant, error) {
+	if err := ctx.Err(); err != nil {
+		return ConnectorGrant{}, err
+	}
+	if req.Connector == nil {
+		return ConnectorGrant{Decision: Decision{Reason: "connector target is required", ReasonCode: "tool_not_registered", DenySource: "registry"}}, nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return ConnectorGrant{Decision: stateDenial(state)}, nil
+	}
+	d, current := e.evaluate(v, state, req)
+	g := ConnectorGrant{Decision: d}
+	if current != nil {
+		g.Subject, g.HasSession = *current, true
+		g.Subject.Token, g.Subject.Enrollment = "", nil
+	}
+	if c, ok := v.Connector(req.Connector.ConnectorID); ok {
+		g.Connector = &c
+	}
+	return g, nil
+}
+
+// evaluate decides req against v and returns the session subject it used.
+func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State, req Request) (Decision, *Subject) {
 	call := policybundle.Call{Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
 	if req.Connector != nil {
 		call.ConnectorID, call.Capability, call.ConnectorInvocation = req.Connector.ConnectorID, req.Connector.Capability, true
 	}
 	var subject *policybundle.SessionSubject
 	var current Subject
+	var used *Subject
 	if e.sessions != nil {
 		var ok bool
 		if current, ok = e.sessions.Current(); ok {
 			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Status: string(current.Status)}
+			used = &current
 		}
 	}
 	d := v.EvaluateSession(call, subject, e.memberships(v))
@@ -113,7 +162,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	if out.ReasonCode == "subject_unlinked" && subject != nil && len(current.Enrollment) > 0 {
 		out.Enrollment = append(json.RawMessage(nil), current.Enrollment...)
 	}
-	return out, nil
+	return out, used
 }
 
 // HarnessCall is a pre-built harness tool call (ADR-029 §1.2, §1.3).

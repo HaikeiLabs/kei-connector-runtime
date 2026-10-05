@@ -82,8 +82,37 @@ re-fetch and one retry, and after that the call is denied. The daemon sets
 
 **No socket route returns a credential.** The harness holds the same runtime
 token as any socket client, so anything on the socket reaches the harness.
-Credentialed work runs inside the daemon instead: `POST /v1/connectors:invoke`
-(L3b) and `POST /v1/commands:run` (L3c) are coming in later releases.
+Credentialed work runs inside the daemon instead. `POST /v1/commands:run`
+(L3c) is coming in a later release.
+
+### `POST /v1/connectors:invoke` (`KEI_CREDENTIAL_RELEASE=identity`)
+
+The daemon runs one governed connector call and returns only its result:
+
+1. **Decide.** The local PDP decides the call with the session subject. With
+   no session the call is denied `no_session`.
+2. **Describe.** The daemon builds the connector's description from the
+   bundle's `policy_set.connectors` entry and the installation audience.
+3. **Call the provider.** The call runs with the session's held credential,
+   through `credrelease.Store.Use`. A provider 401 gets the one re-fetch and
+   one retry.
+4. **Audit.** The execution record goes to the audit spool.
+
+```json
+{"schema":"kei.connector-invoke-request/v1","connector_id":"conn-github-0001",
+ "capability":"repository.read","action":"read","resource":"repos/acme/kei",
+ "input":{},"trace_id":"…","agent_id":"…"}
+```
+
+The request carries no subject and no credential. The answer is
+`kei.connector-invoke-response/v1`, the same object `kei-proxy connector invoke`
+prints. Only providers whose credential is the subject's own OAuth connection
+run here: github, gmail, google_drive and linear. Connectors that need config
+or an opaque_ref secret deny `credential_source_not_supported`, because the
+bundle carries neither. In identity mode `kei-proxy connector invoke` is a
+thin client of this route. It needs no control plane and holds no credential.
+It fails closed with `daemon_unavailable` when the daemon is unreachable, and
+it rejects `--user-id`/`--provider-user`.
 
 ### Same-host daemon and harness (primary deployment)
 

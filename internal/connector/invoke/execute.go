@@ -116,32 +116,9 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 		inv.TenantID != meta.TenantID || inv.WorkspaceID != meta.WorkspaceID {
 		return exec, deny("descriptor_invalid", "descriptor does not match the request")
 	}
-	conn, ok := e.connectors()[meta.Provider]
-	if !ok {
-		return exec, deny("provider_not_supported", "provider is not supported by this runtime")
-	}
-	if err := setup.ValidateMetadata(meta); err != nil {
-		return exec, deny("descriptor_invalid", "connector metadata is invalid")
-	}
-	capability, ok := declaredCapability(meta, req.Capability)
-	if !ok {
-		return exec, deny("descriptor_invalid", "capability is not declared on the connector")
-	}
-	if capability.Action != contract.ActionRead && meta.Provider != contract.ProviderCRM {
-		return exec, deny("capability_not_supported", "only read capabilities are executed")
-	}
-	if meta.AccountModel == contract.AccountModelDomainDelegation {
-		return exec, deny("account_model_not_supported", "domain-wide delegation is not executed yet")
-	}
-	in, err := input.Decode(string(meta.Provider), req.Capability, raw)
-	if err != nil {
-		return exec, deny("input_invalid", "input does not match the capability schema")
-	}
-	// http_api: the catalog authorized exactly one resource, the request
-	// path. Calling any other path would bypass per-resource policy, so this
-	// is checked before a credential is fetched (HAI-256).
-	if h, ok := in.(input.HTTPRequest); ok && !sameRequestPath(h.Path, inv.Resource) {
-		return exec, deny("input_invalid", "http_api path must equal the authorized resource")
+	conn, in, d := e.prepare(req, raw, meta, inv)
+	if d != nil {
+		return exec, d
 	}
 	exec.credentialSubject = contract.CredentialSubject(meta, inv)
 
@@ -161,7 +138,48 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 	if resp.OAuth != nil {
 		exec.accountEmailDigest = resp.OAuth.AccountEmailDigest
 	}
+	_, d = e.run(ctx, conn, meta, inv, in, credential, exec)
+	return exec, d
+}
 
+// prepare runs every check that needs no credential: the provider is one
+// this runtime executes, the metadata is valid, the capability is declared and
+// executable here, and the input decodes for it.
+func (e Env) prepare(req Request, raw json.RawMessage, meta contract.Metadata, inv contract.Invocation) (connector.Connector, any, *denial) {
+	conn, ok := e.connectors()[meta.Provider]
+	if !ok {
+		return nil, nil, deny("provider_not_supported", "provider is not supported by this runtime")
+	}
+	if err := setup.ValidateMetadata(meta); err != nil {
+		return nil, nil, deny("descriptor_invalid", "connector metadata is invalid")
+	}
+	capability, ok := declaredCapability(meta, req.Capability)
+	if !ok {
+		return nil, nil, deny("descriptor_invalid", "capability is not declared on the connector")
+	}
+	if capability.Action != contract.ActionRead && meta.Provider != contract.ProviderCRM {
+		return nil, nil, deny("capability_not_supported", "only read capabilities are executed")
+	}
+	if meta.AccountModel == contract.AccountModelDomainDelegation {
+		return nil, nil, deny("account_model_not_supported", "domain-wide delegation is not executed yet")
+	}
+	in, err := input.Decode(string(meta.Provider), req.Capability, raw)
+	if err != nil {
+		return nil, nil, deny("input_invalid", "input does not match the capability schema")
+	}
+	// http_api: the catalog authorized exactly one resource, the request
+	// path. Calling any other path would bypass per-resource policy, so this
+	// is checked before a credential is fetched (HAI-256).
+	if h, ok := in.(input.HTTPRequest); ok && !sameRequestPath(h.Path, inv.Resource) {
+		return nil, nil, deny("input_invalid", "http_api path must equal the authorized resource")
+	}
+	return conn, in, nil
+}
+
+// run makes the provider call with credential and records its outcome on
+// exec. It returns the provider's last HTTP status alongside any denial, so a
+// caller can tell a rejected credential (401) from other failures.
+func (e Env) run(ctx context.Context, conn connector.Connector, meta contract.Metadata, inv contract.Invocation, in any, credential string, exec *execution) (int, *denial) {
 	providerCtx, cancel := context.WithTimeout(ctx, providerTimeout)
 	defer cancel()
 	transport := &recordingTransport{base: e.ProviderTransport, limit: maxProviderResponseBytes}
@@ -176,18 +194,21 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 	if meta.Provider == contract.ProviderCRM && transport.requests() > 0 {
 		exec.assertionKID = e.AssertionKey.KID
 	}
+	transport.mu.Lock()
+	status := transport.status
+	transport.mu.Unlock()
 	if err != nil {
-		return exec, classify(providerCtx, transport, err)
+		return status, classify(providerCtx, transport, err)
 	}
 	result, err := json.Marshal(data)
 	if err != nil {
-		return exec, deny("provider_error", "result could not be encoded")
+		return status, deny("provider_error", "result could not be encoded")
 	}
 	if len(result) > maxResultBytes {
-		return exec, deny("result_too_large", "result exceeds the size limit")
+		return status, deny("result_too_large", "result exceeds the size limit")
 	}
 	exec.result = result
-	return exec, nil
+	return status, nil
 }
 
 func declaredCapability(meta contract.Metadata, name string) (contract.Capability, bool) {

@@ -16,6 +16,12 @@ import (
 func runConnector(args []string) int {
 	if len(args) > 0 && args[0] == "invoke" {
 		cfg := configFromEnv()
+		switch cfg.CredentialRelease {
+		case "", CredentialReleaseLegacy, CredentialReleaseIdentity:
+		default:
+			fmt.Fprintf(os.Stderr, "Error: KEI_CREDENTIAL_RELEASE must be %q or %q\n", CredentialReleaseIdentity, CredentialReleaseLegacy)
+			return 1
+		}
 		if cfg.IsRuntime() {
 			if err := cfg.Validate(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -41,6 +47,11 @@ func runConnector(args []string) int {
 		}
 		if cfg.IsRuntime() {
 			env.SubjectSource = session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken)
+		}
+		if cfg.CredentialRelease == CredentialReleaseIdentity {
+			// The serve daemon decides and runs the call with the session's
+			// credential; this process is only its socket client.
+			env.DaemonSocket = runtimeSocketPathFromEnv()
 		}
 		return invoke.Run(args[1:], env, os.Stdout, os.Stderr)
 	}
