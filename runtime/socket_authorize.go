@@ -111,6 +111,7 @@ type LocalPDP struct {
 	keychain  SessionKeychain
 	creds     *credrelease.Store
 	invoker   http.Handler
+	runner    http.Handler
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
@@ -138,10 +139,20 @@ func (l *LocalPDP) UseCredential(ctx context.Context, subject, provider string, 
 	return l.creds.Use(ctx, subject, provider, fn)
 }
 
-// SetConnectorInvoker serves POST /v1/connectors:invoke with h (HAI-346 L3b),
+// SetConnectorInvoker serves POST /v1/connectors:invoke with h (HAI-346 L3b):
+// governed connector API calls made on behalf of tool calls and skills, run
+// in this daemon with the session-held credential (it is never returned),
 // behind the socket's config and runtime-token checks. Without one the route
 // is not served.
 func (l *LocalPDP) SetConnectorInvoker(h http.Handler) { l.invoker = h }
+
+// SetCommandRunner serves POST /v1/commands:run with h (HAI-346 L3c): native
+// CLI tools for Unix/local-process harnesses (Claude Code, Codex, opencode via
+// `kei-proxy run -- <cmd>`), spawned by this daemon with the session-held
+// credentials injected only into the child's environment, behind the
+// socket's config and runtime-token checks. Without one the route is not
+// served.
+func (l *LocalPDP) SetCommandRunner(h http.Handler) { l.runner = h }
 
 // AuthorizeConnector decides a connector call with the local PDP and the
 // session subject, and returns the runtime identity it was decided under.
@@ -210,6 +221,7 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
 		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
+		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -225,8 +237,18 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize":
 			l.handleAuthorize(w, r)
+		// The two credentialed routes. Both run inside this serve daemon
+		// with the session-held credentials, which never leave it:
+		//   - connectors:invoke runs governed connector API calls on behalf
+		//     of tool calls and skills (any harness, via `kei-proxy
+		//     connector invoke` or this socket directly);
+		//   - commands:run spawns native CLI tools (gh, git, ...) for
+		//     Unix/local-process harnesses such as Claude Code, Codex and
+		//     opencode, via `kei-proxy run -- <cmd>`.
 		case r.URL.Path == "/v1/connectors:invoke":
 			l.invoker.ServeHTTP(w, r)
+		case r.URL.Path == "/v1/commands:run":
+			l.runner.ServeHTTP(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:

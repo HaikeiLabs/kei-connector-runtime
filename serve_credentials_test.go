@@ -254,7 +254,7 @@ func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 		if strings.Contains(resp.dump, credentialCanary) || strings.Contains(resp.dump, subjectCanary) {
 			t.Errorf("%s returned credential material:\n%s", resp.route, resp.dump)
 		}
-		if strings.Contains(r.path, "credential") || r.path == "/v1/commands:run" {
+		if strings.Contains(r.path, "credential") {
 			if resp.code != http.StatusNotFound {
 				t.Errorf("%s = %d, want 404 (no credential route)", resp.route, resp.code)
 			}
@@ -275,13 +275,18 @@ func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 
 // captureFDs redirects the process's file descriptors 1 and 2 while f runs,
 // so fmt, the log package, slog's default handler and raw runtime writes are
-// all captured. The descriptors are restored even if f calls t.Fatal.
+// all captured. The os.Stdout and os.Stderr variables point at the same pipes
+// meanwhile, because `go test -json` aliases os.Stderr to os.Stdout. Both are
+// restored even if f calls t.Fatal.
 func captureFDs(t *testing.T, f func()) (stdout, stderr string) {
 	t.Helper()
 	out, errOut := redirectFD(t, 1), redirectFD(t, 2)
+	prevOut, prevErr := os.Stdout, os.Stderr
 	func() {
 		defer out.restore()
 		defer errOut.restore()
+		defer func() { os.Stdout, os.Stderr = prevOut, prevErr }()
+		os.Stdout, os.Stderr = out.w, errOut.w
 		f()
 	}()
 	return out.wait(), errOut.wait()

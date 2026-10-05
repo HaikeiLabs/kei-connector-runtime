@@ -6,6 +6,12 @@ package invoke
 // returns only the result. The credential never leaves the daemon: it reaches
 // the provider call through the credential store's Use callback and nothing
 // else.
+//
+// Who uses it: this is the path for governed connector API calls made on
+// behalf of tool calls and skills, from any harness, through `kei-proxy
+// connector invoke` or the socket directly. Native CLI tools run by
+// Unix/local-process harnesses use POST /v1/commands:run (internal/run)
+// instead.
 
 import (
 	"context"
@@ -31,10 +37,12 @@ const (
 	daemonCredentialRef = "kei-session-credential"
 )
 
-// sessionProviders are the providers whose credential is the session subject's
-// own OAuth connection, released by I11 under the same provider name. Only
+// IsSessionProvider reports whether provider's credential is the session
+// subject's own OAuth connection, released by I11 under the same name. Only
 // these run in the daemon; every other provider needs connector config and a
 // credential the bundle does not carry.
+func IsSessionProvider(provider string) bool { return sessionProviders[contract.Provider(provider)] }
+
 var sessionProviders = map[contract.Provider]bool{
 	contract.ProviderGitHub: true,
 	contract.ProviderGmail:  true,
@@ -255,8 +263,13 @@ func sessionCall(g Grant, dr daemonRequest) (contract.Metadata, contract.Invocat
 	return meta, inv, nil
 }
 
-// credentialDenial maps a credential store refusal to a reason code, and
-// to a connect hint when reconnecting the provider would fix it.
+// CredentialDenial maps a credential store refusal to a reason code and
+// reason, and to a connect hint when reconnecting the provider would fix it.
+func CredentialDenial(err error) (code, reason string, connect *json.RawMessage) {
+	dn, connect := credentialDenial(err)
+	return dn.code, dn.reason, connect
+}
+
 func credentialDenial(err error) (*denial, *json.RawMessage) {
 	var de *credrelease.DeniedError
 	if !errors.As(err, &de) {
