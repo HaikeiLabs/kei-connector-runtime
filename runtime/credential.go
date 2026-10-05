@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -13,25 +13,25 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 )
 
-// runCredential provides credential management commands including sync.
+// RunCredential provides credential management commands including sync.
 // The sync command processes pending credential deliveries from the control plane,
 // writes them to the configured external backend (Azure Key Vault or AWS Secrets Manager),
 // and acknowledges the result.
-func runCredential(args []string) int {
+func RunCredential(args []string, cfg CredentialConfig) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "credential requires a subcommand: sync")
 		return 1
 	}
 	switch args[0] {
 	case "sync":
-		return runCredentialSync(args[1:], os.Stdout, os.Stderr, configFromEnv())
+		return runCredentialSync(args[1:], os.Stdout, os.Stderr, cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown credential command %q\n", args[0])
 		return 1
 	}
 }
 
-func runCredentialSync(args []string, stdout, stderr io.Writer, cfg Config) int {
+func runCredentialSync(args []string, stdout, stderr io.Writer, cfg CredentialConfig) int {
 	flags := flag.NewFlagSet("credential sync", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	timeout := flags.Duration("timeout", 30*time.Second, "control-plane request timeout")
@@ -48,11 +48,11 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg Config) int 
 		fmt.Fprintln(stderr, "credential sync requires KEI_RUNTIME_TOKEN to be set")
 		return 1
 	}
-	if cfg.RuntimeControlPlaneURL == "" {
+	if cfg.ControlPlaneURL() == "" {
 		fmt.Fprintln(stderr, "credential sync requires KEI_RUNTIME_CONTROL_PLANE_URL to be set")
 		return 1
 	}
-	if cfg.CredentialSyncKeyID == "" || cfg.CredentialSyncPrivateKey == "" {
+	if cfg.SyncKeyID() == "" || cfg.SyncPrivateKey() == "" {
 		fmt.Fprintln(stderr, "credential sync requires KEI_CREDENTIAL_SYNC_KEY_ID and KEI_CREDENTIAL_SYNC_PRIVATE_KEY")
 		return 1
 	}
@@ -65,15 +65,15 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg Config) int 
 	}
 
 	// Run the sync
-	runtimeClient := NewRuntimeClient(cfg.RuntimeControlPlaneURL, *timeout)
+	runtimeClient := NewRuntimeClient(cfg.ControlPlaneURL(), *timeout)
 	output, err := credentials.Sync(context.Background(), credentials.Config{
-		ControlPlaneURL: cfg.RuntimeControlPlaneURL,
-		RuntimeToken:    cfg.RuntimeToken,
-		KeyID:           cfg.CredentialSyncKeyID,
-		PrivateKey:      cfg.CredentialSyncPrivateKey,
+		ControlPlaneURL: cfg.ControlPlaneURL(),
+		RuntimeToken:    cfg.Token(),
+		KeyID:           cfg.SyncKeyID(),
+		PrivateKey:      cfg.SyncPrivateKey(),
 		Timeout:         *timeout,
 	}, store, func(ctx context.Context) (string, error) {
-		identity, err := runtimeClient.WhoAmI(ctx, cfg.RuntimeToken)
+		identity, err := runtimeClient.WhoAmI(ctx, cfg.Token())
 		if err != nil {
 			return "", err
 		}

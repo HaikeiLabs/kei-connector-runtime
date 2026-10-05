@@ -68,13 +68,14 @@ func Main(buildVersion string, args []string) int {
 	} else if args[0] == "model" {
 		code = runModel(args[1:])
 	} else if args[0] == "credential" {
-		code = runCredential(args[1:])
+		code = keiruntime.RunCredential(args[1:], configFromEnv())
 	} else if args[0] == "run" {
 		code = runProxyRun(args[1:])
 	} else if args[0] == "org" {
 		code = keiruntime.RunOrg(args[1:], os.Stdout, os.Stderr, configFromEnv())
 	} else if args[0] == "init" {
-		code = runInit(args[1:], os.Stdout, os.Stderr)
+		cfg := configFromEnv()
+		code = keiruntime.RunInit(args[1:], os.Stdout, os.Stderr, cfg.ABACURL, cfg.ABACSecret, cfg.IsProduction())
 	} else if args[0] == "identity" {
 		code = keiruntime.RunIdentity(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
 	} else if args[0] == "runtime" {

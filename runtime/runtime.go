@@ -63,6 +63,16 @@ type RuntimeClientFactory func(baseURL string, timeout time.Duration) RuntimeCli
 // package where syncPolicyBundle and Config live.
 type SyncBundleFunc func(identity *Identity) error
 
+// CredentialConfig is the subset of the root Config that the credential sync
+// command needs, abstracted so runtime/ never imports the root package.
+type CredentialConfig interface {
+	IsRuntime() bool
+	ControlPlaneURL() string
+	Token() string
+	SyncKeyID() string
+	SyncPrivateKey() string
+}
+
 // HeartbeatClient is the subset of the root RuntimeClient that the heartbeat
 // loop needs, abstracted so runtime/ never imports the root package.
 type HeartbeatClient interface {

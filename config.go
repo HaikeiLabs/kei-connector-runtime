@@ -92,6 +92,8 @@ func (c Config) PolicyAuditPath() string    { return c.AuditPath }
 func (c Config) PolicyAuditMaxBytes() int64 { return c.AuditMaxBytes }
 func (c Config) FlushURL() string           { return c.ABACURL }
 func (c Config) FlushSecret() string        { return c.ABACSecret }
+func (c Config) SyncKeyID() string          { return c.CredentialSyncKeyID }
+func (c Config) SyncPrivateKey() string     { return c.CredentialSyncPrivateKey }
 
 // IsRuntime identifies the customer-hosted installation path.
 func (c Config) IsRuntime() bool {

@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -16,7 +16,7 @@ type InitResult struct {
 	Agent  *AgentInitResponse  `json:"agent,omitempty"`
 }
 
-// runInit implements the `init` subcommand. It provisions a member and/or an
+// RunInit implements the `init` subcommand. It provisions a member and/or an
 // agent by calling the canonical ABAC initialization endpoints over HTTP.
 //
 // The proxy performs no local provisioning or permission fallback: every
@@ -25,7 +25,7 @@ type InitResult struct {
 //
 // Output contract (KEI-108): the provisioning result is written to stdout as a
 // single JSON object; diagnostics and errors go to stderr.
-func runInit(args []string, stdout, stderr io.Writer) int {
+func RunInit(args []string, stdout, stderr io.Writer, defaultABACURL, defaultABACSecret string, isProduction bool) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	member := fs.Bool("member", false, "initialize a member (requires --user and --org)")
 	agent := fs.Bool("agent", false, "initialize an agent (requires --org and --name)")
@@ -59,23 +59,23 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg := configFromEnv()
+	abacURLStr := defaultABACURL
 	if *abacURL != "" {
-		cfg.ABACURL = *abacURL
+		abacURLStr = *abacURL
 	}
-	secret := cfg.ABACSecret
+	secret := defaultABACSecret
 	if *key != "" {
 		secret = *key
 	}
 	// Service-to-service initialization requires the ABAC secret in
 	// environments that enforce authentication. This is a platform operation,
 	// not a runtime path, so the runtime control-plane check does not apply.
-	if cfg.IsProduction() && secret == "" {
+	if isProduction && secret == "" {
 		fmt.Fprintln(stderr, "Error: ABAC_API_SECRET is required when ENV is production or staging")
 		return 1
 	}
 
-	client := NewInitializationClient(cfg.ABACURL, secret, time.Duration(*timeout)*time.Second)
+	client := NewInitializationClient(abacURLStr, secret, time.Duration(*timeout)*time.Second)
 	ctx := context.Background()
 
 	result := InitResult{}
@@ -93,11 +93,11 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 			Name:        *name,
 			Description: *description,
 		}
-		if list := splitCSV(*tools); len(list) > 0 {
+		if list := SplitCSV(*tools); len(list) > 0 {
 			toolsJSON, _ := json.Marshal(list)
 			req.DeclaredTools = toolsJSON
 		}
-		if list := splitCSV(*scopes); len(list) > 0 {
+		if list := SplitCSV(*scopes); len(list) > 0 {
 			scopesJSON, _ := json.Marshal(list)
 			req.DeclaredDataScopes = scopesJSON
 		}
@@ -109,7 +109,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		result.Agent = out
 	}
 
-	if err := writeJSON(stdout, result); err != nil {
+	if err := WriteJSON(stdout, result); err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
