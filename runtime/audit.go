@@ -63,3 +63,16 @@ func EmitDecision(path string, maxBytes int64, e DecisionEvent) {
 		fmt.Fprintf(os.Stderr, "audit: failed to append decision event: %v\n", err)
 	}
 }
+
+func AppendLifecycleEvent(path string, maxBytes int64, e LifecycleEvent) error {
+	if path == "" {
+		return nil
+	}
+	e.EventClass = EventClassLifecycle
+	e.SchemaVersion = 1
+	data, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	return NewAuditSpool(path, maxBytes).Append(EventClassLifecycle, data)
+}

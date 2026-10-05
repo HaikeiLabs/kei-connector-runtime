@@ -74,11 +74,11 @@ func runModelInvoke(args []string) int {
 	return 0
 }
 
-func resolveOrgAgentFromHarness(harnessKey string) (*HarnessIdentity, error) {
+func resolveOrgAgentFromHarness(harnessKey string) (*keiruntime.HarnessIdentity, error) {
 	cfg := configFromEnv()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return resolveHarnessIdentity(ctx, cfg.ABACURL, cfg.ABACSecret, harnessKey)
+	return keiruntime.ResolveHarnessIdentity(ctx, cfg.ABACURL, cfg.ABACSecret, harnessKey)
 }
 
 func getModelProfile(orgID, profileID string) (*ModelProfile, error) {
