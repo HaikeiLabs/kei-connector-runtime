@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
@@ -160,8 +163,45 @@ type SubjectResolveRequest struct {
 }
 
 type SubjectResolutionFailure struct {
-	Category   string
-	HTTPStatus int
+	Category      string
+	HTTPStatus    int
+	TransportKind string
+}
+
+// classifySubjectResolutionTransportError returns a bounded diagnostic label;
+// it deliberately does not expose raw network errors, URLs, or credentials.
+func classifySubjectResolutionTransportError(err error) string {
+	var tlsErr *tls.RecordHeaderError
+	if errors.As(err, &tlsErr) {
+		return "tls"
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return "tls"
+	}
+	var hostnameError x509.HostnameError
+	if errors.As(err, &hostnameError) {
+		return "tls"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection_refused"
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return "connection_reset"
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return "network"
+	}
+	return "request_setup_or_network"
 }
 
 func (e *SubjectResolutionFailure) Error() string { return "subject resolution failed" }
@@ -170,7 +210,10 @@ func (c *policyControlClient) ResolveSubject(ctx context.Context, req SubjectRes
 	b, _ := json.Marshal(req)
 	resp, err := c.request(ctx, http.MethodPost, "/api/v1/runtime/subject-attributes:resolve", b)
 	if err != nil {
-		return policybundle.Subject{}, &SubjectResolutionFailure{Category: "transport"}
+		return policybundle.Subject{}, &SubjectResolutionFailure{
+			Category:      "transport",
+			TransportKind: classifySubjectResolutionTransportError(err),
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
