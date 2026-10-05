@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
@@ -50,6 +51,16 @@ func runtimeSocketPathFromEnv() string {
 }
 
 func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) int {
+	// The daemon may hold session credentials in memory; never dump it.
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
+		slog.Warn("runtime_core_limit_failed", "error", err)
+	}
+	local, err := newServeLocalPDP(cfg)
+	if err != nil {
+		slog.Error("runtime_credential_release_invalid", "error", err)
+		return 1
+	}
+	defer local.Close()
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	unixListener, err := socket.Listen(socketPath)
@@ -77,16 +88,9 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			IdleTimeout:       2 * time.Minute,
 		}
 	}
-	emitFunc := func(data json.RawMessage) {
-		if cfg.AuditPath == "" {
-			return
-		}
-		_ = keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
-	}
-	local := keiruntime.NewLocalPDP(cfg, emitFunc)
-	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
-	server := newServer(base)
-	socketServer := newServer(local.NewHandler(base, base.runtimeConfigError, base.authorized))
+	tcpHandler, socketHandler := newServeHandlers(cfg, local)
+	server := newServer(tcpHandler)
+	socketServer := newServer(socketHandler)
 
 	refresherDone := make(chan struct{})
 	if cfg.IsRuntime() {
@@ -154,6 +158,61 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		}
 	}
 	return exitCode
+}
+
+// newServeLocalPDP builds the daemon's local PDP: decision audit goes to the
+// spool and, with KEI_CREDENTIAL_RELEASE=identity, linked sessions hold their
+// connector credentials in its store. The caller must Close it on exit.
+func newServeLocalPDP(cfg Config) (*keiruntime.LocalPDP, error) {
+	creds, err := newSessionCredentialStore(cfg)
+	if err != nil {
+		return nil, err
+	}
+	emitFunc := func(data json.RawMessage) {
+		if cfg.AuditPath == "" {
+			return
+		}
+		_ = keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
+	}
+	local := keiruntime.NewLocalPDP(cfg, emitFunc)
+	if creds != nil {
+		local.SetCredentialStore(creds)
+	}
+	return local, nil
+}
+
+// newServeHandlers builds the TCP handler and the Unix socket handler (the
+// TCP routes plus the local PDP's authorize and session routes).
+func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Handler) {
+	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
+	return base, local.NewHandler(base, base.runtimeConfigError, base.authorized)
+}
+
+const (
+	CredentialReleaseLegacy   = "legacy"
+	CredentialReleaseIdentity = "identity"
+)
+
+// newSessionCredentialStore returns the session credential store for
+// KEI_CREDENTIAL_RELEASE=identity, or nil for legacy. I11 is called on
+// KEI_CREDENTIAL_RELEASE_URL, defaulting to the runtime control plane (the
+// gateway's runtime host serves the resolve route).
+func newSessionCredentialStore(cfg Config) (*credrelease.Store, error) {
+	switch cfg.CredentialRelease {
+	case "", CredentialReleaseLegacy:
+		return nil, nil
+	case CredentialReleaseIdentity:
+	default:
+		return nil, fmt.Errorf("KEI_CREDENTIAL_RELEASE must be %q or %q", CredentialReleaseIdentity, CredentialReleaseLegacy)
+	}
+	base := cfg.CredentialReleaseURL
+	if base == "" {
+		base = cfg.RuntimeControlPlaneURL
+	}
+	if err := keiruntime.ValidatePolicyControlPlaneURL(base, !cfg.IsProduction()); err != nil {
+		return nil, fmt.Errorf("credential release URL is invalid: %w", err)
+	}
+	return credrelease.NewStore(credrelease.NewClient(base, cfg.RuntimeToken, 10*time.Second)), nil
 }
 
 type runtimeHTTPHandler struct {

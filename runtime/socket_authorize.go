@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 )
@@ -108,6 +109,7 @@ type LocalPDP struct {
 	identity  atomic.Pointer[Identity]
 	emit      EmitAuditFunc
 	keychain  SessionKeychain
+	creds     *credrelease.Store
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
@@ -115,6 +117,36 @@ func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 }
 
 func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
+
+// SetCredentialStore turns on session credential release
+// (KEI_CREDENTIAL_RELEASE=identity): a linked PUT /v1/session fetches the
+// subject's connector credentials into store, and every session end flushes
+// it. Without a store (legacy) sessions hold no credentials.
+func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = store }
+
+// errCredentialReleaseOff is returned by UseCredential in legacy mode.
+var errCredentialReleaseOff = errors.New("session credential release is not enabled")
+
+// UseCredential runs fn with the current session's credential for provider,
+// inside the daemon (ADR-034 option A). It is the only way to reach a held
+// credential; no socket route returns one. See credrelease.Store.Use.
+func (l *LocalPDP) UseCredential(ctx context.Context, provider string, fn func(token string) error) error {
+	if l.creds == nil {
+		return errCredentialReleaseOff
+	}
+	return l.creds.Use(ctx, provider, fn)
+}
+
+// Close flushes held session credentials. The serve daemon calls it on exit.
+func (l *LocalPDP) Close() {
+	l.flushCredentials()
+}
+
+func (l *LocalPDP) flushCredentials() {
+	if l.creds != nil {
+		l.creds.Flush()
+	}
+}
 
 func (l *LocalPDP) SetIdentity(identity *Identity) {
 	if identity == nil || identity.WorkspaceID == nil {
@@ -137,10 +169,14 @@ func (l *LocalPDP) AfterSync(err error) {
 		} else {
 			l.Sessions.End()
 		}
+		l.flushCredentials()
 		return
 	}
 	if e != nil {
 		e.ReconcileSession()
+	}
+	if sub, ok := l.Sessions.Current(); !ok || sub.Status != pdp.StatusLinked {
+		l.flushCredentials()
 	}
 }
 
@@ -170,12 +206,15 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 			l.handleSessionGet(w, r)
 		default:
 			l.Sessions.End()
+			l.flushCredentials()
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
 }
 
 func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
+	// Any PUT ends the previous session's credentials, even one rejected below.
+	l.flushCredentials()
 	var req socketSessionRequest
 	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != sessionSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchema+" object with no unknown fields")
@@ -223,14 +262,32 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
 		return
 	}
+	l.loadCredentials(r.Context(), sub)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// loadCredentials makes the session's one I11 call for a linked subject. A
+// failure leaves the session without credentials (every use denies) but does
+// not fail the session itself; only the error class is logged.
+func (l *LocalPDP) loadCredentials(ctx context.Context, sub pdp.Subject) {
+	if l.creds == nil || sub.Status != pdp.StatusLinked || sub.Token == "" {
+		return
+	}
+	if err := l.creds.Load(ctx, sub.Token); err != nil {
+		slog.Warn("session_credentials_unavailable", "error", err)
+		return
+	}
+	// A DELETE or another PUT that landed before Load began must still win.
+	if cur, ok := l.Sessions.Current(); !ok || cur.Status != pdp.StatusLinked || cur.UserID != sub.UserID || cur.Token != sub.Token {
+		l.creds.Flush()
+	}
 }
 
 // resolveBundleSubject looks up (source, external_id) in the evaluator's
 // current bundle identities. When the identity is linked the returned subject
-// carries the user id and linked status; otherwise it carries the identity's
-// status (unlinked, pending, cross_workspace, revoked). An unknown or expired
-// identity yields an unlinked subject.
+// carries the user id, linked status and subject token; otherwise it carries
+// the identity's status (unlinked, pending, cross_workspace, revoked). An
+// unknown or expired identity yields an unlinked subject.
 func resolveBundleSubject(e *pdp.Evaluator, source, externalID string) pdp.Subject {
 	for _, id := range e.BundleIdentities() {
 		if id.Source != source || id.ExternalID != externalID {
@@ -239,7 +296,12 @@ func resolveBundleSubject(e *pdp.Evaluator, source, externalID string) pdp.Subje
 		if !id.ExpireTime.IsZero() && !time.Now().Before(id.ExpireTime) {
 			break
 		}
-		return pdp.Subject{UserID: id.UserID, Status: pdp.Status(id.Status)}
+		sub := pdp.Subject{UserID: id.UserID, Status: pdp.Status(id.Status)}
+		if sub.Status == pdp.StatusLinked {
+			// The identity's ES256 subject token is the I11 subject evidence.
+			sub.Token = id.SubjectToken
+		}
+		return sub
 	}
 	return pdp.Subject{Status: pdp.StatusUnlinked}
 }

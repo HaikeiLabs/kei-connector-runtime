@@ -67,6 +67,24 @@ catalog. The socket route proposed in the closed PR #65 was rejected because
 it called the catalog authorize endpoint per request and did not authenticate
 the caller.
 
+### Session credentials (`KEI_CREDENTIAL_RELEASE=identity`)
+
+With `KEI_CREDENTIAL_RELEASE=identity` (default `legacy`, which changes
+nothing), a `PUT /v1/session` that resolves a linked subject makes one call to
+the identity service's `POST /api/v1/connectorCredentials:resolve` (ADR-032 I11)
+with the runtime token and the subject's token in `X-Kei-Subject-Token`. The
+call goes to `KEI_CREDENTIAL_RELEASE_URL`, or to the runtime control plane when
+that is unset. The connector credentials it returns live only in the daemon's
+memory (ADR-034, owner option A). Every PUT, `DELETE /v1/session`, a revocation
+and daemon exit zero and drop them. A provider 401 triggers one single-provider
+re-fetch and one retry, and after that the call is denied. The daemon sets
+`RLIMIT_CORE=0` so it never core-dumps them.
+
+**No socket route returns a credential.** The harness holds the same runtime
+token as any socket client, so anything on the socket reaches the harness.
+Credentialed work runs inside the daemon instead: `POST /v1/connectors:invoke`
+(L3b) and `POST /v1/commands:run` (L3c) are coming in later releases.
+
 ### Same-host daemon and harness (primary deployment)
 
 On a bare-metal or VM host, run `kei-proxy serve` as a system service. The

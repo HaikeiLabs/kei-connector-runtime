@@ -28,6 +28,10 @@ type Config struct {
 	ABACSecret                    string
 	Env                           string
 	ToolManifestPath              string
+	// CredentialRelease is KEI_CREDENTIAL_RELEASE: "legacy" (default) or
+	// "identity", where the serve daemon holds session credentials from I11.
+	CredentialRelease    string
+	CredentialReleaseURL string
 }
 
 func envOr(key, fallback string) string {
@@ -78,6 +82,8 @@ func configFromEnv() Config {
 		ABACSecret:                    strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 		Env:                           os.Getenv("ENV"),
 		ToolManifestPath:              os.Getenv("KEI_TOOL_MANIFEST"),
+		CredentialRelease:             envOr("KEI_CREDENTIAL_RELEASE", CredentialReleaseLegacy),
+		CredentialReleaseURL:          os.Getenv("KEI_CREDENTIAL_RELEASE_URL"),
 	}
 }
 
