@@ -4,6 +4,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ErrInstallationRevoked is returned when the runtime installation has been
@@ -43,6 +44,19 @@ type Identity struct {
 
 // IdentityFunc is a function that resolves the runtime identity.
 type IdentityFunc func() (*Identity, error)
+
+// RuntimeConfig is the subset of the root Config that identity-link and org
+// CLI handlers need, abstracted so runtime/ never imports the root package.
+type RuntimeConfig interface {
+	IsRuntime() bool
+	Validate() error
+	Token() string
+	ControlPlaneURL() string
+	FlushURL() string
+}
+
+// RuntimeClientFactory creates a RuntimeClient from a base URL and timeout.
+type RuntimeClientFactory func(baseURL string, timeout time.Duration) RuntimeClient
 
 // SyncBundleFunc is a function that fetches and persists the policy bundle
 // for the given identity. The caller supplies the closure from the root

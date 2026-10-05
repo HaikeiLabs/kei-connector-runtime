@@ -72,11 +72,11 @@ func Main(buildVersion string, args []string) int {
 	} else if args[0] == "run" {
 		code = runProxyRun(args[1:])
 	} else if args[0] == "org" {
-		code = runOrg(args[1:], os.Stdout, os.Stderr)
+		code = keiruntime.RunOrg(args[1:], os.Stdout, os.Stderr, configFromEnv())
 	} else if args[0] == "init" {
 		code = runInit(args[1:], os.Stdout, os.Stderr)
 	} else if args[0] == "identity" {
-		code = runIdentity(args[1:])
+		code = keiruntime.RunIdentity(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
 	} else if args[0] == "runtime" {
 		code = runRuntime(args[1:])
 	} else if args[0] == "harness" {

@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bytes"
@@ -22,14 +22,14 @@ type OrgMembersResponse struct {
 	Members []OrgMember `json:"members"`
 }
 
-// runOrg implements the `org` subcommand.
+// RunOrg implements the `org` subcommand.
 //
 // Output contract (documented CLI protocol, KEI-108): machine-readable
 // results go to stdout — the member list as JSON for --list, or the raw ABAC
 // response for mutating operations. Diagnostics and errors go to stderr with
 // a non-zero exit code. stdout is never used for diagnostics, and no
 // credential material is written to either stream.
-func runOrg(args []string, stdout, stderr io.Writer) int {
+func RunOrg(args []string, stdout, stderr io.Writer, cfg RuntimeConfig) int {
 	fs := flag.NewFlagSet("org", flag.ContinueOnError)
 	orgID := fs.String("org", "", "organization ID (required)")
 	userID := fs.String("user", "", "user ID for add/remove/update operations")
@@ -44,11 +44,7 @@ func runOrg(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg := configFromEnv()
-	if *abacURL != "" {
-		cfg.ABACURL = *abacURL
-	}
-	if cfg.RuntimeToken == "" {
+	if cfg.Token() == "" {
 		fmt.Fprintln(stderr, "Error: KEI_RUNTIME_TOKEN is required")
 		return 1
 	}
@@ -59,7 +55,11 @@ func runOrg(args []string, stdout, stderr io.Writer) int {
 	}
 
 	client := &http.Client{Timeout: time.Duration(*timeout) * time.Second}
-	url := fmt.Sprintf("%s/api/v1/organizations/%s/members", cfg.ABACURL, *orgID)
+	baseURL := cfg.FlushURL()
+	if *abacURL != "" {
+		baseURL = *abacURL
+	}
+	url := fmt.Sprintf("%s/api/v1/organizations/%s/members", baseURL, *orgID)
 
 	var httpReq *http.Request
 	method := http.MethodGet
@@ -99,7 +99,7 @@ func runOrg(args []string, stdout, stderr io.Writer) int {
 	if httpReq == nil {
 		httpReq, _ = http.NewRequest(method, url, nil)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+cfg.RuntimeToken)
+	httpReq.Header.Set("Authorization", "Bearer "+cfg.Token())
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -125,7 +125,7 @@ func runOrg(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "Error: failed to parse response: %v\n", err)
 			return 1
 		}
-		if err := writeJSON(stdout, members); err != nil {
+		if err := WriteJSON(stdout, members); err != nil {
 			fmt.Fprintf(stderr, "Error: failed to write output: %v\n", err)
 			return 1
 		}

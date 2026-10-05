@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bytes"
@@ -24,8 +24,8 @@ func TestRunOrgListWritesJSONToStdout(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_test_token_1234567890")
-	code := runOrg([]string{"--org", "org1", "--list", "--abac-url", server.URL}, &stdout, &stderr)
+	cfg := testRuntimeConfig{token: "kh_live_test_token_1234567890"}
+	code := RunOrg([]string{"--org", "org1", "--list", "--abac-url", server.URL}, &stdout, &stderr, cfg)
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr: %s", code, stderr.String())
 	}
@@ -45,7 +45,7 @@ func TestRunOrgListWritesJSONToStdout(t *testing.T) {
 // stderr with a non-zero exit code and stdout stays clean.
 func TestRunOrgMissingKeyGoesToStderr(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runOrg([]string{"--org", "org1", "--list"}, &stdout, &stderr)
+	code := RunOrg([]string{"--org", "org1", "--list"}, &stdout, &stderr, testRuntimeConfig{})
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -65,8 +65,8 @@ func TestRunOrgNon200GoesToStderr(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_test_token_1234567890")
-	code := runOrg([]string{"--org", "org1", "--list", "--abac-url", server.URL}, &stdout, &stderr)
+	cfg := testRuntimeConfig{token: "kh_live_test_token_1234567890"}
+	code := RunOrg([]string{"--org", "org1", "--list", "--abac-url", server.URL}, &stdout, &stderr, cfg)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}

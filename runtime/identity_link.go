@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -7,24 +7,23 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 )
 
-// runIdentity dispatches platform-neutral identity operations.
-func runIdentity(args []string) int {
+// RunIdentity dispatches platform-neutral identity operations.
+func RunIdentity(args []string, stdout, stderr io.Writer, cfg RuntimeConfig, newClient RuntimeClientFactory) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "identity requires a subcommand: link")
+		fmt.Fprintln(stderr, "identity requires a subcommand: link")
 		return 2
 	}
 	switch args[0] {
 	case "link":
-		return runIdentityLink(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
+		return runIdentityLink(args[1:], stdout, stderr, cfg, newClient)
 	case "status":
-		return runIdentityStatus(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
+		return RunIdentityStatus(args[1:], stdout, stderr, cfg, newClient)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown identity command %q\n", args[0])
+		fmt.Fprintf(stderr, "unknown identity command %q\n", args[0])
 		return 2
 	}
 }
@@ -40,10 +39,7 @@ func writeIdentityStatusDiagnostic(stderr io.Writer, category string, status int
 	}
 }
 
-// runIdentityLink starts a claim using the authenticated runtime's
-// authoritative installation and workspace scope. The claim URL is a bearer
-// secret, so it is written only to stdout for the caller to deliver privately.
-func runIdentityStatus(args []string, stdout, stderr io.Writer, cfg Config, newClient runtimeClientFactory) int {
+func RunIdentityStatus(args []string, stdout, stderr io.Writer, cfg RuntimeConfig, newClient RuntimeClientFactory) int {
 	flags := flag.NewFlagSet("identity status", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	platformUserID := flags.String("platform-user-id", "", "stable user ID from the current platform interaction")
@@ -59,7 +55,7 @@ func runIdentityStatus(args []string, stdout, stderr io.Writer, cfg Config, newC
 		writeIdentityStatusDiagnostic(stderr, IdentityStatusFailurePreTransport, 0)
 		return 1
 	}
-	client := newClient(cfg.RuntimeControlPlaneURL, *timeout)
+	client := newClient(cfg.ControlPlaneURL(), *timeout)
 	statusClient, ok := client.(interface {
 		ResolveIdentityStatus(context.Context, string, IdentityStatusRequest) (*IdentityStatusResponse, error)
 	})
@@ -68,7 +64,7 @@ func runIdentityStatus(args []string, stdout, stderr io.Writer, cfg Config, newC
 		writeIdentityStatusDiagnostic(stderr, IdentityStatusFailurePreTransport, 0)
 		return 1
 	}
-	result, err := statusClient.ResolveIdentityStatus(context.Background(), cfg.RuntimeToken, IdentityStatusRequest{PlatformUserID: *platformUserID, TenantID: *tenantID})
+	result, err := statusClient.ResolveIdentityStatus(context.Background(), cfg.Token(), IdentityStatusRequest{PlatformUserID: *platformUserID, TenantID: *tenantID})
 	if err != nil || result == nil {
 		fmt.Fprintln(stderr, "identity status request failed")
 		var failure *IdentityStatusFailureError
@@ -84,7 +80,7 @@ func runIdentityStatus(args []string, stdout, stderr io.Writer, cfg Config, newC
 	return 0
 }
 
-func runIdentityLink(args []string, stdout, stderr io.Writer, cfg Config, newClient runtimeClientFactory) int {
+func runIdentityLink(args []string, stdout, stderr io.Writer, cfg RuntimeConfig, newClient RuntimeClientFactory) int {
 	flags := flag.NewFlagSet("identity link", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	platform := flags.String("platform", "", "chat platform (discord, slack, or teams)")
@@ -108,8 +104,8 @@ func runIdentityLink(args []string, stdout, stderr io.Writer, cfg Config, newCli
 		fmt.Fprintf(stderr, "identity link configuration invalid: %v\n", err)
 		return 1
 	}
-	client := newClient(cfg.RuntimeControlPlaneURL, *timeout)
-	result, err := client.StartIdentityClaim(context.Background(), cfg.RuntimeToken, IdentityClaimStartRequest{
+	client := newClient(cfg.ControlPlaneURL(), *timeout)
+	result, err := client.StartIdentityClaim(context.Background(), cfg.Token(), IdentityClaimStartRequest{
 		Platform:       *platform,
 		TenantID:       *tenantID,
 		PlatformUserID: *platformUserID,
