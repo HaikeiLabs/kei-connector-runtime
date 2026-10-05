@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -61,6 +62,8 @@ type socketSessionRequest struct {
 	Email      string          `json:"email,omitempty"`
 	Status     string          `json:"status"`
 	Enrollment json.RawMessage `json:"enrollment,omitempty"`
+	Source     string          `json:"source,omitempty"`
+	ExternalID string          `json:"external_id,omitempty"`
 }
 
 type EmitAuditFunc func(json.RawMessage)
@@ -89,17 +92,29 @@ type socketDecisionEvent struct {
 	ToolArgsDigest      *string  `json:"tool_args_digest,omitempty"`
 }
 
+// SessionKeychain provides CLI login token storage and verification.
+type SessionKeychain interface {
+	// Token returns the Kei CLI login token from the OS keychain.
+	Token() (string, error)
+	// Verify checks the token with the Kei API whoami endpoint and returns the
+	// user's identity.
+	Verify(ctx context.Context, token string) (userID string, err error)
+}
+
 type LocalPDP struct {
 	cfg       PolicyConfig
 	Sessions  *pdp.Sessions
 	evaluator atomic.Pointer[pdp.Evaluator]
 	identity  atomic.Pointer[Identity]
 	emit      EmitAuditFunc
+	keychain  SessionKeychain
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 	return &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit}
 }
+
+func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
 
 func (l *LocalPDP) SetIdentity(identity *Identity) {
 	if identity == nil || identity.WorkspaceID == nil {
@@ -166,11 +181,67 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchema+" object with no unknown fields")
 		return
 	}
-	if err := l.Sessions.Start(pdp.Subject{UserID: req.UserID, Email: req.Email, Status: pdp.Status(req.Status), Enrollment: req.Enrollment}); err != nil {
+	if req.UserID != "" || req.Email != "" || req.Status != "" {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "the user_id/email/status fields are no longer supported; use source/external_id")
+		return
+	}
+	if req.Source == "" {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "a source is required")
+		return
+	}
+	var sub pdp.Subject
+	switch req.Source {
+	case "cli":
+		if l.keychain == nil {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "cli source not available")
+			return
+		}
+		token, err := l.keychain.Token()
+		if err != nil || token == "" {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "no cli login token found")
+			return
+		}
+		userID, err := l.keychain.Verify(r.Context(), token)
+		if err != nil {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "cli token verification failed: "+err.Error())
+			return
+		}
+		sub = pdp.Subject{UserID: userID, Status: pdp.StatusLinked, Token: token}
+	default:
+		if req.ExternalID == "" {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "external_id is required for source "+req.Source)
+			return
+		}
+		e := l.evaluator.Load()
+		if e == nil {
+			sub = pdp.Subject{Status: pdp.StatusUnlinked}
+		} else {
+			sub = resolveBundleSubject(e, req.Source, req.ExternalID)
+		}
+	}
+	if err := l.Sessions.Start(sub); err != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// resolveBundleSubject looks up (source, external_id) in the evaluator's
+// current bundle identities. When the identity is linked the returned subject
+// carries the user id and linked status; otherwise it carries the identity's
+// status (unlinked, pending, cross_workspace, revoked). An unknown or expired
+// identity yields an unlinked subject.
+func resolveBundleSubject(e *pdp.Evaluator, source, externalID string) pdp.Subject {
+	for _, id := range e.BundleIdentities() {
+		if id.Source != source || id.ExternalID != externalID {
+			continue
+		}
+		if !id.ExpireTime.IsZero() && !time.Now().Before(id.ExpireTime) {
+			break
+		}
+		return pdp.Subject{UserID: id.UserID, Status: pdp.Status(id.Status)}
+	}
+	return pdp.Subject{Status: pdp.StatusUnlinked}
 }
 
 type socketSessionResponse struct {

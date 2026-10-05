@@ -22,12 +22,13 @@ const (
 
 // Subject is the acting user of a worker session, from machine login plus
 // kei or harness login. Enrollment is the private link returned only on a
-// subject_unlinked denial.
+// subject_unlinked denial. Token holds the CLI login token for cli sessions.
 type Subject struct {
 	UserID     string
 	Email      string
 	Status     Status
 	Enrollment json.RawMessage
+	Token      string
 }
 
 // Sessions holds the current worker session's subject in memory only. It is
@@ -46,9 +47,9 @@ func (s *Sessions) Start(sub Subject) error {
 		if sub.UserID == "" {
 			return errors.New("pdp: a linked session subject requires a user id")
 		}
-	case StatusUnlinked, StatusPending, StatusCrossWorkspace:
+	case StatusUnlinked, StatusPending, StatusCrossWorkspace, StatusRevoked:
 	default:
-		return errors.New("pdp: session status must be linked, unlinked, pending or cross_workspace")
+		return errors.New("pdp: session status must be linked, unlinked, pending, cross_workspace or revoked")
 	}
 	if sub.Status != StatusUnlinked {
 		sub.Enrollment = nil

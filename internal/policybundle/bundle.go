@@ -26,7 +26,7 @@ type Audience struct {
 
 // Identity is one known user in a bundle with subject_resolution.mode=bundle.
 type Identity struct {
-	Platform     string    `json:"platform,omitempty"`
+	Source       string    `json:"source,omitempty"`
 	ExternalID   string    `json:"external_id,omitempty"`
 	UserID       string    `json:"user_id"`
 	Status       string    `json:"status"`
