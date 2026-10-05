@@ -178,6 +178,16 @@ func (e *Evaluator) RevokeSession() {
 	}
 }
 
+// BundleIdentities returns the identities from the current verified bundle,
+// or nil when the bundle is missing, invalid, expired, or has no identities.
+func (e *Evaluator) BundleIdentities() []policybundle.Identity {
+	v, _, err := e.check()
+	if err != nil {
+		return nil
+	}
+	return v.Payload.Identities
+}
+
 func (e *Evaluator) check() (*policybundle.Verified, policybundle.State, error) {
 	return e.store.Check(e.aud.InstallationID, e.aud.OrgID, e.aud.WorkspaceID, e.now().UTC())
 }

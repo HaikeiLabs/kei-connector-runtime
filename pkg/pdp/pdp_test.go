@@ -152,9 +152,15 @@ func TestSessionLifecycle(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	sessions := NewSessions()
 	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), sessions)
-	if err := sessions.Start(Subject{Status: StatusRevoked, UserID: "u-alice"}); err == nil {
-		t.Fatal("a caller started a revoked session")
+	if err := sessions.Start(Subject{Status: StatusRevoked, UserID: "u-alice"}); err != nil {
+		t.Fatal(err)
 	}
+	// A revoked session still short-circuits to deny.
+	d, _ := e.Evaluate(context.Background(), Request{Tool: "github.create_issue"})
+	if d.ReasonCode != "subject_revoked" {
+		t.Fatalf("reason code = %s, want subject_revoked", d.ReasonCode)
+	}
+	sessions.End()
 	if err := sessions.Start(Subject{Status: StatusLinked}); err == nil {
 		t.Fatal("a linked session started without a user id")
 	}
