@@ -116,6 +116,24 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	return out, nil
 }
 
+// AuthorizeOperation implements runtime.OperationAuthorizer without importing
+// runtime (which depends on this package). Callers provide trusted identity
+// fields and an exact planner-produced operation.
+func (e *Evaluator) AuthorizeOperation(installationID, subjectID, agentID, tool string, op policybundle.Operation) (string, bool, error) {
+	if installationID != e.aud.InstallationID || subjectID == "" || tool == "" {
+		return "", false, nil
+	}
+	if e.sessions == nil {
+		return "", false, nil
+	}
+	current, ok := e.sessions.Current()
+	if !ok || current.UserID != subjectID {
+		return "", false, nil
+	}
+	d, err := e.Evaluate(context.Background(), Request{Tool: tool, AgentID: agentID, Action: op.Action, Resource: op.Resource, Connector: &ConnectorTarget{ConnectorID: op.ConnectorID, Capability: op.Capability}})
+	return d.BundleDigest, err == nil && d.Allow, err
+}
+
 // HarnessCall is a pre-built harness tool call (ADR-029 §1.2, §1.3).
 type HarnessCall = policybundle.HarnessCall
 

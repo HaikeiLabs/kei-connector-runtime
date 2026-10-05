@@ -72,7 +72,7 @@ func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, grant
 func (v *Verified) EvaluateSession(call Call, subject *SessionSubject, members Memberships) Decision {
 	call.UserID, call.Email = "", ""
 	var pre Decision
-	if call.ConnectorInvocation {
+	if call.ConnectorInvocation && call.Tool == "" {
 		pre = v.EvaluateConnector(call, nil)
 	} else {
 		pre = v.Evaluate(call, nil)

@@ -15,6 +15,12 @@ type Subject struct {
 	Enrollment      json.RawMessage `json:"enrollment,omitempty"`
 	MaxAgeSeconds   int             `json:"max_age_seconds,omitempty"`
 }
+type Operation struct {
+	ConnectorID string
+	Capability  string
+	Action      string
+	Resource    string
+}
 type Call struct {
 	Tool, Action, Resource, AgentID, ConnectorID, Capability, UserID, Email string
 	ConnectorInvocation                                                     bool
