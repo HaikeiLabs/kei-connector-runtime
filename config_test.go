@@ -2,6 +2,8 @@ package connectorruntime
 
 import (
 	"testing"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
 )
 
 func TestValidateRuntimeTokenFormatAcceptsValidToken(t *testing.T) {
@@ -69,8 +71,8 @@ func TestRuntimeValidateRequiresHTTPSExceptNonProductionLoopback(t *testing.T) {
 func TestConfigFromEnvSetsDefaultRuntimeStateDir(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_STATE_DIR", "")
 	cfg := configFromEnv()
-	if cfg.RuntimeStateDir != DefaultRuntimeStateDir {
-		t.Fatalf("RuntimeStateDir = %q, want default %q", cfg.RuntimeStateDir, DefaultRuntimeStateDir)
+	if cfg.RuntimeStateDir != statedir.DefaultPathOS() {
+		t.Fatalf("RuntimeStateDir = %q, want default %q", cfg.RuntimeStateDir, statedir.DefaultPathOS())
 	}
 }
 
