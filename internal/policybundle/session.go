@@ -1,6 +1,9 @@
 package policybundle
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // DecisionPermit is the ADR-028 permit decision word, for callers that report
 // a decision in that vocabulary.
@@ -33,8 +36,32 @@ type Memberships interface {
 }
 
 // BundleMemberships returns the memberships carried by the bundle, or nil
-// when the bundle does not carry them (every kei.policy-bundle/v1 bundle).
-func BundleMemberships(*Verified) Memberships { return nil }
+// when the bundle does not carry them (mode=online or no identities).
+func BundleMemberships(v *Verified) Memberships {
+	if len(v.Payload.Identities) == 0 {
+		return nil
+	}
+	return &bundleMemberships{identities: v.Payload.Identities}
+}
+
+type bundleMemberships struct {
+	identities []Identity
+}
+
+func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, granted, known bool) {
+	for _, id := range m.identities {
+		if id.UserID != userID {
+			continue
+		}
+		if !id.ExpireTime.IsZero() && !time.Now().Before(id.ExpireTime) {
+			return nil, nil, false, false
+		}
+		known = true
+		granted = id.Status == SubjectLinked
+		return id.Groups, id.OrgRoles, granted, known
+	}
+	return nil, nil, false, false
+}
 
 // EvaluateSession decides a call with the in-memory session subject and no
 // catalog round trip. Registry and agent checks come first, then the subject
