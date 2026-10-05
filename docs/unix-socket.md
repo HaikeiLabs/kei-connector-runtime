@@ -82,8 +82,7 @@ re-fetch and one retry, and after that the call is denied. The daemon sets
 
 **No socket route returns a credential.** The harness holds the same runtime
 token as any socket client, so anything on the socket reaches the harness.
-Credentialed work runs inside the daemon instead. `POST /v1/commands:run`
-(L3c) is coming in a later release.
+Credentialed work runs inside the daemon instead, through the two routes below.
 
 ### `POST /v1/connectors:invoke` (`KEI_CREDENTIAL_RELEASE=identity`)
 
@@ -113,6 +112,45 @@ bundle carries neither. In identity mode `kei-proxy connector invoke` is a
 thin client of this route. It needs no control plane and holds no credential.
 It fails closed with `daemon_unavailable` when the daemon is unreachable, and
 it rejects `--user-id`/`--provider-user`.
+
+### `POST /v1/commands:run` (`KEI_CREDENTIAL_RELEASE=identity`)
+
+In identity mode, `kei-proxy run [--connector <id>] -- <cmd> [args...]` is a
+thin client of this route. It sends `kei.command-run-request/v1`:
+`{argv, env, dir, connector, agent_id}`. `env` is its own environment, in which
+`KEY=kei://connectors/<id>/<field>` values are credential references, left
+unresolved. The daemon:
+
+1. **Authorizes each reference.** The local PDP decides it with the session
+   subject, as connector capability `credential` on resource
+   `kei://connectors/<id>/<field>`. That's the capability and resource the
+   catalog decides on the legacy path. The bundle must register a
+   `credential` tool and binding for the connector, and a policy must permit
+   it.
+2. **Resolves each reference** from the session-held credential. Only the
+   `token`/`access_token` field of a session OAuth provider (github, gmail,
+   google_drive, linear) resolves; anything else denies.
+3. **Spawns the child** with exactly the request's `env`, with the resolved
+   values in place of the references. The daemon's own environment is never
+   added. A bare command name is looked up on that env's `PATH`, in `dir`.
+4. **Streams the result** as NDJSON frames (`kei.command-run-stream/v1`):
+   `{"stream":"stdout"|"stderr","data":<base64>}`, then one
+   `{"done":{"decision","reason_code","exit_code"}}`. Resolved values are
+   redacted from the child's output as `[REDACTED]` before it is framed. Only
+   exact matches are redacted, as on the legacy path; an encoded form of the
+   value is not.
+5. **Writes** a `kei.proxy-run-event/v1` audit event.
+
+The client relays the frames to its stdout and stderr and exits with the
+child's exit code: 128+N if a signal killed it, and 127 if it could not start.
+A denial exits 1, or 2 when there is no reference, and the reason goes to
+stderr. With no daemon, no session, a daemon in legacy mode (404) or a
+rejected token, it fails closed with exit 1. The CLI process never holds a
+connector credential.
+
+**stdin is not passed through.** The child reads an empty stdin (`/dev/null`).
+A command that needs input must take it from a file or argument. If the
+client disconnects, the request is canceled and the child is killed.
 
 ### Same-host daemon and harness (primary deployment)
 

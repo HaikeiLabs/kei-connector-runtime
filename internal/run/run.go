@@ -45,6 +45,11 @@ type Config struct {
 	ControlPlaneURL, SocketPath                                        string
 	AppendAudit                                                        func([]byte) error
 	AuditCrypto                                                        *auditcrypto.Provider
+	// DaemonSocket, when set (KEI_CREDENTIAL_RELEASE=identity), makes run a
+	// thin client of the serve daemon's POST /v1/commands:run on this Unix
+	// socket: the daemon resolves the references and spawns the child, and
+	// this process never holds a credential.
+	DaemonSocket string
 }
 
 type catalogRunAuthorization struct{ cfg Config }
@@ -289,6 +294,9 @@ func Run(args []string, stdout, stderr io.Writer, cfg Config) int {
 	if cfg.RuntimeToken == "" {
 		fmt.Fprintln(stderr, "run requires KEI_RUNTIME_TOKEN")
 		return 1
+	}
+	if cfg.DaemonSocket != "" {
+		return runViaDaemon(args, stdout, stderr, cfg, os.Environ())
 	}
 	store, err := secrets.NewStore()
 	if err != nil {
