@@ -23,6 +23,19 @@ type Audience struct {
 	OrgID          string `json:"org_id"`
 	WorkspaceID    string `json:"workspace_id"`
 }
+
+// Identity is one known user in a bundle with subject_resolution.mode=bundle.
+type Identity struct {
+	Platform     string    `json:"platform,omitempty"`
+	ExternalID   string    `json:"external_id,omitempty"`
+	UserID       string    `json:"user_id"`
+	Status       string    `json:"status"`
+	Groups       []string  `json:"groups,omitempty"`
+	OrgRoles     []string  `json:"org_roles,omitempty"`
+	SubjectToken string    `json:"subject_token,omitempty"`
+	ExpireTime   time.Time `json:"expire_time,omitempty"`
+}
+
 type Payload struct {
 	Schema         string    `json:"schema"`
 	BundleID       string    `json:"bundle_id"`
@@ -42,6 +55,7 @@ type Payload struct {
 	} `json:"subject_resolution"`
 	PolicySet              json.RawMessage `json:"policy_set"`
 	AgentConnectorBindings json.RawMessage `json:"agent_connector_bindings"`
+	Identities             []Identity      `json:"identities,omitempty"`
 }
 
 type Verified struct {
@@ -97,7 +111,13 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	if payload.NotAfter.After(payload.IssuedAt.Add(24*time.Hour)) || !payload.NotAfter.After(payload.IssuedAt) {
 		return nil, errors.New("invalid policy bundle validity window")
 	}
-	if payload.SubjectResolution.Mode != "online" || payload.SubjectResolution.MaxCacheSeconds > 60 {
+	switch payload.SubjectResolution.Mode {
+	case "online":
+		if payload.SubjectResolution.MaxCacheSeconds > 60 {
+			return nil, ErrBundleUnsupported
+		}
+	case "bundle":
+	default:
 		return nil, ErrBundleUnsupported
 	}
 	if err := validatePolicyDialect(payload.PolicySet); err != nil {

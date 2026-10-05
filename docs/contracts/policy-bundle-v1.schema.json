@@ -73,12 +73,12 @@
       }
     },
     "subject_resolution": {
-      "description": "How the PEP learns a human subject's user id, link state, effective groups and org roles. v1 is always online: the PEP asks the catalog (POST /api/v1/runtime/subject-attributes:resolve) and never reads memberships from the bundle.",
+      "description": "How the PEP learns a human subject's user id, link state, effective groups and org roles. mode=online: the PEP asks the catalog (POST /api/v1/runtime/subject-attributes:resolve) and never reads memberships from the bundle. mode=bundle: identities are embedded in the bundle itself.",
       "type": "object",
       "additionalProperties": false,
       "required": ["mode", "max_cache_seconds"],
       "properties": {
-        "mode": { "const": "online" },
+        "mode": { "enum": ["online", "bundle"] },
         "max_cache_seconds": {
           "description": "The longest a resolved subject may be reused in memory by a long-running PEP. Per-call subprocesses do not cache.",
           "type": "integer",
@@ -102,6 +102,53 @@
             "type": "array",
             "items": { "$ref": "policy-set-v1.schema.json#/$defs/name" },
             "uniqueItems": true
+          }
+        }
+      }
+    },
+    "identities": {
+      "description": "Embedded subject identities for mode=bundle. Each identity maps an external platform user to a workspace subject. Present only when subject_resolution.mode is bundle.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "external_id", "user_id", "status"],
+        "properties": {
+          "source": {
+            "description": "The external system the identity originates from (e.g. discord, github, cli). Open lowercase string matching ^[a-z][a-z0-9_-]*$.",
+            "$ref": "policy-set-v1.schema.json#/$defs/name"
+          },
+          "external_id": {
+            "description": "The user's identifier on the external platform.",
+            "type": "string",
+            "minLength": 1
+          },
+          "user_id": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+          "status": {
+            "description": "The identity's link status in this workspace.",
+            "type": "string",
+            "enum": ["linked", "pending", "revoked", "cross_workspace"]
+          },
+          "groups": {
+            "description": "Effective workspace groups for this identity (only when status=linked).",
+            "type": "array",
+            "items": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+            "uniqueItems": true
+          },
+          "org_roles": {
+            "description": "Organization-level roles granted to this identity (only when status=linked).",
+            "type": "array",
+            "items": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+            "uniqueItems": true
+          },
+          "subject_token": {
+            "description": "Optional opaque token the runtime may use for subject-level API authentication.",
+            "type": "string"
+          },
+          "expire_time": {
+            "description": "Optional RFC 3339 timestamp after which this identity is treated as unknown. Absence means no expiry.",
+            "type": "string",
+            "format": "date-time"
           }
         }
       }
