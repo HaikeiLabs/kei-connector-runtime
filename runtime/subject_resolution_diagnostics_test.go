@@ -3,7 +3,9 @@ package runtime
 import (
 	"bytes"
 	"errors"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -14,6 +16,7 @@ func TestWritePolicyStateDenialLogsOnlySubjectDiagnostic(t *testing.T) {
 		want    string
 	}{
 		{"transport", &SubjectResolutionFailure{Category: "transport"}, "category=transport"},
+		{"transport kind", &SubjectResolutionFailure{Category: "transport", TransportKind: "dns"}, "category=transport transport_kind=dns"},
 		{"status", &SubjectResolutionFailure{Category: "http_status", HTTPStatus: 503}, "category=http_status http_status=503"},
 		{"decode", &SubjectResolutionFailure{Category: "decode"}, "category=decode"},
 		{"invalid", &SubjectResolutionFailure{Category: "invalid_response"}, "category=invalid_response"},
@@ -32,6 +35,24 @@ func TestWritePolicyStateDenialLogsOnlySubjectDiagnostic(t *testing.T) {
 			}
 			if !strings.Contains(stdout.String(), `"reason_code":"subject_resolution_unavailable"`) {
 				t.Fatalf("user-facing denial changed: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestClassifySubjectResolutionTransportError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"dns", &net.DNSError{Err: "private.example failed", Name: "private.example"}, "dns"},
+		{"refused", syscall.ECONNREFUSED, "connection_refused"},
+		{"reset", syscall.ECONNRESET, "connection_reset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifySubjectResolutionTransportError(tc.err); got != tc.want {
+				t.Fatalf("classification = %q, want %q", got, tc.want)
 			}
 		})
 	}
