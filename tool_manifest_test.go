@@ -22,7 +22,7 @@ func TestSyncToolManifestUnsupportedSchemaSkips(t *testing.T) {
 
 	dir := t.TempDir()
 	manifestPath := dir + "/manifest.json"
-	if err := os.WriteFile(manifestPath, []byte(`{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test"}]}`), 0644); err != nil {
+	if err := os.WriteFile(manifestPath, []byte(`{"schema":"kei.tool-manifest/v9","tools":[{"name":"test.tool","service":"test"}]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := Config{

@@ -1,38 +1,52 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 )
 
-// ToolManifestSchemaV2 is the only manifest schema this build syncs. The
-// contract is v2-only: v1 and schema-less manifests are rejected at load and
-// never translated into v2 fields. Legacy v1-producing harnesses must be
-// upgraded to export v2 before this path is enabled.
-const ToolManifestSchemaV2 = "kei.tool-manifest/v2"
+// Manifest schemas accepted during the v2-to-v3 migration.
+const (
+	ToolManifestSchemaV2 = "kei.tool-manifest/v2"
+	ToolManifestSchemaV3 = "kei.tool-manifest/v3"
+)
 
-// ToolManifest is the agentware tool-manifest v2 shape. Harnesses export it
-// at build time; the kei-proxy runtime syncs it into the catalog tool registry
-// at bootstrap. The schema is required, must be kei.tool-manifest/v2, and is
-// passed through unchanged in the PUT body.
+// ToolManifest is the schema-tagged catalog sync request. V2 fields remain
+// readable for migration; v3 routes are typed and closed.
 type ToolManifest struct {
-	Schema string           `json:"schema,omitempty"`
+	Schema string           `json:"schema"`
 	Tools  []ToolDefinition `json:"tools"`
 }
 
-// ToolDefinition is one entry in a tool manifest v2. Fields match the catalog
-// POST /api/v1/tools create body minus server-generated fields. v1 fields
-// (action, resources) are not parsed.
+type ToolRoute struct {
+	ConnectorBinding *ConnectorBindingRoute `json:"connector_binding,omitempty"`
+	HarnessExecutor  *HarnessExecutorRoute  `json:"harness_executor,omitempty"`
+}
+
+type ConnectorBindingRoute struct {
+	ConnectorID string `json:"connector_id"`
+}
+
+type HarnessExecutorRoute struct {
+	Executor     string `json:"executor"`
+	Registration string `json:"registration"`
+}
+
+// ToolDefinition is either a v2 metadata entry or a v3 typed route entry.
 type ToolDefinition struct {
-	Name                 string            `json:"name"`
-	Source               string            `json:"source"`
-	RequiredCapabilities []string          `json:"required_capabilities"`
-	ResourceTypes        []KeiResourceType `json:"resource_types"`
-	OperationClass       string            `json:"operation_class"`
+	Name  string     `json:"name"`
+	Route *ToolRoute `json:"route,omitempty"`
+	// Deprecated v2 fields are decoded only when schema is v2.
+	Source               string            `json:"source,omitempty"`
+	RequiredCapabilities []string          `json:"required_capabilities,omitempty"`
+	ResourceTypes        []KeiResourceType `json:"resource_types,omitempty"`
+	OperationClass       string            `json:"operation_class,omitempty"`
 	Service              string            `json:"service,omitempty"`
-	Description          string            `json:"description"`
+	Description          string            `json:"description,omitempty"`
 	Enabled              *bool             `json:"enabled,omitempty"`
 }
 
@@ -72,7 +86,11 @@ func validateToolManifest(m *ToolManifest) error {
 			return fmt.Errorf("%s: duplicate name %q", prefix, td.Name)
 		}
 		seen[td.Name] = true
-		if err := validateToolDefinition(td, prefix); err != nil {
+		if m.Schema == ToolManifestSchemaV3 {
+			if err := validateToolRoute(td, prefix); err != nil {
+				return err
+			}
+		} else if err := validateToolDefinition(td, prefix); err != nil {
 			return err
 		}
 	}
@@ -117,20 +135,65 @@ func validateToolDefinition(td ToolDefinition, prefix string) error {
 	return nil
 }
 
-// LoadToolManifest reads and validates a tool-manifest v2 JSON file. The
-// schema must be exactly kei.tool-manifest/v2; v1, schema-less, and other
-// schemas are rejected.
+func validateToolRoute(td ToolDefinition, prefix string) error {
+	if td.Source == "" || !toolManifestSourceRe.MatchString(td.Source) {
+		return fmt.Errorf("%s: invalid source", prefix)
+	}
+	if !operationClassValues[td.OperationClass] {
+		return fmt.Errorf("%s: invalid operation_class", prefix)
+	}
+	r := td.Route
+	if r == nil || (r.ConnectorBinding == nil) == (r.HarnessExecutor == nil) {
+		return fmt.Errorf("%s: route must contain exactly one branch", prefix)
+	}
+	if c := r.ConnectorBinding; c != nil {
+		if c.ConnectorID == "" || len(td.RequiredCapabilities) == 0 || td.ResourceTypes != nil && len(td.ResourceTypes) == 0 {
+			return fmt.Errorf("%s: invalid connector_binding route", prefix)
+		}
+		for _, capability := range td.RequiredCapabilities {
+			if capability == "" || !toolManifestServiceRe.MatchString(capability) {
+				return fmt.Errorf("%s: invalid required capability", prefix)
+			}
+		}
+		for _, resource := range td.ResourceTypes {
+			if resource.Type == "" {
+				return fmt.Errorf("%s: invalid resource type", prefix)
+			}
+		}
+	}
+	if h := r.HarnessExecutor; h != nil && (h.Executor == "" || h.Registration == "" || td.RequiredCapabilities != nil || td.ResourceTypes != nil) {
+		return fmt.Errorf("%s: invalid harness_executor route", prefix)
+	}
+	return nil
+}
+
+// LoadToolManifest reads and validates v2 or v3 tool-manifest JSON. The schema
+// is mandatory; v2 remains readable during migration.
 func LoadToolManifest(path string) (*ToolManifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read tool manifest: %w", err)
 	}
-	var m ToolManifest
-	if err := json.Unmarshal(data, &m); err != nil {
+	var header struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
 		return nil, fmt.Errorf("decode tool manifest: %w", err)
 	}
-	if m.Schema != ToolManifestSchemaV2 {
-		return nil, fmt.Errorf("unsupported manifest schema %q (expected %s)", m.Schema, ToolManifestSchemaV2)
+	if header.Schema != ToolManifestSchemaV2 && header.Schema != ToolManifestSchemaV3 {
+		return nil, fmt.Errorf("unsupported manifest schema %q", header.Schema)
+	}
+	var m ToolManifest
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&m); err != nil {
+		return nil, fmt.Errorf("decode tool manifest: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("decode tool manifest: expected one JSON object")
+	}
+	if m.Schema != ToolManifestSchemaV2 && m.Schema != ToolManifestSchemaV3 {
+		return nil, fmt.Errorf("unsupported manifest schema %q", m.Schema)
 	}
 	if m.Tools == nil {
 		m.Tools = []ToolDefinition{}

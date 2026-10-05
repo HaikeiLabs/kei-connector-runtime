@@ -59,14 +59,14 @@ func TestRunHarnessToolsSyncDiscoversAndPutsManifest(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
-	if got.Schema != "kei.tool-manifest/v2" || len(got.Tools) < 20 {
+	if got.Schema != "kei.tool-manifest/v3" || len(got.Tools) < 20 {
 		t.Fatalf("manifest schema=%q tools=%d", got.Schema, len(got.Tools))
 	}
 	seen := make(map[string]bool)
 	for _, tool := range got.Tools {
 		seen[tool.Name] = true
-		if tool.Name == "codex.shell" && (tool.Source != "codex" || len(tool.RequiredCapabilities) != 0 || len(tool.ResourceTypes) != 0 || tool.Service != "") {
-			t.Fatalf("unexpected discovery metadata (registration must grant nothing): %+v", tool)
+		if tool.Name == "codex.shell" && (tool.Source != "codex" || tool.OperationClass != "write" || tool.Route.HarnessExecutor.Executor != "codex" || tool.Route.HarnessExecutor.Registration != "codex.shell") {
+			t.Fatalf("unexpected harness route metadata: %+v", tool)
 		}
 	}
 	for _, name := range []string{"claude_code.read", "codex.shell", "opencode.read"} {

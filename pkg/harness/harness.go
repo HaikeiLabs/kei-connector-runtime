@@ -145,16 +145,22 @@ type Renderer interface {
 	HookSpec(kind string, harnessID string) ([]byte, error)
 }
 
-// ManifestTool maps discovery to the existing kei.tool-manifest/v2 catalog
-// contract. Empty capabilities and service are intentional for local tools.
+// ManifestTool maps discovery to the typed v3 catalog route contract.
 type ManifestTool struct {
-	Name                 string         `json:"name"`
-	Source               string         `json:"source"`
-	RequiredCapabilities []string       `json:"required_capabilities"`
-	ResourceTypes        []ResourceType `json:"resource_types"`
-	OperationClass       string         `json:"operation_class"`
-	Service              string         `json:"service"`
-	Description          string         `json:"description"`
+	Name           string    `json:"name"`
+	Source         string    `json:"source"`
+	OperationClass string    `json:"operation_class"`
+	Route          ToolRoute `json:"route"`
+	Description    string    `json:"description"`
+}
+
+type ToolRoute struct {
+	HarnessExecutor HarnessExecutorRoute `json:"harness_executor"`
+}
+
+type HarnessExecutorRoute struct {
+	Executor     string `json:"executor"`
+	Registration string `json:"registration"`
 }
 
 type ResourceType struct {
@@ -167,10 +173,10 @@ type ToolManifest struct {
 	Tools  []ManifestTool `json:"tools"`
 }
 
-// ManifestFromDiscovery creates the v2 body for the existing runtime tool
-// sync path. Registration is metadata only and grants no access.
+// ManifestFromDiscovery creates the v3 body for the runtime tool sync path.
+// Registration is metadata only and grants no access.
 func ManifestFromDiscovery(discoveries ...Discovery) ToolManifest {
-	m := ToolManifest{Schema: "kei.tool-manifest/v2", Tools: []ManifestTool{}}
+	m := ToolManifest{Schema: "kei.tool-manifest/v3", Tools: []ManifestTool{}}
 	for _, d := range discoveries {
 		for _, group := range [][]Tool{d.BuiltIns, d.Skills, d.MCP} {
 			for _, t := range group {
@@ -178,7 +184,11 @@ func ManifestFromDiscovery(discoveries ...Discovery) ToolManifest {
 				if source == "" {
 					source = stringsBeforeDot(t.Name)
 				}
-				m.Tools = append(m.Tools, ManifestTool{Name: t.Name, Source: source, RequiredCapabilities: []string{}, ResourceTypes: []ResourceType{}, OperationClass: t.OperationClass, Service: "", Description: t.Description})
+				registration := t.Selector
+				if registration == "" {
+					registration = t.Name
+				}
+				m.Tools = append(m.Tools, ManifestTool{Name: t.Name, Source: source, OperationClass: t.OperationClass, Route: ToolRoute{HarnessExecutor: HarnessExecutorRoute{Executor: source, Registration: registration}}, Description: t.Description})
 			}
 		}
 	}
