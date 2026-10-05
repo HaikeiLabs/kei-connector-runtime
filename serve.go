@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
@@ -87,6 +88,9 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		_ = keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
+	if cfg.CredentialReleaseMode == "identity" && cfg.RuntimeToken != "" {
+		local.SetCredReleaseClient(credrelease.NewClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken), cfg.CredentialReleaseMode)
+	}
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
 	server := newServer(base)
 	socketServer := newServer(local.NewHandler(base, base.runtimeConfigError, base.authorized))

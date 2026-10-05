@@ -98,6 +98,11 @@ type Env struct {
 	// instead of the local credential store.
 	CredReleaseClient *credrelease.Client
 
+	// StaticCredential is a pre-resolved credential (L3a) set by the serve
+	// daemon. When non-empty, execute uses it directly without any I11 call.
+	// CredReleaseClient and StaticCredential are mutually exclusive.
+	StaticCredential string
+
 	// Audit appends one audit record (a JSON line) to the local spool.
 	Audit func(record []byte) error
 

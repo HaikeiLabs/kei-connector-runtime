@@ -31,11 +31,14 @@ type Subject struct {
 	Token      string
 }
 
-// Sessions holds the current worker session's subject in memory only. It is
-// never persisted and ends with End, a revocation, or the process.
+// Sessions holds the current worker session's subject and optional credential
+// in memory only. It is never persisted and ends with End, a revocation, or
+// the process. The credential is set by the serve daemon on a linked CLI
+// session when KEI_CREDENTIAL_RELEASE=identity.
 type Sessions struct {
-	mu  sync.RWMutex
-	cur *Subject
+	mu         sync.RWMutex
+	cur        *Subject
+	credential string
 }
 
 func NewSessions() *Sessions { return &Sessions{} }
@@ -57,14 +60,39 @@ func (s *Sessions) Start(sub Subject) error {
 	sub.Enrollment = append(json.RawMessage(nil), sub.Enrollment...)
 	s.mu.Lock()
 	s.cur = &sub
+	s.credential = ""
 	s.mu.Unlock()
 	return nil
 }
 
-// End ends the session; later calls have no session subject.
+// SetCredential stores the session credential in memory.
+func (s *Sessions) SetCredential(cred string) {
+	s.mu.Lock()
+	s.credential = cred
+	s.mu.Unlock()
+}
+
+// Credential returns a copy of the stored credential and true, or false if
+// none is set.
+func (s *Sessions) Credential() (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.credential, s.credential != ""
+}
+
+// ClearCredential removes the stored credential.
+func (s *Sessions) ClearCredential() {
+	s.mu.Lock()
+	s.credential = ""
+	s.mu.Unlock()
+}
+
+// End ends the session; later calls have no session subject. The stored
+// credential is cleared.
 func (s *Sessions) End() {
 	s.mu.Lock()
 	s.cur = nil
+	s.credential = ""
 	s.mu.Unlock()
 }
 

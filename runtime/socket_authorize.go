@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 )
@@ -102,12 +103,14 @@ type SessionKeychain interface {
 }
 
 type LocalPDP struct {
-	cfg       PolicyConfig
-	Sessions  *pdp.Sessions
-	evaluator atomic.Pointer[pdp.Evaluator]
-	identity  atomic.Pointer[Identity]
-	emit      EmitAuditFunc
-	keychain  SessionKeychain
+	cfg             PolicyConfig
+	Sessions        *pdp.Sessions
+	evaluator       atomic.Pointer[pdp.Evaluator]
+	identity        atomic.Pointer[Identity]
+	emit            EmitAuditFunc
+	keychain        SessionKeychain
+	credReleaseCli  *credrelease.Client
+	credReleaseMode string
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
@@ -115,6 +118,11 @@ func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 }
 
 func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
+
+func (l *LocalPDP) SetCredReleaseClient(cli *credrelease.Client, mode string) {
+	l.credReleaseCli = cli
+	l.credReleaseMode = mode
+}
 
 func (l *LocalPDP) SetIdentity(identity *Identity) {
 	if identity == nil || identity.WorkspaceID == nil {
@@ -149,6 +157,7 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
+		case r.URL.Path == "/v1/session/credential" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -164,13 +173,14 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize":
 			l.handleAuthorize(w, r)
+		case r.URL.Path == "/v1/session/credential":
+			l.handleSessionCredential(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:
 			l.handleSessionGet(w, r)
 		default:
-			l.Sessions.End()
-			w.WriteHeader(http.StatusNoContent)
+			l.handleSessionDelete(w, r)
 		}
 	})
 }
@@ -223,6 +233,84 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
 		return
 	}
+	if sub.Status == pdp.StatusLinked && req.Source == "cli" && l.credReleaseCli != nil && l.credReleaseMode == "identity" {
+		l.fetchSessionCredential(r.Context(), sub.Token)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// fetchSessionCredential resolves the session-level credential from I11 and
+// stores it in memory. On ErrSubjectUnauthorized it re-verifies the token and
+// retries once. Non-fatal failures are logged; the session continues without
+// a credential.
+func (l *LocalPDP) fetchSessionCredential(ctx context.Context, token string) {
+	cred, err := l.credReleaseCli.Resolve(ctx, token, "", "")
+	if err == nil {
+		l.Sessions.SetCredential(cred)
+		return
+	}
+	if !errors.Is(err, credrelease.ErrSubjectUnauthorized) || l.keychain == nil {
+		slog.Warn("session credential fetch failed (non-auth)", "error", err)
+		return
+	}
+	newToken, verr := l.keychain.Token()
+	if verr != nil || newToken == "" {
+		slog.Warn("session credential re-verify failed", "error", verr)
+		return
+	}
+	userID, verr := l.keychain.Verify(ctx, newToken)
+	if verr != nil || userID == "" {
+		slog.Warn("session credential re-verify failed", "error", verr)
+		return
+	}
+	if cred, err = l.credReleaseCli.Resolve(ctx, newToken, "", ""); err != nil {
+		slog.Warn("session credential retry failed after re-verify", "error", err)
+		return
+	}
+	l.Sessions.SetCredential(cred)
+}
+
+func (l *LocalPDP) handleSessionCredential(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		cred, ok := l.Sessions.Credential()
+		if !ok {
+			writeRuntimeError(w, http.StatusNotFound, "no_credential", "no session credential available")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"credential": cred})
+		return
+	}
+	// POST /v1/session/credential — refresh
+	var req struct {
+		Action string `json:"action"`
+	}
+	if err := decodeSocketJSON(w, r, &req); err != nil || req.Action != "refresh" {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", `request must be {"action":"refresh"}`)
+		return
+	}
+	subject, ok := l.Sessions.Current()
+	if !ok {
+		writeRuntimeError(w, http.StatusNotFound, "no_session", "no active session")
+		return
+	}
+	if l.credReleaseCli == nil || l.credReleaseMode != "identity" {
+		writeRuntimeError(w, http.StatusBadRequest, "not_available", "credential release is not configured")
+		return
+	}
+	l.fetchSessionCredential(r.Context(), subject.Token)
+	if cred, ok := l.Sessions.Credential(); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"credential": cred})
+	} else {
+		writeRuntimeError(w, http.StatusInternalServerError, "refresh_failed", "credential refresh failed")
+	}
+}
+
+func (l *LocalPDP) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
+	l.Sessions.End()
 	w.WriteHeader(http.StatusNoContent)
 }
 

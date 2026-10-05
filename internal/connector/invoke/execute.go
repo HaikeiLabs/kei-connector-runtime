@@ -180,6 +180,9 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 }
 
 func (e Env) resolveCredential(ctx context.Context, meta *contract.Metadata, req Request, resp *Response, controlPlaneURL string, exec *execution, subjectToken string) (string, *denial) {
+	if e.StaticCredential != "" {
+		return e.StaticCredential, nil
+	}
 	if e.CredReleaseClient != nil && e.SubjectToken != nil {
 		if subjectToken == "" {
 			return "", deny("subject_unlinked", "no session subject for credential release")

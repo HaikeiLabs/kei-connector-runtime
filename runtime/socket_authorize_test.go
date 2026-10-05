@@ -12,6 +12,7 @@ import (
 	"time"
 
 	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -697,6 +698,415 @@ func TestSocketSessionAuthorizeAfterUnlinkedSession(t *testing.T) {
 	}
 	if out.Decision != "deny" || out.ReasonCode != "subject_unlinked" {
 		t.Fatalf("decision = %s reason = %s, want deny subject_unlinked: %s", out.Decision, out.ReasonCode, authRec.Body.String())
+	}
+}
+
+// --- credential lifecycle helpers ---
+
+func getSessionCredential(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/session/credential", nil)
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func postSessionCredentialRefresh(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/session/credential", strings.NewReader(`{"action":"refresh"}`))
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func deleteSession(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/session", nil)
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// fakeCredReleaseServer returns an httptest.Server that responds to
+// /api/v1/connectorCredentials:resolve. When statusOverride is non-zero it
+// is used instead of 200; when credOverride is non-empty it is used instead
+// of the default credential.
+func fakeCredReleaseServer(t *testing.T, statusOverride int, credOverride string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/connectorCredentials:resolve" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if statusOverride != 0 {
+			w.WriteHeader(statusOverride)
+			return
+		}
+		cred := credOverride
+		if cred == "" {
+			cred = "test-credential-value"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"credential": cred})
+	}))
+}
+
+func TestSocketSessionCredentialNotFoundWhenNoCredential(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: "https://kei.example",
+	}, nil)
+	h := sessionHandler(t, l)
+
+	rec := getSessionCredential(t, h)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSocketSessionCredentialFetchOnCLIStart(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, 0, "")
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+	var credResp struct {
+		Credential string `json:"credential"`
+	}
+	if err := json.Unmarshal(credRec.Body.Bytes(), &credResp); err != nil {
+		t.Fatal(err)
+	}
+	if credResp.Credential != "test-credential-value" {
+		t.Fatalf("credential = %q, want test-credential-value", credResp.Credential)
+	}
+}
+
+func TestSocketSessionGetDoesNotLeakCredential(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, 0, "")
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	// Confirm credential exists
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+
+	// GET /v1/session must NOT include credential
+	sessionRec := getSession(t, h)
+	var sessionResp struct {
+		Credential string `json:"credential,omitempty"`
+	}
+	if err := json.Unmarshal(sessionRec.Body.Bytes(), &sessionResp); err != nil {
+		t.Fatal(err)
+	}
+	if sessionResp.Credential != "" {
+		t.Fatal("credential leaked in GET /v1/session response")
+	}
+}
+
+func TestSocketSessionCredentialClearedOnDelete(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, 0, "")
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	// Credential should be available
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 before delete, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+
+	// Delete session
+	delRec := deleteSession(t, h)
+	if delRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+
+	// Credential should be gone
+	credRec = getSessionCredential(t, h)
+	if credRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after delete, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+}
+
+func TestSocketSessionCredentialClearedOnNewPut(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, 0, "")
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	// CLI session with credential
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+
+	// Start a new session (non-cli, no credential)
+	putRec2 := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
+	if putRec2.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec2.Code, putRec2.Body.String())
+	}
+
+	// Credential should be cleared
+	credRec = getSessionCredential(t, h)
+	if credRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after new PUT, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+}
+
+func TestSocketSessionCredentialRefresh(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, 0, "")
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	// Refresh via POST
+	refreshRec := postSessionCredentialRefresh(t, h)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var credResp struct {
+		Credential string `json:"credential"`
+	}
+	if err := json.Unmarshal(refreshRec.Body.Bytes(), &credResp); err != nil {
+		t.Fatal(err)
+	}
+	if credResp.Credential != "test-credential-value" {
+		t.Fatalf("credential = %q, want test-credential-value", credResp.Credential)
+	}
+}
+
+func TestSocketSessionCredentialRefreshReturnsErrorWithoutClient(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: "https://kei.example",
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	h := sessionHandler(t, l)
+
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	refreshRec := postSessionCredentialRefresh(t, h)
+	if refreshRec.Code == http.StatusOK {
+		t.Fatal("expected refresh to fail without credrelease client")
+	}
+}
+
+func TestSocketSessionCredentialIgnoresNonCLISource(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, 0, "")
+	defer credSrv.Close()
+
+	ids := []policybundle.Identity{
+		{Source: "discord", ExternalID: "ext-123", UserID: "u-alice", Status: "linked"},
+	}
+	bundle := bundleWithIdentities(t, ids)
+	dir := t.TempDir()
+	activateBundle(t, dir, bundle)
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+		RuntimeStateDir:        dir,
+	}, nil)
+	l.SetIdentity(&keiruntime.Identity{
+		ID:          "inst-fixture-0001",
+		OrgID:       "org-fixture-0001",
+		WorkspaceID: strPtr("ws-fixture-0001"),
+	})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	// Discord session (non-CLI) - should NOT fetch credential
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-CLI source, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+}
+
+func TestSocketSessionCredentialIgnoresNonLinkedCLI(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: "https://kei.example",
+	}, nil)
+	// No keychain set - CLI source will fail, session not started
+	h := sessionHandler(t, l)
+
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without keychain, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+}
+
+func TestSocketSessionCredentialHandlesI11401(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, http.StatusUnauthorized, "")
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	// Session starts but credential fetch fails -> no credential
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after I11 401, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+}
+
+func TestSocketSessionCredentialRetriesOnKeychainRenew(t *testing.T) {
+	callCount := 0
+	credSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/connectorCredentials:resolve" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		callCount++
+		if callCount == 1 {
+			// First call returns 401 (subject unauthorized)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// Second call succeeds
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"credential": "retried-credential"})
+	}))
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "identity")
+	h := sessionHandler(t, l)
+
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", credRec.Code, credRec.Body.String())
+	}
+	var credResp struct {
+		Credential string `json:"credential"`
+	}
+	if err := json.Unmarshal(credRec.Body.Bytes(), &credResp); err != nil {
+		t.Fatal(err)
+	}
+	if credResp.Credential != "retried-credential" {
+		t.Fatalf("credential = %q, want retried-credential", credResp.Credential)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 I11 calls, got %d", callCount)
+	}
+}
+
+func TestSocketSessionCredentialLegacyModeSkipsFetch(t *testing.T) {
+	credSrv := fakeCredReleaseServer(t, 0, "")
+	defer credSrv.Close()
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: credSrv.URL,
+	}, nil)
+	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
+	// Set with mode "legacy" - should not fetch
+	l.SetCredReleaseClient(credrelease.NewClient(credSrv.URL, policyTestToken), "legacy")
+	h := sessionHandler(t, l)
+
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	credRec := getSessionCredential(t, h)
+	if credRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 in legacy mode, got %d: %s", credRec.Code, credRec.Body.String())
 	}
 }
 
