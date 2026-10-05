@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -27,7 +27,7 @@ func TestResolveHarnessIdentityUsesServiceCredential(t *testing.T) {
 	}))
 	defer server.Close()
 
-	identity, err := resolveHarnessIdentity(context.Background(), server.URL, "abac-secret", "harness-token")
+	identity, err := ResolveHarnessIdentity(context.Background(), server.URL, "abac-secret", "harness-token")
 	if err != nil {
 		t.Fatalf("resolve identity: %v", err)
 	}

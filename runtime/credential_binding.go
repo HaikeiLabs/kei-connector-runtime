@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -8,8 +8,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 type credentialBindingClient struct {
@@ -17,7 +15,7 @@ type credentialBindingClient struct {
 	client  *http.Client
 }
 
-func NewCredentialBindingClient(baseURL string, timeout time.Duration) keiruntime.CredentialResolver {
+func NewCredentialBindingClient(baseURL string, timeout time.Duration) CredentialResolver {
 	return &credentialBindingClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		client:  &http.Client{Timeout: timeout},
@@ -40,7 +38,7 @@ func (c *credentialBindingClient) Resolve(ctx context.Context, runtimeToken, use
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, errCredentialBindingNotFound
+		return nil, ErrCredentialBindingNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("credential binding request returned status %d", resp.StatusCode)

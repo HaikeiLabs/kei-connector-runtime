@@ -116,7 +116,7 @@ func runAuthorize(args []string) int {
 	var credentialBinding keiruntime.CredentialResolver
 	var secretStore keiruntime.SecretGetter
 	if cfg.IsRuntime() {
-		credentialBinding = NewCredentialBindingClient(cfg.RuntimeControlPlaneURL, time.Duration(*timeout)*time.Second)
+		credentialBinding = keiruntime.NewCredentialBindingClient(cfg.RuntimeControlPlaneURL, time.Duration(*timeout)*time.Second)
 		secretStore, err = secrets.NewStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: runtime secret store initialization failed: %v\n", err)

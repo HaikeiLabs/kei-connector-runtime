@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"context"
@@ -40,7 +40,7 @@ func TestCredentialBindingClientMapsNotFound(t *testing.T) {
 
 	client := NewCredentialBindingClient(server.URL, time.Second)
 	_, err := client.Resolve(context.Background(), "runtime-token", "user", "github")
-	if err == nil || err != errCredentialBindingNotFound {
-		t.Fatalf("Resolve error = %v, want errCredentialBindingNotFound", err)
+	if err == nil || err != ErrCredentialBindingNotFound {
+		t.Fatalf("Resolve error = %v, want ErrCredentialBindingNotFound", err)
 	}
 }

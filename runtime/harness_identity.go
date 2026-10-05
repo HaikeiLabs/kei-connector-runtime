@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ type HarnessIdentity struct {
 	ModelProfileID string `json:"model_profile_id,omitempty"`
 }
 
-func resolveHarnessIdentity(ctx context.Context, baseURL, serviceSecret, harnessToken string) (*HarnessIdentity, error) {
+func ResolveHarnessIdentity(ctx context.Context, baseURL, serviceSecret, harnessToken string) (*HarnessIdentity, error) {
 	body, err := json.Marshal(map[string]string{"harness_token": harnessToken})
 	if err != nil {
 		return nil, fmt.Errorf("marshal harness identity request: %w", err)
