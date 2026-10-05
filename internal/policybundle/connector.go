@@ -1,12 +1,18 @@
 package policybundle
 
+import "encoding/json"
+
 // Connector is a policy_set.connectors entry: a workspace connector the bundle
-// knows, with its provider and declared capabilities. It carries no config
-// and no credential.
+// knows, with its provider and declared capabilities. Descriptor, when the
+// catalog sent one (AcceptWithDescriptors), is the connector's non-secret
+// contract metadata plus where its opaque_ref credential lives; it never
+// holds a credential value. The runtime validates it with the connector
+// contract before use.
 type Connector struct {
 	ID           string                `json:"id"`
 	Provider     string                `json:"provider"`
 	Capabilities []ConnectorCapability `json:"capabilities"`
+	Descriptor   json.RawMessage       `json:"descriptor,omitempty"`
 }
 
 // ConnectorCapability is one declared capability of a bundle connector.

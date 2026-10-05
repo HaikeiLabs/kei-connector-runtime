@@ -18,10 +18,12 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -166,6 +168,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 // serveSeams are test seams for the daemon; the zero value is production.
 type serveSeams struct {
 	providerTransport http.RoundTripper
+	secretStore       secrets.Store
 }
 
 // newServeLocalPDP builds the daemon's local PDP: decision audit goes to the
@@ -185,11 +188,20 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
 	if creds != nil {
+		// opaque_ref connectors (described in the bundle) read their secret
+		// from the tenant secret store, as on the legacy path.
+		store := seams.secretStore
+		if store == nil {
+			store = connectorSecretStore()
+		}
 		local.SetCredentialStore(creds)
 		local.SetConnectorInvoker(&invoke.Daemon{
 			Env: invoke.Env{
-				RuntimeToken:      cfg.RuntimeToken,
-				ProviderTransport: seams.providerTransport,
+				RuntimeToken:       cfg.RuntimeToken,
+				ProviderTransport:  seams.providerTransport,
+				Store:              store,
+				BackendUnavailable: func(err error) bool { return errors.Is(err, secrets.ErrUnavailable) },
+				AssertionKey:       crm.KeyConfigFromEnv(),
 				Audit: func(record []byte) error {
 					emitFunc(record)
 					return nil
@@ -206,6 +218,8 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 				return nil
 			},
 			AuditCrypto: auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken),
+			Store:       store,
+			StateDir:    cfg.RuntimeStateDir,
 		})
 	}
 	return local, nil
@@ -227,7 +241,7 @@ func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invok
 			out.Subject = g.Subject.UserID
 		}
 		if g.Connector != nil {
-			out.Provider = g.Connector.Provider
+			out.Provider, out.Descriptor = g.Connector.Provider, g.Connector.Descriptor
 			for _, capability := range g.Connector.Capabilities {
 				out.Capabilities = append(out.Capabilities, capability.Name)
 			}

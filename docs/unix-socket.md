@@ -105,10 +105,24 @@ The daemon runs one governed connector call and returns only its result:
 
 The request carries no subject and no credential. The answer is
 `kei.connector-invoke-response/v1`, the same object `kei-proxy connector invoke`
-prints. Only providers whose credential is the subject's own OAuth connection
-run here: github, gmail, google_drive and linear. Connectors that need config
-or an opaque_ref secret deny `credential_source_not_supported`, because the
-bundle carries neither. In identity mode `kei-proxy connector invoke` is a
+prints.
+
+**Which connectors run here** depends on the connector descriptor (see
+"Connector descriptors" below). If the bundle connector has a descriptor:
+
+- An `opaque_ref` connector reads its own secret from the tenant secret
+  store. It uses the descriptor's `credential_backend`, `credential_ref` and
+  `credential_secret_ref`, exactly as the legacy path does, and makes no I11
+  call.
+- An OAuth connector runs with the session's credential if it is `per_user`,
+  or a legacy single-subject connector bound to the session subject.
+- A `shared` OAuth connector denies `credential_source_not_supported`: its
+  credential belongs to the connector, not to the session.
+
+Without a descriptor, only session OAuth providers (github, gmail,
+google_drive, linear) run, with metadata built from the bundle entry.
+
+In identity mode `kei-proxy connector invoke` is a
 thin client of this route. It needs no control plane and holds no credential.
 It fails closed with `daemon_unavailable` when the daemon is unreachable, and
 it rejects `--user-id`/`--provider-user`.
@@ -127,9 +141,13 @@ unresolved. The daemon:
    catalog decides on the legacy path. The bundle must register a
    `credential` tool and binding for the connector, and a policy must permit
    it.
-2. **Resolves each reference** from the session-held credential. Only the
-   `token`/`access_token` field of a session OAuth provider (github, gmail,
-   google_drive, linear) resolves; anything else denies.
+2. **Resolves each reference.** For an OAuth connector the reference comes
+   from the session-held credential, and only its `token`/`access_token` field
+   resolves. For an `opaque_ref` connector with a descriptor it comes from the
+   delivered connector secret, as on the legacy path: the credential-sync
+   index entry for `<id>/<field>` must match the descriptor's backend and
+   secret reference before the tenant secret store is read. Anything else
+   denies.
 3. **Spawns the child** with exactly the request's `env`, with the resolved
    values in place of the references. The daemon's own environment is never
    added. A bare command name is looked up on that env's `PATH`, in `dir`.
@@ -151,6 +169,21 @@ connector credential.
 **stdin is not passed through.** The child reads an empty stdin (`/dev/null`).
 A command that needs input must take it from a file or argument. If the
 client disconnects, the request is canceled and the child is killed.
+
+### Connector descriptors
+
+The runtime fetches its bundle with
+`Accept: application/vnd.kei.policy-bundle.v1+json; connector-descriptors=1`.
+A catalog that supports this adds a `descriptor` to each
+`policy_set.connectors` entry. The descriptor is the connector contract's
+`Metadata`, plus `credential_backend` and `credential_secret_ref`: where an
+opaque_ref connector's secret lives. It holds references only, never a
+credential value, and the bundle schema rejects `access_token`,
+`refresh_token`, `secret`, `credential` and `oauth` keys. Older catalogs
+ignore the parameter, and older runtimes never ask for descriptors, so
+neither sees a field it does not understand. The daemon uses a descriptor
+only if it names the same connector, provider, org and workspace as the
+bundle entry and audience; otherwise the call denies `descriptor_invalid`.
 
 ### Same-host daemon and harness (primary deployment)
 

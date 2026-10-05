@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,7 +43,7 @@ func newNotReadyBundleServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/policy-bundles/current":
-			if r.Header.Get("Accept") != "application/vnd.kei.policy-bundle.v1+json" {
+			if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Accept")); err != nil || mediaType != "application/vnd.kei.policy-bundle.v1+json" {
 				http.Error(w, "bad accept", 400)
 				return
 			}

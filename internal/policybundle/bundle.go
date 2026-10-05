@@ -11,6 +11,12 @@ import (
 )
 
 const ContentType = "application/vnd.kei.policy-bundle.v1+json"
+
+// AcceptWithDescriptors is the Accept value a runtime sends to ask for
+// connector descriptors in policy_set.connectors. A catalog that does not
+// know the parameter ignores it and sends none; a runtime that does not send
+// it never receives a field its schema would reject.
+const AcceptWithDescriptors = ContentType + "; connector-descriptors=1"
 const Issuer = "kei-policy-catalog"
 
 var (

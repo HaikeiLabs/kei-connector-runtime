@@ -21,10 +21,12 @@ import (
 // exits with $KEI_RUN_HELPER_EXIT. The session's GitHub token is
 // credentialCanary (newInvokeRig).
 
-var credentialCanaryDigest = func() string {
-	sum := sha256.Sum256([]byte(credentialCanary))
+var credentialCanaryDigest = sha256Hex(credentialCanary)
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
-}()
+}
 
 const githubTokenRef = "kei://connectors/" + invokeConnector + "/token"
 

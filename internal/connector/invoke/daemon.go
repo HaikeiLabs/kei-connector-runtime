@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/google/uuid"
@@ -55,9 +56,12 @@ type Grant struct {
 	// Subject is the linked session user id the decision was made for, or "".
 	Subject string
 	// Provider and Capabilities are the bundle's connector entry; Provider is
-	// "" when the bundle does not know the connector.
+	// "" when the bundle does not know the connector. Descriptor is the
+	// entry's connector descriptor (a Descriptor as JSON), when the catalog
+	// sent one.
 	Provider     string
 	Capabilities []string
+	Descriptor   json.RawMessage
 	TenantID     string
 	WorkspaceID  string
 }
@@ -171,16 +175,35 @@ func (d *Daemon) invoke(ctx context.Context, dr daemonRequest) output {
 	}
 
 	exec = &execution{provider: contract.Provider(grant.Provider)}
-	meta, inv, dn := sessionCall(grant, dr)
+	call, dn := describeCall(grant, dr)
 	if dn != nil {
 		return finish(dn)
 	}
+	meta, inv := call.meta, call.inv
 	exec.meta, exec.invocation = &meta, &inv
 	conn, in, dn := d.Env.prepare(plan.req, canonical, meta, inv)
 	if dn != nil {
 		return finish(dn)
 	}
 	exec.credentialSubject = contract.CredentialSubject(meta, inv)
+
+	if call.secret != nil {
+		// opaque_ref: the connector's own secret from the tenant secret store,
+		// exactly as the legacy path resolves it. There is no session
+		// credential and so no re-fetch.
+		secret, err := credentials.Resolver{Store: d.Env.Store, BackendUnavailable: d.Env.BackendUnavailable, Now: d.Env.Now}.Resolve(ctx, *call.secret)
+		if err != nil {
+			var ce *credentials.Error
+			if errors.As(err, &ce) {
+				return finish(deny(ce.Code, ce.Reason))
+			}
+			return finish(deny("credential_unavailable", "credential is not available"))
+		}
+		if _, dn = d.Env.run(ctx, conn, meta, inv, in, secret, exec); dn != nil {
+			return finish(dn)
+		}
+		return finish(d.allow(&out, meta, exec))
+	}
 
 	err = d.UseCredential(ctx, grant.Subject, string(meta.Provider), func(token string) error {
 		status, runDenial := d.Env.run(ctx, conn, meta, inv, in, token, exec)
@@ -200,10 +223,79 @@ func (d *Daemon) invoke(ctx context.Context, dr daemonRequest) output {
 	if dn != nil {
 		return finish(dn)
 	}
+	return finish(d.allow(&out, meta, exec))
+}
+
+// allow fills out for an executed call and returns no denial.
+func (d *Daemon) allow(out *output, meta contract.Metadata, exec *execution) *denial {
 	out.Provider = string(meta.Provider)
 	out.Decision, out.Result = "allow", exec.result
 	out.Audit.ResultDigest, out.Audit.ResultBytes = sha256Digest(exec.result), len(exec.result)
-	return finish(nil)
+	return nil
+}
+
+// daemonCall is a granted call ready to prepare: its metadata and invocation,
+// and for an opaque_ref connector the secret-store request for its
+// credential (nil means the session's own OAuth connection).
+type daemonCall struct {
+	meta   contract.Metadata
+	inv    contract.Invocation
+	secret *credentials.Request
+}
+
+// describeCall builds the call from the bundle's connector descriptor, or,
+// for a bundle without descriptors, from the connector entry alone
+// (sessionCall). The descriptor must describe the same connector, provider,
+// org and workspace as the bundle entry and audience.
+func describeCall(g Grant, dr daemonRequest) (daemonCall, *denial) {
+	if len(g.Descriptor) == 0 {
+		meta, inv, dn := sessionCall(g, dr)
+		return daemonCall{meta: meta, inv: inv}, dn
+	}
+	var desc Descriptor
+	if err := json.Unmarshal(g.Descriptor, &desc); err != nil {
+		return daemonCall{}, deny("descriptor_invalid", "the connector descriptor is malformed")
+	}
+	meta := desc.Metadata
+	if meta.ID != dr.ConnectorID || meta.TenantID != g.TenantID || meta.WorkspaceID != g.WorkspaceID || string(meta.Provider) != g.Provider {
+		return daemonCall{}, deny("descriptor_invalid", "the connector descriptor does not match the bundle")
+	}
+	capability, ok := declaredCapability(meta, dr.Capability)
+	if !ok || string(capability.Action) != dr.Action {
+		return daemonCall{}, deny("descriptor_invalid", "capability is not declared on the connector with this action")
+	}
+	call := daemonCall{meta: meta, inv: invocation(g, dr, capability.Action)}
+	switch meta.EffectiveCredentialSource() {
+	case contract.CredentialSourceOAuth:
+		// The session holds only the subject's own connections: per_user,
+		// or a legacy single-subject connector bound to this subject.
+		if meta.AccountModel != contract.AccountModelPerUser && (meta.AccountModel != "" || meta.Subject != g.Subject) {
+			return daemonCall{}, deny("credential_source_not_supported", "shared OAuth connections are not released to a session")
+		}
+	case contract.CredentialSourceOpaqueRef:
+		call.secret = &credentials.Request{
+			Source: credentials.SourceOpaqueRef, Backend: desc.CredentialBackend,
+			Ref: meta.CredentialRef, SecretRef: desc.CredentialSecretRef,
+		}
+	default:
+		return daemonCall{}, deny("descriptor_invalid", "unknown credential source")
+	}
+	return call, nil
+}
+
+// invocation is the granted call's invocation for the session subject.
+func invocation(g Grant, dr daemonRequest, action contract.Action) contract.Invocation {
+	inv := contract.Invocation{
+		TenantID: g.TenantID, WorkspaceID: g.WorkspaceID, Subject: g.Subject, AgentID: dr.AgentID,
+		ConnectorID: dr.ConnectorID, Capability: dr.Capability, Action: action, Resource: dr.Resource,
+		TraceID: dr.TraceID, IdempotencyKey: dr.IdempotencyKey,
+	}
+	if inv.AgentID == "" {
+		// The PDP decided for the bundle's default agent; the invocation
+		// needs an identifier, and this one is recorded as such in audit.
+		inv.AgentID = "bundle-default-agent"
+	}
+	return inv
 }
 
 // sessionCall builds the per_user OAuth metadata and invocation for a granted
@@ -244,16 +336,7 @@ func sessionCall(g Grant, dr daemonRequest) (contract.Metadata, contract.Invocat
 		Scopes: []string{"session"}, Capabilities: caps, CreatedBy: "kei-proxy",
 		CredentialSource: contract.CredentialSourceOAuth, AccountModel: contract.AccountModelPerUser,
 	}
-	inv := contract.Invocation{
-		TenantID: g.TenantID, WorkspaceID: g.WorkspaceID, Subject: g.Subject, AgentID: dr.AgentID,
-		ConnectorID: dr.ConnectorID, Capability: dr.Capability, Action: action, Resource: dr.Resource,
-		TraceID: dr.TraceID, IdempotencyKey: dr.IdempotencyKey,
-	}
-	if inv.AgentID == "" {
-		// The PDP decided for the bundle's default agent; the invocation
-		// needs an identifier, and this one is recorded as such in audit.
-		inv.AgentID = "bundle-default-agent"
-	}
+	inv := invocation(g, dr, action)
 	return meta, inv, nil
 }
 

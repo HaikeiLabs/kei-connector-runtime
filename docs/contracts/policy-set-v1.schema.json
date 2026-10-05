@@ -198,6 +198,9 @@
               }
             }
           }
+        },
+        "descriptor": {
+          "$ref": "#/$defs/connector_descriptor"
         }
       }
     },
@@ -310,6 +313,116 @@
             }
           }
         }
+      }
+    },
+    "connector_descriptor": {
+      "description": "The connector's non-secret descriptor: the kei-connector-contracts Metadata object plus where its opaque_ref credential lives (credential_backend, credential_secret_ref). It carries references only, never a credential value. Sent only to a runtime that asks for it (Accept parameter connector-descriptors=1). The runtime validates it with the connector contract, so the contract's fields pass through unlisted.",
+      "type": "object",
+      "required": [
+        "id",
+        "tenant_id",
+        "workspace_id",
+        "provider",
+        "status",
+        "capabilities"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "tenant_id": {
+          "$ref": "#/$defs/id"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "status": {
+          "type": "string"
+        },
+        "credential_source": {
+          "enum": [
+            "oauth",
+            "opaque_ref",
+            ""
+          ]
+        },
+        "account_model": {
+          "enum": [
+            "per_user",
+            "shared",
+            "domain_delegation",
+            ""
+          ]
+        },
+        "credential_ref": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "credential_backend": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "credential_secret_ref": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "action"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "action": {
+                "enum": [
+                  "read",
+                  "create",
+                  "update",
+                  "delete",
+                  "comment"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "access_token"
+            ]
+          },
+          {
+            "required": [
+              "refresh_token"
+            ]
+          },
+          {
+            "required": [
+              "secret"
+            ]
+          },
+          {
+            "required": [
+              "credential"
+            ]
+          },
+          {
+            "required": [
+              "oauth"
+            ]
+          }
+        ]
       }
     }
   }

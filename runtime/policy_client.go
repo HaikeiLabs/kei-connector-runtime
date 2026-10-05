@@ -107,7 +107,7 @@ func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (bod
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", policybundle.ContentType)
+	req.Header.Set("Accept", policybundle.AcceptWithDescriptors)
 	req.Header.Set("Accept-Encoding", "identity")
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)

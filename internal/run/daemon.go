@@ -25,8 +25,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 )
 
 const (
@@ -56,6 +59,12 @@ type Daemon struct {
 	UseCredential func(ctx context.Context, subject, provider string, fn func(token string) error) error
 	AppendAudit   func([]byte) error
 	AuditCrypto   *auditcrypto.Provider
+	// Store and StateDir resolve an opaque_ref connector's reference from
+	// the delivered connector secret, as the legacy path does: the
+	// credential-sync index in StateDir names the secret, which must match
+	// the connector descriptor, and Store reads it.
+	Store    secrets.Store
+	StateDir string
 }
 
 // daemonRunRequest is the route's body. Env is the caller's environment as
@@ -146,11 +155,14 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = frames.write(runFrame{Done: &done})
 }
 
-// resolvedRef is one authorized reference waiting for its credential.
+// resolvedRef is one authorized reference waiting for its credential: the
+// session credential for provider, or value already read from the secret
+// store for an opaque_ref connector.
 type resolvedRef struct {
 	key      string
 	ref      connectorCredentialRef
 	provider string
+	value    string
 }
 
 func (d *Daemon) run(ctx context.Context, req daemonRunRequest, frames *frameWriter) runDone {
@@ -202,12 +214,12 @@ func (d *Daemon) run(ctx context.Context, req daemonRunRequest, frames *frameWri
 			return deny("subject_unlinked", "the session subject is not linked", 1, connectorIDs, fields)
 		case grant.Provider == "":
 			return deny("unresolved_reference", "the policy bundle does not describe this connector", 1, connectorIDs, fields)
-		case !invoke.IsSessionProvider(grant.Provider):
-			return deny("credential_source_not_supported", "the daemon resolves only the session's own OAuth connections", 1, connectorIDs, fields)
-		case !sessionCredentialFields[ref.field]:
-			return deny("unresolved_reference", "a session credential provides only the token field", 1, connectorIDs, fields)
 		}
-		subject, refs[i].provider = grant.Subject, grant.Provider
+		value, code, reason := d.resolveRef(ctx, grant, ref)
+		if code != "" {
+			return deny(code, reason, 1, connectorIDs, fields)
+		}
+		subject, refs[i].provider, refs[i].value = grant.Subject, grant.Provider, value
 	}
 
 	var exitCode int
@@ -232,14 +244,69 @@ func (d *Daemon) run(ctx context.Context, req daemonRunRequest, frames *frameWri
 	return runDone{Decision: "allow", ExitCode: exitCode}
 }
 
-// withCredentials enters one credential store Use per reference, so every
-// resolved value is in scope while fn runs the child, and none after.
+// resolveRef decides how an authorized reference resolves. With a connector
+// descriptor in the bundle, an opaque_ref connector's reference is read now
+// from the delivered secret (the returned value), and an OAuth connector's
+// must be the session subject's own connection. Without one, only a session
+// OAuth provider qualifies. A session reference returns "" and is resolved
+// later inside the credential store's Use. A non-empty code denies.
+func (d *Daemon) resolveRef(ctx context.Context, grant invoke.Grant, ref connectorCredentialRef) (value, code, reason string) {
+	if len(grant.Descriptor) == 0 {
+		switch {
+		case !invoke.IsSessionProvider(grant.Provider):
+			return "", "credential_source_not_supported", "the daemon resolves only the session's own OAuth connections"
+		case !sessionCredentialFields[ref.field]:
+			return "", "unresolved_reference", "a session credential provides only the token field"
+		}
+		return "", "", ""
+	}
+	var desc invoke.Descriptor
+	if err := json.Unmarshal(grant.Descriptor, &desc); err != nil {
+		return "", "unresolved_reference", "the connector descriptor is malformed"
+	}
+	meta := desc.Metadata
+	if meta.ID != ref.connectorID || meta.TenantID != grant.TenantID || meta.WorkspaceID != grant.WorkspaceID || string(meta.Provider) != grant.Provider {
+		return "", "unresolved_reference", "the connector descriptor does not match the bundle"
+	}
+	switch meta.EffectiveCredentialSource() {
+	case contract.CredentialSourceOAuth:
+		switch {
+		case meta.AccountModel != contract.AccountModelPerUser && (meta.AccountModel != "" || meta.Subject != grant.Subject):
+			return "", "credential_source_not_supported", "shared OAuth connections are not released to a session"
+		case !sessionCredentialFields[ref.field]:
+			return "", "unresolved_reference", "a session credential provides only the token field"
+		}
+		return "", "", ""
+	case contract.CredentialSourceOpaqueRef:
+		if d.Store == nil || d.StateDir == "" {
+			return "", "unresolved_reference", "no connector secret store is configured"
+		}
+		entry, err := credentials.ReadConnectorReference(filepath.Join(d.StateDir, "connector-credentials.json"), ref.connectorID, ref.field)
+		if err != nil || entry.SecretBackend != desc.CredentialBackend || entry.SecretRef != desc.CredentialSecretRef ||
+			meta.CredentialRef == "" || !strings.HasSuffix(entry.SecretRef, "/"+meta.CredentialRef) {
+			return "", "unresolved_reference", "no delivered secret matches the connector descriptor"
+		}
+		secret, err := d.Store.Get(ctx, entry.SecretBackend, entry.SecretRef)
+		if err != nil || secret == nil || *secret == "" {
+			return "", "unresolved_reference", "the connector secret is not available"
+		}
+		return *secret, "", ""
+	}
+	return "", "unresolved_reference", "unknown credential source"
+}
+
+// withCredentials enters one credential store Use per session reference, so
+// every resolved value is in scope while fn runs the child, and none after.
+// A reference already read from the secret store is added directly.
 func (d *Daemon) withCredentials(ctx context.Context, subject string, refs []resolvedRef, env []string, fn func(env, secrets []string)) error {
 	var enter func(i int, env, secrets []string) error
 	enter = func(i int, env, secrets []string) error {
 		if i == len(refs) {
 			fn(env, secrets)
 			return nil
+		}
+		if refs[i].value != "" {
+			return enter(i+1, append(env, refs[i].key+"="+refs[i].value), append(secrets, refs[i].value))
 		}
 		return d.UseCredential(ctx, subject, refs[i].provider, func(token string) error {
 			return enter(i+1, append(env, refs[i].key+"="+token), append(secrets, token))

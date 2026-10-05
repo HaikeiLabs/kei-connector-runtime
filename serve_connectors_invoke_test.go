@@ -2,7 +2,9 @@ package connectorruntime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -46,11 +48,38 @@ type invokeRig struct {
 	// githubStatus is the GitHub API status for each call; the last repeats.
 	githubStatus []int
 	githubAuth   []string
+	notionAuth   []string
+	// secrets is the tenant secret store opaque_ref connectors read.
+	secrets *fakeTenantSecrets
 }
 
-func newInvokeRig(t *testing.T) *invokeRig {
+// fakeTenantSecrets is the tenant secret store (secrets.Store), keyed by
+// backend + "|" + secret reference.
+type fakeTenantSecrets struct {
+	mu     sync.Mutex
+	values map[string]string
+	gets   int
+}
+
+func (s *fakeTenantSecrets) Get(_ context.Context, backend, ref string) (*string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gets++
+	v, ok := s.values[backend+"|"+ref]
+	if !ok {
+		return nil, errors.New("secret not found")
+	}
+	return &v, nil
+}
+func (*fakeTenantSecrets) Put(context.Context, string, string, string) error { return nil }
+func (*fakeTenantSecrets) Delete(context.Context, string, string) error      { return nil }
+func (*fakeTenantSecrets) Validate(context.Context, string, string) error    { return nil }
+
+// newInvokeRig starts the daemon over connectorTestBundle, changed by
+// mutate (which edits the decoded bundle document).
+func newInvokeRig(t *testing.T, mutate ...func(doc map[string]any)) *invokeRig {
 	t.Helper()
-	rig := &invokeRig{t: t, githubTokens: []string{credentialCanary}, githubStatus: []int{http.StatusOK}}
+	rig := &invokeRig{t: t, githubTokens: []string{credentialCanary}, githubStatus: []int{http.StatusOK}, secrets: &fakeTenantSecrets{values: map[string]string{}}}
 	i11 := httptest.NewServer(http.HandlerFunc(rig.serveI11))
 	t.Cleanup(i11.Close)
 	rig.cfg = identityServeConfig(t, i11.URL)
@@ -59,10 +88,10 @@ func newInvokeRig(t *testing.T) *invokeRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Activate(connectorTestBundle(t), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
+	if _, err := store.Activate(connectorTestBundle(t, mutate...), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	rig.local, err = newServeLocalPDP(rig.cfg, serveSeams{providerTransport: roundTripFunc(rig.serveGitHub)})
+	rig.local, err = newServeLocalPDP(rig.cfg, serveSeams{providerTransport: roundTripFunc(rig.serveProvider), secretStore: rig.secrets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,8 +131,18 @@ func (rig *invokeRig) serveI11(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (rig *invokeRig) serveGitHub(r *http.Request) (*http.Response, error) {
+// notionPageID is a page the fake Notion API serves.
+const notionPageID = "1a2b3c4d5e6f47a8b9c0d1e2f3a4b5c6"
+
+func (rig *invokeRig) serveProvider(r *http.Request) (*http.Response, error) {
 	rec := httptest.NewRecorder()
+	if r.URL.Host == "api.notion.com" {
+		rig.mu.Lock()
+		rig.notionAuth = append(rig.notionAuth, r.Header.Get("Authorization"))
+		rig.mu.Unlock()
+		_, _ = io.WriteString(rec, `{"object":"page","id":"`+notionPageID+`","created_time":"2026-09-01T10:00:00.000Z","last_edited_time":"2026-09-02T11:30:00.000Z","archived":false,"url":"https://www.notion.so/x","parent":{"type":"workspace","workspace":true},"properties":{"Name":{"id":"title","type":"title","title":[{"type":"text","plain_text":"Roadmap"}]}}}`)
+		return rec.Result(), nil
+	}
 	if r.URL.Host != "api.github.com" {
 		rec.WriteHeader(http.StatusBadGateway)
 		return rec.Result(), nil
@@ -178,7 +217,7 @@ func (rig *invokeRig) invoke(t *testing.T, connector, capability, resource strin
 // connectors: github (read permitted, pull_request.read not), linear
 // (permitted, but the subject never connected it) and notion (permitted, but
 // it needs an opaque_ref credential the daemon does not hold).
-func connectorTestBundle(t *testing.T) []byte {
+func connectorTestBundle(t *testing.T, mutate ...func(doc map[string]any)) []byte {
 	t.Helper()
 	var doc map[string]any
 	if err := json.Unmarshal(unsignedExampleBundle(t, time.Now().UTC()), &doc); err != nil {
@@ -235,6 +274,9 @@ func connectorTestBundle(t *testing.T) []byte {
 		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": invokeConnector, "capabilities": []string{"repository.read", "pull_request.read", "credential"}},
 		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-linear-0001", "capabilities": []string{"team.read", "credential"}},
 		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-notion-0001", "capabilities": []string{"page.read", "credential"}},
+	}
+	for _, m := range mutate {
+		m(doc)
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
