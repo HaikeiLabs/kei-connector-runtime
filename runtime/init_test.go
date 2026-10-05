@@ -1,4 +1,4 @@
-package connectorruntime
+package runtime
 
 import (
 	"bytes"
@@ -23,7 +23,7 @@ func TestRunInitMemberSuccess(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := runInit([]string{"--member", "--user", "u1", "--org", "o1", "--abac-url", server.URL}, &stdout, &stderr)
+	code := RunInit([]string{"--member", "--user", "u1", "--org", "o1", "--abac-url", server.URL}, &stdout, &stderr, server.URL, "", false)
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr: %s", code, stderr.String())
 	}
@@ -56,11 +56,11 @@ func TestRunInitAgentSuccess(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := runInit([]string{
+	code := RunInit([]string{
 		"--agent", "--org", "o1", "--name", "researcher",
 		"--tools", "search_wiki,search_web", "--scopes", "wiki:read",
 		"--abac-url", server.URL,
-	}, &stdout, &stderr)
+	}, &stdout, &stderr, server.URL, "", false)
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr: %s", code, stderr.String())
 	}
@@ -94,7 +94,7 @@ func TestRunInitFailClosed(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := runInit([]string{"--member", "--user", "u1", "--org", "missing", "--abac-url", server.URL}, &stdout, &stderr)
+	code := RunInit([]string{"--member", "--user", "u1", "--org", "missing", "--abac-url", server.URL}, &stdout, &stderr, server.URL, "", false)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -108,7 +108,7 @@ func TestRunInitFailClosed(t *testing.T) {
 
 func TestRunInitNoOperation(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := runInit([]string{"--org", "o1"}, &stdout, &stderr); code != 1 {
+	if code := RunInit([]string{"--org", "o1"}, &stdout, &stderr, "", "", false); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "--member and/or --agent") {
@@ -118,7 +118,7 @@ func TestRunInitNoOperation(t *testing.T) {
 
 func TestRunInitMissingOrg(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := runInit([]string{"--member", "--user", "u1"}, &stdout, &stderr); code != 1 {
+	if code := RunInit([]string{"--member", "--user", "u1"}, &stdout, &stderr, "", "", false); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "--org is required") {
@@ -128,7 +128,7 @@ func TestRunInitMissingOrg(t *testing.T) {
 
 func TestRunInitMemberMissingUser(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := runInit([]string{"--member", "--org", "o1"}, &stdout, &stderr); code != 1 {
+	if code := RunInit([]string{"--member", "--org", "o1"}, &stdout, &stderr, "", "", false); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "--user is required") {
