@@ -88,7 +88,7 @@ func runAuthorize(args []string) int {
 		return 1
 	}
 
-	reg, err := LoadRegistry(cfg.RegistryPath)
+	reg, err := keiruntime.LoadRegistry(cfg.RegistryPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -239,4 +239,4 @@ func splitCSV(s string) []string {
 }
 
 // Ensure *Registry satisfies keiruntime.ToolRegistry.
-var _ keiruntime.ToolRegistry = (*Registry)(nil)
+var _ keiruntime.ToolRegistry = (*keiruntime.Registry)(nil)
