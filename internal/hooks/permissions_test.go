@@ -66,6 +66,132 @@ func TestHookReportGoldenFixtures(t *testing.T) {
 	}
 }
 
+// RenderedHookCLI is the command emitted by kei-cli internal/app/harness.go:1018
+// for a Claude Code hook install spec. It must parse as `hook <kind> --harness <id>`.
+const RenderedHookCLI = "kei-proxy hook claude --harness h-abc123"
+
+func TestRunAcceptsRenderedContract(t *testing.T) {
+	for _, harness := range []struct {
+		kind    string
+		fixture string
+	}{{"claude", "claude.json"}, {"codex", "codex.json"}, {"opencode", "opencode.json"}} {
+		t.Run(harness.kind, func(t *testing.T) {
+			input, err := os.ReadFile(filepath.Join("testdata", "hooks", harness.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var spoolBuf bytes.Buffer
+			cfg := Config{AppendAudit: func(record []byte) error {
+				spoolBuf.Write(record)
+				spoolBuf.WriteByte('\n')
+				return nil
+			}}
+			var stdout, stderr bytes.Buffer
+			// Exact argv from HookSpec: hook <kind> --harness <id>
+			args := []string{harness.kind, "--harness", "h-abc123"}
+			if code := Run(args, bytes.NewReader(input), &stdout, &stderr, cfg); code != 0 {
+				t.Fatalf("Run(%v) exit = %d, stderr=%q", args, code, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("hook wrote deciding output: %q", stdout.String())
+			}
+			var got permissionEvent
+			line, err := spoolBuf.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Schema != "kei.harness-tool-event/v1" || got.HarnessID != "h-abc123" || got.HarnessKind != harness.kind {
+				t.Fatalf("identity/schema = %+v", got)
+			}
+			if got.NativeDecision == "" {
+				t.Fatal("native decision missing")
+			}
+		})
+	}
+}
+
+func TestRunBackwardCompat(t *testing.T) {
+	input, err := os.ReadFile(filepath.Join("testdata", "hooks", "claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spoolBuf bytes.Buffer
+	cfg := Config{AppendAudit: func(record []byte) error {
+		spoolBuf.Write(record)
+		spoolBuf.WriteByte('\n')
+		return nil
+	}}
+	var stdout, stderr bytes.Buffer
+	// Legacy format: hook report <kind> --harness <id>
+	args := []string{"report", "claude", "--harness", "h-legacy"}
+	if code := Run(args, bytes.NewReader(input), &stdout, &stderr, cfg); code != 0 {
+		t.Fatalf("Run(%v) exit = %d", args, code)
+	}
+	var got permissionEvent
+	line, err := spoolBuf.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.HarnessKind != "claude" || got.HarnessID != "h-legacy" {
+		t.Fatalf("event = %+v", got)
+	}
+}
+
+func TestRunReturnsZeroForGarbageArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no-args", nil},
+		{"empty-args", []string{}},
+		{"unknown-subcommand", []string{"nope"}},
+		{"bad-kind", []string{"bogus", "--harness", "h"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(tc.args, strings.NewReader(`{"tool_name":"Bash","tool_input":{},"native_decision":"ask"}`), &stdout, &stderr, Config{})
+			if code != 0 {
+				t.Fatalf("Run(%v) exit = %d", tc.args, code)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunRenderedHookCLIFixture(t *testing.T) {
+	// RenderedHookCLI is "kei-proxy hook claude --harness h-abc123" — verify
+	// that splitting off the leading binary yields args that Run accepts.
+	parts := splitHookCLI(RenderedHookCLI)
+	if len(parts) < 3 || parts[0] != "claude" || parts[1] != "--harness" || parts[2] != "h-abc123" {
+		t.Fatalf("RenderedHookCLI splits to %v, want [claude --harness h-abc123]", parts)
+	}
+	input := `{"tool_name":"Bash","tool_input":{"command":"git status"},"native_decision":"ask"}`
+	var stdout, stderr bytes.Buffer
+	code := Run(parts, strings.NewReader(input), &stdout, &stderr, Config{})
+	if code != 0 {
+		t.Fatalf("Run(%v) = %d, stderr=%q", parts, code, stderr.String())
+	}
+}
+
+// splitHookCLI splits a rendered hook command like "kei-proxy hook claude --harness h-abc123"
+// into args suitable for Run (dropping the leading binary and "hook" subcommand).
+func splitHookCLI(cli string) []string {
+	parts := strings.Fields(cli)
+	// parts[0]="kei-proxy", parts[1]="hook" -> drop both
+	if len(parts) > 2 {
+		return parts[2:]
+	}
+	return nil
+}
+
 func TestHookReportAlwaysExitsZeroOnBadInputAndSpoolFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

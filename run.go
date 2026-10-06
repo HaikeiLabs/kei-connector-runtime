@@ -103,7 +103,7 @@ func Main(buildVersion string, args []string) int {
 func runHook(args []string) int {
 	cfg := configFromEnv()
 	auditProv := auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken)
-	return hooks.Run(args, os.Stdin, os.Stdout, hooks.Config{
+	return hooks.Run(args, os.Stdin, os.Stdout, os.Stderr, hooks.Config{
 		RuntimeStateDir: cfg.RuntimeStateDir,
 		AuditCrypto:     auditProv,
 		AppendAudit: func(record []byte) error {
@@ -198,6 +198,7 @@ Commands:
   connector    invoke a governed data connector through the control plane
   collector    ship pending audit JSONL records to ABAC (idempotent, resumable)
   credential   manage credential sync (see: kei-proxy credential --help)
+  hook         report-only harness tool-use hook (see: kei-proxy hook --help)
   run          run a child process with governed connector credentials
   model        model profile and invocation commands (see: kei-proxy model --help)
   org          manage organization members (list, add, remove, update)
