@@ -78,8 +78,22 @@ func OpenStore(dir string) (*Store, error) {
 	}
 	return s, nil
 }
-func (s *Store) State() State          { return s.state.State }
-func (s *Store) HighestVersion() int64 { return s.state.Version }
+func (s *Store) State() State { return s.state.State }
+
+// HighestVersionFor returns the rollback watermark for one bundle audience.
+// The watermark belongs to the installation that wrote it: state left by a
+// different audience (a previous installation on this machine) does not bound
+// the new installation's bundle versions.
+func (s *Store) HighestVersionFor(installationID, orgID, workspaceID string) int64 {
+	if s.heldByOtherAudience(Audience{InstallationID: installationID, OrgID: orgID, WorkspaceID: workspaceID}) {
+		return 0
+	}
+	return s.state.Version
+}
+
+func (s *Store) heldByOtherAudience(want Audience) bool {
+	return s.state.Version > 0 && s.state.Audience != want
+}
 
 func (s *Store) withLock(fn func() error) error {
 	f, err := os.OpenFile(filepath.Join(s.dir, "state.lock"), os.O_CREATE|os.O_RDWR, 0600)
@@ -142,7 +156,12 @@ func (s *Store) reload() error {
 func (s *Store) Activate(bundle []byte, installationID, orgID, workspaceID string, now time.Time) (*Verified, error) {
 	var verified *Verified
 	err := s.withLock(func() error {
-		v, err := Validate(bundle, installationID, orgID, workspaceID, s.state.Version, now)
+		highest := s.state.Version
+		newInstallation := s.heldByOtherAudience(Audience{InstallationID: installationID, OrgID: orgID, WorkspaceID: workspaceID})
+		if newInstallation {
+			highest = 0
+		}
+		v, err := Validate(bundle, installationID, orgID, workspaceID, highest, now)
 		if err != nil {
 			s.state.LastCheck = now
 			s.state.ReasonCode = healthReasonForError(err)
@@ -154,6 +173,12 @@ func (s *Store) Activate(bundle []byte, installationID, orgID, workspaceID strin
 			}
 			_ = s.persist()
 			return err
+		}
+		if newInstallation {
+			if err := s.archive(now); err != nil {
+				return fmt.Errorf("archive previous installation policy state: %w", err)
+			}
+			s.state = diskState{State: Cold}
 		}
 		s.state.Version = v.Payload.BundleVersion
 		s.state.PolicyRevision = v.Payload.PolicyRevision
@@ -174,6 +199,30 @@ func (s *Store) Activate(bundle []byte, installationID, orgID, workspaceID strin
 	})
 	return verified, err
 }
+
+// archive moves the previous installation's persisted state and bundle into
+// policy/archive/<timestamp>-<installation>/. It never deletes them; the new
+// installation then starts from a cold store with its own watermark.
+func (s *Store) archive(now time.Time) error {
+	label := s.state.Audience.InstallationID
+	if !idPattern.MatchString(label) {
+		label = "unknown-installation"
+	}
+	dst := filepath.Join(s.dir, "archive", now.UTC().Format("20060102T150405.000000000Z")+"-"+label)
+	if err := os.MkdirAll(dst, 0700); err != nil {
+		return err
+	}
+	for _, name := range []string{filepath.Base(s.statePath), filepath.Base(s.bundlePath)} {
+		if err := os.Rename(filepath.Join(s.dir, name), filepath.Join(dst, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := syncDirectory(dst); err != nil {
+		return err
+	}
+	return syncDirectory(s.dir)
+}
+
 func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time) (*Verified, State, error) {
 	var verified *Verified
 	state := Cold

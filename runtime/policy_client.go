@@ -315,7 +315,7 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 	if bundleETag != `"`+bodyDigest+`"` {
 		return reject(errors.New("catalog ETag does not match policy bundle digest"))
 	}
-	candidate, err := policybundle.Validate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersion(), now)
+	candidate, err := policybundle.Validate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersionFor(identity.ID, identity.OrgID, *identity.WorkspaceID), now)
 	if err != nil {
 		_ = store.RecordRejectedCandidate(now, err)
 		return fmt.Errorf("policy bundle candidate rejected: %w", err)
