@@ -69,7 +69,7 @@ func TestEvaluate(t *testing.T) {
 			}
 			e, _, _ := newTestEvaluator(t, testNow, bundle, sessions)
 			if tc.members != nil {
-				e.memberships = func(*policybundle.Verified) policybundle.Memberships { return tc.members }
+				e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships { return tc.members }
 			}
 			d, err := e.Evaluate(context.Background(), tc.req)
 			if err != nil {
@@ -177,11 +177,11 @@ func TestSessionLifecycle(t *testing.T) {
 	want("")
 	e.ReconcileSession() // a v1 bundle carries no memberships: nothing to revoke
 	want("")
-	e.memberships = func(*policybundle.Verified) policybundle.Memberships {
+	e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships {
 		return fakeMemberships{"u-alice": {granted: false}}
 	}
 	e.ReconcileSession()
-	e.memberships = policybundle.BundleMemberships
+	e.memberships = policybundle.BundleMembershipsAt
 	want("subject_revoked")
 	if err := sessions.Start(Subject{UserID: "u-alice", Status: StatusLinked}); err != nil {
 		t.Fatal(err)

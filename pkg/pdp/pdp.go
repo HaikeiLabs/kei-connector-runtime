@@ -61,7 +61,7 @@ type Evaluator struct {
 	aud         Audience
 	sessions    *Sessions
 	now         func() time.Time
-	memberships func(*policybundle.Verified) policybundle.Memberships
+	memberships func(*policybundle.Verified, time.Time) policybundle.Memberships
 }
 
 // New opens the policy state directory. sessions may be nil, in which case
@@ -74,7 +74,7 @@ func New(stateDir string, aud Audience, sessions *Sessions) (*Evaluator, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &Evaluator{store: store, aud: aud, sessions: sessions, now: time.Now, memberships: policybundle.BundleMemberships}, nil
+	return &Evaluator{store: store, aud: aud, sessions: sessions, now: time.Now, memberships: policybundle.BundleMembershipsAt}, nil
 }
 
 // Evaluate decides one call. The error is non-nil only when ctx is done.
@@ -143,11 +143,12 @@ func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State,
 	if e.sessions != nil {
 		var ok bool
 		if current, ok = e.sessions.Current(); ok {
-			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Status: string(current.Status)}
+			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
 			used = &current
 		}
 	}
-	d := v.EvaluateSession(call, subject, e.memberships(v))
+	now := e.now().UTC()
+	d := v.EvaluateSessionAt(call, subject, e.memberships(v, now), now)
 	out := Decision{
 		Allow:          d.Outcome == "allow",
 		Reason:         d.Reason,
@@ -218,7 +219,7 @@ func (e *Evaluator) ReconcileSession() {
 		}
 		return
 	}
-	m := e.memberships(v)
+	m := e.memberships(v, e.now().UTC())
 	if m == nil {
 		if v.Payload.SubjectResolution.Mode == "bundle" {
 			e.sessions.revoke()

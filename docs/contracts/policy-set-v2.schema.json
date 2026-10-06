@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.haikeilabs.com/kei/policy-set-v2.schema.json",
+  "title": "kei.policy-set/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "org_id", "workspace_id", "match_semantics", "evaluation", "tools", "checks", "tool_policies"],
+  "properties": {
+    "schema": {"const": "kei.policy-set/v2"},
+    "org_id": {"$ref": "#/$defs/id"},
+    "workspace_id": {"$ref": "#/$defs/id"},
+    "match_semantics": {"const": "kei.match/v2"},
+    "evaluation": {"type": "object", "additionalProperties": false, "required": ["precedence", "checks", "default"], "properties": {"precedence": {"const": ["priority_desc", "deny_before_permit", "policy_id_asc"]}, "checks": {"const": "per_capability_first_match_and"}, "default": {"const": "deny"}}},
+    "tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}},
+    "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "tool_policies": {"type": "array", "items": {"$ref": "#/$defs/check"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "capability": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"},
+    "resourceType": {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"type": "string", "minLength": 1}, "parent_type": {"type": "string", "minLength": 1}}},
+    "connectorRoute": {"type": "object", "additionalProperties": false, "required": ["connector_binding"], "properties": {"connector_binding": {"type": "object", "additionalProperties": false, "required": ["connector_id"], "properties": {"connector_id": {"$ref": "#/$defs/id"}}}}, "minProperties": 1, "maxProperties": 1},
+    "harnessRoute": {"type": "object", "additionalProperties": false, "required": ["harness_executor"], "properties": {"harness_executor": {"type": "object", "additionalProperties": false, "required": ["executor", "registration"], "properties": {"executor": {"type": "string", "minLength": 1}, "registration": {"type": "string", "minLength": 1}}}}, "minProperties": 1, "maxProperties": 1},
+    "tool": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["name", "source", "operation_class", "route", "required_capabilities"], "properties": {"name": {"type": "string", "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"}, "source": {"type": "string", "minLength": 1}, "operation_class": {"type": "string", "enum": ["read", "write"]}, "route": {"$ref": "#/$defs/connectorRoute"}, "required_capabilities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/capability"}}, "resource_types": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/resourceType"}}}}, {"type": "object", "additionalProperties": false, "required": ["name", "source", "operation_class", "route"], "properties": {"name": {"type": "string", "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"}, "source": {"type": "string", "minLength": 1}, "operation_class": {"type": "string", "enum": ["read", "write"]}, "route": {"$ref": "#/$defs/harnessRoute"}}}]},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["org_id", "workspace_id", "agent_id"], "properties": {"org_id": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}, "workspace_id": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}, "agent_id": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}}},
+    "selector": {"type": "object", "additionalProperties": false, "required": ["source_principal"], "properties": {"source_principal": {"type": "string", "minLength": 1}, "source": {"type": "string"}, "connector_id": {"$ref": "#/$defs/id"}, "tool": {"type": "string"}, "capability": {"$ref": "#/$defs/capability"}, "resource_type": {"type": "string"}, "resource_id": {"type": "string"}, "resource_parent": {"type": "string"}}},
+    "check": {"type": "object", "additionalProperties": false, "required": ["policy_id", "name", "effect", "priority", "scope", "selector"], "properties": {"policy_id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "effect": {"enum": ["permit", "deny"]}, "priority": {"type": "integer"}, "scope": {"$ref": "#/$defs/scope"}, "selector": {"$ref": "#/$defs/selector"}}}
+  }
+}

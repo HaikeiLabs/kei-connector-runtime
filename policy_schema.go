@@ -8,10 +8,13 @@ import (
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-//go:embed docs/contracts/policy-bundle-v1.schema.json docs/contracts/policy-set-v1.schema.json
+//go:embed docs/contracts/policy-bundle-v1.schema.json docs/contracts/policy-set-v1.schema.json docs/contracts/policy-bundle-v2.schema.json docs/contracts/policy-set-v2.schema.json
 var policySchemas embed.FS
 
-func init() { policybundle.SetSchemaValidator(validatePolicyBundleSchema) }
+func init() {
+	policybundle.SetSchemaValidator(validatePolicyBundleSchema)
+	policybundle.SetV2SchemaValidator(validatePolicyBundleV2Schema)
+}
 
 func validatePolicyBundleSchema(raw []byte) error {
 	bundleBytes, err := policySchemas.ReadFile("docs/contracts/policy-bundle-v1.schema.json")
@@ -41,6 +44,45 @@ func validatePolicyBundleSchema(raw []byte) error {
 		return err
 	}
 	s, err := c.Compile("https://schemas.haikeilabs.com/kei/policy-bundle-v1.schema.json")
+	if err != nil {
+		return err
+	}
+	return s.Validate(doc)
+}
+
+func validatePolicyBundleV2Schema(raw []byte) error {
+	load := func(name string) (any, error) {
+		b, err := policySchemas.ReadFile("docs/contracts/" + name)
+		if err != nil {
+			return nil, err
+		}
+		var doc any
+		if err := json.Unmarshal(b, &doc); err != nil {
+			return nil, err
+		}
+		return doc, nil
+	}
+	bundleDoc, err := load("policy-bundle-v2.schema.json")
+	if err != nil {
+		return err
+	}
+	setDoc, err := load("policy-set-v2.schema.json")
+	if err != nil {
+		return err
+	}
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	c := jsonschema.NewCompiler()
+	c.AssertFormat()
+	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v2.schema.json", setDoc); err != nil {
+		return err
+	}
+	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json", bundleDoc); err != nil {
+		return err
+	}
+	s, err := c.Compile("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json")
 	if err != nil {
 		return err
 	}
