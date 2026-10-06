@@ -29,6 +29,7 @@ type ToolRoute struct {
 }
 
 type ConnectorBindingRoute struct {
+	AgentID     string `json:"agent_id"`
 	ConnectorID string `json:"connector_id"`
 }
 
@@ -151,7 +152,7 @@ func validateToolRoute(td ToolDefinition, prefix string) error {
 		return fmt.Errorf("%s: route must contain exactly one branch", prefix)
 	}
 	if c := r.ConnectorBinding; c != nil {
-		if strings.TrimSpace(c.ConnectorID) == "" || len(td.RequiredCapabilities) == 0 || td.ResourceTypes != nil && len(td.ResourceTypes) == 0 {
+		if strings.TrimSpace(c.AgentID) == "" || strings.TrimSpace(c.ConnectorID) == "" || len(td.RequiredCapabilities) == 0 || td.ResourceTypes != nil && len(td.ResourceTypes) == 0 {
 			return fmt.Errorf("%s: invalid connector_binding route", prefix)
 		}
 		for _, capability := range td.RequiredCapabilities {
