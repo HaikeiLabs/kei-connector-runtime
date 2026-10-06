@@ -128,13 +128,14 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	go func() { serveErrors <- server.Serve(tcpListener) }()
 	go func() { serveErrors <- socketServer.Serve(unixListener) }()
 	stopCollector := func() {}
-	if cfg.AuditPath != "" {
-		audit := keiruntime.NewCollector(cfg.AuditPath, keiruntime.NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
+	if auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir); auditPath != "" {
+		audit := keiruntime.NewCollector(auditPath, keiruntime.NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
 		audit.LifecycleClient = keiruntime.NewLifecycleFlushClientFromConfig(cfg, shutdownFlushTimeout)
 		audit.HarnessToolClient = keiruntime.NewHarnessToolFlushClientFromConfig(cfg, shutdownFlushTimeout)
+		audit.HarnessAuditClient = keiruntime.NewHarnessAuditFlushClientFromConfig(cfg, shutdownFlushTimeout)
 		stopCollector = collector.Service{
 			Flusher:           audit,
-			Path:              cfg.AuditPath,
+			Path:              auditPath,
 			PollInterval:      collectorPollInterval,
 			FinalFlushTimeout: shutdownFlushTimeout,
 		}.Start(ctx)

@@ -58,13 +58,24 @@ type spoolSegment struct {
 type AuditSpool struct {
 	path     string
 	maxBytes int64
+	dirMode  os.FileMode
+	fileMode os.FileMode
 }
 
 func NewAuditSpool(path string, maxBytes int64) *AuditSpool {
 	if maxBytes <= 0 {
 		maxBytes = defaultAuditMaxBytes
 	}
-	return &AuditSpool{path: path, maxBytes: maxBytes}
+	return &AuditSpool{path: path, maxBytes: maxBytes, dirMode: 0o755, fileMode: 0o644}
+}
+
+// NewPrivateAuditSpool is an AuditSpool whose directory is created 0700 and
+// whose lock and active files are created 0600. The harness-tool spool under
+// the runtime state directory uses it.
+func NewPrivateAuditSpool(path string, maxBytes int64) *AuditSpool {
+	s := NewAuditSpool(path, maxBytes)
+	s.dirMode, s.fileMode = 0o700, 0o600
+	return s
 }
 
 func (s *AuditSpool) segmentBytes() int64 {
@@ -82,7 +93,7 @@ func (s *AuditSpool) segmentPath(seq uint64) string {
 }
 
 func (s *AuditSpool) withLock(fn func() error) error {
-	f, err := os.OpenFile(s.lockPath(), os.O_CREATE|os.O_RDONLY, 0o644)
+	f, err := os.OpenFile(s.lockPath(), os.O_CREATE|os.O_RDONLY, s.fileMode)
 	if err != nil {
 		return fmt.Errorf("open spool lock: %w", err)
 	}
@@ -117,7 +128,7 @@ func (s *AuditSpool) Append(class string, record []byte) error {
 	if bytes.IndexByte(record, '\n') >= 0 {
 		return errors.New("audit spool: record contains a newline")
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), s.dirMode); err != nil {
 		return err
 	}
 	line := make([]byte, 0, len(record)+1)
@@ -187,7 +198,7 @@ func (s *AuditSpool) appendLocked(class string, line []byte) error {
 		}
 	}
 
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, s.fileMode)
 	if err != nil {
 		return err
 	}
