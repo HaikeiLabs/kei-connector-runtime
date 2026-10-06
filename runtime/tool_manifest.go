@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 )
 
 // Manifest schemas accepted during the v2-to-v3 migration.
@@ -136,6 +137,9 @@ func validateToolDefinition(td ToolDefinition, prefix string) error {
 }
 
 func validateToolRoute(td ToolDefinition, prefix string) error {
+	if strings.TrimSpace(td.Service) == "" || !toolManifestServiceRe.MatchString(td.Service) {
+		return fmt.Errorf("%s: service is required", prefix)
+	}
 	if td.Source == "" || !toolManifestSourceRe.MatchString(td.Source) {
 		return fmt.Errorf("%s: invalid source", prefix)
 	}
@@ -147,11 +151,11 @@ func validateToolRoute(td ToolDefinition, prefix string) error {
 		return fmt.Errorf("%s: route must contain exactly one branch", prefix)
 	}
 	if c := r.ConnectorBinding; c != nil {
-		if c.ConnectorID == "" || len(td.RequiredCapabilities) == 0 || td.ResourceTypes != nil && len(td.ResourceTypes) == 0 {
+		if strings.TrimSpace(c.ConnectorID) == "" || len(td.RequiredCapabilities) == 0 || td.ResourceTypes != nil && len(td.ResourceTypes) == 0 {
 			return fmt.Errorf("%s: invalid connector_binding route", prefix)
 		}
 		for _, capability := range td.RequiredCapabilities {
-			if capability == "" || !toolManifestServiceRe.MatchString(capability) {
+			if strings.TrimSpace(capability) == "" || !toolManifestServiceRe.MatchString(capability) {
 				return fmt.Errorf("%s: invalid required capability", prefix)
 			}
 		}
@@ -161,7 +165,7 @@ func validateToolRoute(td ToolDefinition, prefix string) error {
 			}
 		}
 	}
-	if h := r.HarnessExecutor; h != nil && (h.Executor == "" || h.Registration == "" || td.RequiredCapabilities != nil || td.ResourceTypes != nil) {
+	if h := r.HarnessExecutor; h != nil && (strings.TrimSpace(h.Executor) == "" || strings.TrimSpace(h.Registration) == "" || td.RequiredCapabilities != nil || td.ResourceTypes != nil) {
 		return fmt.Errorf("%s: invalid harness_executor route", prefix)
 	}
 	return nil
