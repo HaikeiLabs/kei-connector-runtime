@@ -6,8 +6,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
@@ -32,6 +34,9 @@ type Config struct {
 	// "identity", where the serve daemon holds session credentials from I11.
 	CredentialRelease    string
 	CredentialReleaseURL string
+	// SessionIdleTTL is KEI_SESSION_IDLE_TTL: how long a named daemon session
+	// lives without use (Go duration, default 30m).
+	SessionIdleTTL time.Duration
 }
 
 func envOr(key, fallback string) string {
@@ -64,6 +69,17 @@ func auditMaxBytesFromEnv() int64 {
 
 const defaultAuditMaxBytes int64 = 100 << 20
 
+// sessionIdleTTLFromEnv reads KEI_SESSION_IDLE_TTL (a Go duration such as
+// "45m"). Unset, malformed or non-positive values use pdp.DefaultIdleTTL.
+func sessionIdleTTLFromEnv() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("KEI_SESSION_IDLE_TTL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return pdp.DefaultIdleTTL
+}
+
 func configFromEnv() Config {
 	return Config{
 		ABACURL:                       envOr("ABAC_URL", "http://localhost:8080"),
@@ -84,6 +100,7 @@ func configFromEnv() Config {
 		ToolManifestPath:              os.Getenv("KEI_TOOL_MANIFEST"),
 		CredentialRelease:             envOr("KEI_CREDENTIAL_RELEASE", CredentialReleaseLegacy),
 		CredentialReleaseURL:          os.Getenv("KEI_CREDENTIAL_RELEASE_URL"),
+		SessionIdleTTL:                sessionIdleTTLFromEnv(),
 	}
 }
 

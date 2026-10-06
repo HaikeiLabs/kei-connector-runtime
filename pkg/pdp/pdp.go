@@ -31,8 +31,12 @@ type ConnectorTarget struct {
 }
 
 // Request is one governed call. It has no subject field: the acting subject
-// comes only from the in-memory session.
+// comes only from the in-memory session that Session names.
 type Request struct {
+	// Session is the id of the session the call runs in (Sessions.Create);
+	// DefaultSession uses the legacy default session. An id that is not live
+	// denies session_not_found.
+	Session   string
 	Tool      string // registry name in the bundle's policy_set.tools
 	Action    string // optional; must equal the registered action
 	Resource  string
@@ -82,12 +86,25 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
+	if !e.sessionLive(req.Session) {
+		return sessionDenial(), nil
+	}
 	v, state, err := e.check()
 	if err != nil {
 		return stateDenial(state), nil
 	}
 	d, _ := e.evaluate(v, state, req)
 	return d, nil
+}
+
+// sessionLive reports whether the named session can be used: the default
+// session always can (it may hold no subject), an id session only while live.
+func (e *Evaluator) sessionLive(id string) bool {
+	return id == DefaultSession || (e.sessions != nil && e.sessions.Exists(id))
+}
+
+func sessionDenial() Decision {
+	return Decision{Reason: "the session does not exist or has ended", ReasonCode: ReasonSessionNotFound, DenySource: "identity"}
 }
 
 // Connector is a connector entry from the policy bundle.
@@ -114,6 +131,9 @@ func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (Connect
 	}
 	if req.Connector == nil {
 		return ConnectorGrant{Decision: Decision{Reason: "connector target is required", ReasonCode: "tool_not_registered", DenySource: "registry"}}, nil
+	}
+	if !e.sessionLive(req.Session) {
+		return ConnectorGrant{Decision: sessionDenial()}, nil
 	}
 	v, state, err := e.check()
 	if err != nil {
@@ -142,7 +162,7 @@ func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State,
 	var used *Subject
 	if e.sessions != nil {
 		var ok bool
-		if current, ok = e.sessions.Current(); ok {
+		if current, ok = e.sessions.Get(req.Session); ok {
 			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Status: string(current.Status)}
 			used = &current
 		}
@@ -196,31 +216,36 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 	return HarnessResult{Outcome: outcome, PolicyID: policyID, Reason: reason}, nil
 }
 
-// ReconcileSession ends the session of a subject the active bundle no longer
-// grants (ADR-026 G0: revocation takes effect at the next refresh). The
-// refresher calls it after every refresh.
-func (e *Evaluator) ReconcileSession() {
+// ReconcileSession revokes every session whose subject the active bundle no
+// longer grants (ADR-026 G0: revocation takes effect at the next refresh).
+// The refresher calls it after every refresh.
+func (e *Evaluator) ReconcileSession() { e.ReconcileSessions() }
+
+// ReconcileSessions is ReconcileSession, returning the ids of the sessions it
+// revoked (DefaultSession for the default session) so their credentials can
+// be flushed.
+func (e *Evaluator) ReconcileSessions() []string {
 	if e.sessions == nil {
-		return
-	}
-	current, ok := e.sessions.Current()
-	if !ok || current.Status != StatusLinked {
-		return
+		return nil
 	}
 	v, _, err := e.check()
 	if err != nil {
-		return
+		return nil
 	}
 	m := e.memberships(v)
 	if m == nil {
-		return
+		return nil
 	}
-	if _, _, granted, known := m.Lookup(current.UserID); known && !granted {
-		e.sessions.revoke()
-	}
+	return e.sessions.revokeIf(func(sub Subject) bool {
+		if sub.Status != StatusLinked {
+			return false
+		}
+		_, _, granted, known := m.Lookup(sub.UserID)
+		return known && !granted
+	})
 }
 
-// RevokeSession ends the session because the installation was revoked.
+// RevokeSession revokes every session because the installation was revoked.
 func (e *Evaluator) RevokeSession() {
 	if e.sessions != nil {
 		e.sessions.revoke()
@@ -267,7 +292,7 @@ func denySource(code string) string {
 		return "runtime_state"
 	case strings.HasPrefix(code, "tool_"), strings.HasPrefix(code, "agent_"):
 		return "registry"
-	case strings.HasPrefix(code, "subject_"):
+	case strings.HasPrefix(code, "subject_"), code == ReasonSessionNotFound:
 		return "identity"
 	}
 	return "policy"

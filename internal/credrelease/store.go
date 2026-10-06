@@ -66,6 +66,12 @@ func NewStore(client *Client) *Store {
 	return &Store{client: client}
 }
 
+// NewSession returns a new, empty store on the same I11 client: one per
+// session, so sessions never share credentials.
+func (s *Store) NewSession() *Store {
+	return &Store{client: s.client}
+}
+
 // Load flushes any held credentials and makes the session's one I11 call
 // for subject (the session's user id) with subjectToken. On error the store
 // stays empty, and every Use denies until the next Load. A Flush during the

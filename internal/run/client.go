@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 // maxRunFrameBytes bounds one streamed frame (a base64 output chunk).
@@ -28,6 +30,7 @@ func runViaDaemon(args []string, stdout, stderr io.Writer, cfg Config, parentEnv
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	connectorID := flags.String("connector", "", "connector id for resolved credentials")
+	sessionID := flags.String("session", session.IDFromEnv(), "kei-proxy daemon session id (default $KEI_SESSION_ID)")
 	sep := -1
 	for i, arg := range args {
 		if arg == "--" {
@@ -58,6 +61,7 @@ func runViaDaemon(args []string, stdout, stderr io.Writer, cfg Config, parentEnv
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.RuntimeToken)
 	req.Header.Set("Content-Type", "application/json")
+	session.SetHeader(req, *sessionID)
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", cfg.DaemonSocket)

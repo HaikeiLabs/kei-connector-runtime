@@ -56,7 +56,7 @@ func newCredentialPDP(t *testing.T, stateDir string) (*keiruntime.LocalPDP, *ses
 // requireHeld asserts the session holds the github credential.
 func requireHeld(t *testing.T, l *keiruntime.LocalPDP, subject string) {
 	t.Helper()
-	err := l.UseCredential(context.Background(), subject, "github", func(token string) error {
+	err := l.UseCredential(context.Background(), "", subject, "github", func(token string) error {
 		if token != "gh-session-token" {
 			return errors.New("unexpected credential")
 		}
@@ -70,7 +70,7 @@ func requireHeld(t *testing.T, l *keiruntime.LocalPDP, subject string) {
 // requireFlushed asserts the session holds no credential.
 func requireFlushed(t *testing.T, l *keiruntime.LocalPDP, subject string) {
 	t.Helper()
-	err := l.UseCredential(context.Background(), subject, "github", func(string) error {
+	err := l.UseCredential(context.Background(), "", subject, "github", func(string) error {
 		t.Fatal("callback ran with a flushed credential")
 		return nil
 	})
@@ -207,7 +207,7 @@ func TestSessionCredentialsLegacyModeNeverFetches(t *testing.T) {
 	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("PUT = %d", rec.Code)
 	}
-	if err := l.UseCredential(context.Background(), "u-1", "github", func(string) error { return nil }); err == nil {
+	if err := l.UseCredential(context.Background(), "", "u-1", "github", func(string) error { return nil }); err == nil {
 		t.Fatal("legacy mode served a session credential")
 	}
 	if got := f.calls(); len(got) != 0 {

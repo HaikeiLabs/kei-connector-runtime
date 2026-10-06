@@ -187,7 +187,9 @@ type connectorInvokeArgs struct {
 // the request plus the ABAC endpoint, credential, and timeout the caller
 // should use, after applying CLI overrides and the runtime relay rules.
 type connectorInvokePlan struct {
-	req        Request
+	req Request
+	// session is the daemon session the call ran in, for the audit record.
+	session    string
 	abacURL    string
 	abacSecret string
 	timeout    time.Duration
@@ -215,6 +217,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
 	inputArg := fs.String("input", "", "capability input: a JSON object, @<file>, or - for stdin (default {})")
 	providerUser := fs.String("provider-user", "", "chat-platform identity, e.g. a WhatsApp E.164 number (default $KEI_PROXY_PROVIDER_USER)")
+	sessionID := fs.String("session", session.IDFromEnv(), "kei-proxy daemon session id from PUT /v1/session (default $KEI_SESSION_ID; empty = the deprecated default session)")
 
 	if err := fs.Parse(args); err != nil {
 		return connectorInvokePlan{}, err
@@ -270,6 +273,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		timeout:         time.Duration(*timeout) * time.Second,
 		input:           *inputArg,
 		explicitSubject: explicitSubject,
+		session:         *sessionID,
 	}, nil
 }
 
@@ -309,7 +313,7 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		return runViaDaemon(plan, env, stdout, stderr)
 	}
 	if env.SubjectSource != nil {
-		subject, subErr := env.SubjectSource.Subject(context.Background())
+		subject, subErr := env.SubjectSource.Subject(session.WithID(context.Background(), plan.session))
 		if subErr == nil && subject != "" {
 			plan.req.InvokingSubject = subject
 		}
