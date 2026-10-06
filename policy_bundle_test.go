@@ -61,8 +61,8 @@ func TestValidateUnsignedBundleRejectsAudienceRollbackExpirySchemaAndDuplicateKe
 
 func TestVendoredFixtureHashesAndCanonicalAuthorizeParity(t *testing.T) {
 	for path, want := range map[string]string{
-		"docs/contracts/policy-bundle-v1.schema.json": "a22ab2412dccf0c4b7282c2b0704a8fc11e62984b69418d2052636cc209b7c01",
-		"docs/contracts/policy-set-v1.schema.json":    "0b69f38f0df1e9d873eba6bede8d0f69671c5fdc3fb2c5df95f37136bb875fd1",
+		"docs/contracts/policy-bundle-v1.schema.json": "8eb5a6bb6c98f26825111d5067829670857970fa22278310cd81a47ba132efd1",
+		"docs/contracts/policy-set-v1.schema.json":    "03ae8ac640375319f826b8df5fad0770b8ffe582e94edb138070b303ac3d8a50",
 	} {
 		b, err := os.ReadFile(path)
 		if err != nil {

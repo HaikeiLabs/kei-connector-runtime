@@ -28,7 +28,7 @@
       "$ref": "#/$defs/id"
     },
     "match_semantics": {
-      "description": "The pattern-matching dialect every evaluator must implement byte-for-byte. kei.match/v1 is kei-policy-catalog pkg/policy.MatchesPattern plus the connector src/dst candidate lists in connector_policy.go.",
+      "description": "The pattern-matching dialect every evaluator must implement byte-for-byte. kei.match/v1 is kei-policy-catalog pkg/policy.MatchesPattern with strict semantics (HAI-248) plus the connector src/dst candidate lists in connector_policy.go, as defined in ADR-028 section 5: exact case-sensitive match except *, <scheme>:*, and the case-insensitive *@<domain> email form; a star anywhere else is a literal and no form matches a prefix or suffix. Harness command policies (dst schemes shell:, skill:, path:, mcp: and harness tool: names; src harness:) are evaluated by the separate kei.harness-match/v1 dialect that the policy bundle declares (ADR-029); kei.match/v1 itself is unchanged.",
       "const": "kei.match/v1"
     },
     "evaluation": {
@@ -40,7 +40,7 @@
       ],
       "properties": {
         "order": {
-          "description": "policies[] is already in evaluation order. The catalog sorts at publish time (priority DESC, updated_at DESC, id ASC); evaluators walk the array and the first policy whose src and dst both match decides.",
+          "description": "policies[] is already in evaluation order. The catalog sorts at publish time (priority DESC, deny before permit at equal priority, id ASC; ADR-028 section 2); evaluators walk the array and the first policy whose src and dst both match decides.",
           "const": "array_order_first_match"
         },
         "default": {
@@ -91,16 +91,16 @@
       "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"
     },
     "src_pattern": {
-      "description": "Who a policy applies to: user:<id>, email:<address>, agent:<id>, org:<role>, group:<name>, a *<suffix> wildcard, or *.",
+      "description": "Who a policy applies to: user:<id>, email:<address>, agent:<id>, org:<role>, group:<name>, harness:<harness_id> or harness:<kind> (ADR-029; evaluated only on harness command requests, and only with a harness-command dst or *), <scheme>:*, the *@<domain> email-domain form, or *. There is no general *<suffix> wildcard (ADR-028 section 5).",
       "type": "string",
-      "pattern": "^(\\*|\\*[^\\s]+|user:[^\\s]+|email:[^\\s]+|agent:[^\\s]+|org:[a-z_]+|group:[^\\s]+)$"
+      "pattern": "^(\\*|\\*@[^\\s@*]+|user:[^\\s]+|email:[^\\s]+|agent:[^\\s]+|org:[a-z_]+|group:[^\\s]+|harness:[^\\s]+)$"
     },
     "dst_pattern": {
-      "description": "What a policy applies to: tool:<name>, connector:<id>, capability:<name>, resource:<resource>, the legacy <action>:<resource> form, a *<suffix> wildcard, or *.",
+      "description": "What a policy applies to: tool:<name>, connector:<id>, capability:<name>, resource:<resource>, the legacy <action>:<resource> form, <scheme>:*, or *. There is no *<suffix> wildcard; a star anywhere else is a literal (ADR-028 section 5). The schemes shell:, skill:, path: and mcp: are reserved for harness commands (ADR-029): they are literals under kei.match/v1, are never generated as connector or authorize candidates, and are interpreted only by kei.harness-match/v1. For harness rendering, tool:<kind>.<name> also matches registered harness tools (built-ins, <kind>.skill.<name>, <kind>.mcp.<server>.<tool>); a permit with *, shell:* or the shell tool's tool: name is never rendered as a native shell allow (ADR-029 section 9.4). shell:<t1> <t2> ... is an argv-token prefix whose tokens are separated by single spaces; it is the only form that may contain whitespace.",
       "type": "string",
       "minLength": 1,
       "maxLength": 255,
-      "pattern": "^(\\*|\\*[^\\s]+|[a-z_]+:[^\\s]+)$"
+      "pattern": "^(\\*|shell:[^\\s]+( [^\\s]+)*|[a-z_]+:[^\\s]+)$"
     },
     "group": {
       "type": "object",
@@ -247,6 +247,7 @@
           "$ref": "#/$defs/dst_pattern"
         },
         "action": {
+          "description": "The policy's effect (ADR-028 section 3), kept under its legacy field name in v1.",
           "enum": [
             "permit",
             "deny"

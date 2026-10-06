@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
 )
+
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 const ContentType = "application/vnd.kei.policy-bundle.v1+json"
 const Issuer = "kei-policy-catalog"
@@ -36,6 +41,12 @@ type Identity struct {
 	ExpireTime   time.Time `json:"expire_time,omitempty"`
 }
 
+// Harness is one registered coding-agent harness (ADR-029 §2).
+type Harness struct {
+	AgentID string `json:"agent_id"`
+	Kind    string `json:"kind"`
+}
+
 type Payload struct {
 	Schema         string    `json:"schema"`
 	BundleID       string    `json:"bundle_id"`
@@ -56,6 +67,8 @@ type Payload struct {
 	PolicySet              json.RawMessage `json:"policy_set"`
 	AgentConnectorBindings json.RawMessage `json:"agent_connector_bindings"`
 	Identities             []Identity      `json:"identities,omitempty"`
+	Harnesses              []Harness       `json:"harnesses,omitempty"`
+	HarnessMatchSemantics  string          `json:"harness_match_semantics,omitempty"`
 }
 
 type Verified struct {
@@ -123,6 +136,9 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	if err := validatePolicyDialect(payload.PolicySet); err != nil {
 		return nil, err
 	}
+	if err := validateHarnesses(payload.Harnesses, payload.HarnessMatchSemantics); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBundleUnsupported, err)
+	}
 	digest := sha256.Sum256(bundleBytes)
 	return &Verified{Payload: payload, PayloadBytes: append([]byte(nil), bundleBytes...), Digest: fmt.Sprintf("sha256:%x", digest)}, nil
 }
@@ -154,6 +170,27 @@ func validatePolicyDialect(raw json.RawMessage) error {
 	}
 	if v.MatchSemantics != "kei.match/v1" || v.Evaluation.Order != "array_order_first_match" || v.Evaluation.Default != "deny" {
 		return ErrBundleUnsupported
+	}
+	return nil
+}
+
+func validateHarnesses(harnesses []Harness, semantics string) error {
+	if len(harnesses) == 0 && semantics == "" {
+		return nil
+	}
+	if semantics != "kei.harness-match/v1" {
+		return fmt.Errorf("harness_match_semantics must be %q", "kei.harness-match/v1")
+	}
+	for i, h := range harnesses {
+		if !harnessmatch.Kinds[h.Kind] {
+			return fmt.Errorf("harnesses[%d].kind %q is not a valid harness kind", i, h.Kind)
+		}
+		if !idPattern.MatchString(h.AgentID) {
+			return fmt.Errorf("harnesses[%d].agent_id %q is not a valid identifier", i, h.AgentID)
+		}
+		if harnessmatch.Kinds[h.AgentID] {
+			return fmt.Errorf("harnesses[%d].agent_id %q must not equal a harness kind value", i, h.AgentID)
+		}
 	}
 	return nil
 }
