@@ -139,6 +139,10 @@ func lifecycleRetryDelay(err error) (time.Duration, bool) {
 	if errors.As(err, &harnessErr) {
 		return throttleDelay(harnessErr.statusCode, harnessErr.retryAfter)
 	}
+	var auditErr *harnessAuditFlushHTTPError
+	if errors.As(err, &auditErr) {
+		return throttleDelay(auditErr.statusCode, auditErr.retryAfter)
+	}
 	return 0, false
 }
 
@@ -487,10 +491,14 @@ type Collector struct {
 	FlushClient       ABACFlushClient
 	LifecycleClient   LifecycleFlushClient
 	HarnessToolClient HarnessToolFlushClient
-	CredentialClient  CredentialFlushClient
-	batchSize         int
-	logger            *slog.Logger
-	open              func(name string) (*os.File, error)
+	// HarnessAuditClient ships harness_tool records to the audit log
+	// (POST /api/v1/runtime/audit:flush) in addition to HarnessToolClient's
+	// skill-tool-mappings ingest.
+	HarnessAuditClient HarnessAuditFlushClient
+	CredentialClient   CredentialFlushClient
+	batchSize          int
+	logger             *slog.Logger
+	open               func(name string) (*os.File, error)
 }
 
 func NewCollector(jsonlPath string, abac ABACFlushClient, batchSize int) *Collector {
@@ -759,6 +767,13 @@ func (c *Collector) flushBatch(ctx context.Context, b parsedBatch, skipped *skip
 		}
 		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassHarnessTool, "events_sent", len(b.harnessTool), "payload_bytes", len(payload))
 	}
+	if len(b.harnessTool) > 0 && c.HarnessAuditClient != nil {
+		n, err := c.HarnessAuditClient.FlushHarnessAudit(ctx, b.harnessTool)
+		if err != nil {
+			return len(b.decisions), err
+		}
+		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassHarnessTool, "route", "audit", "records_sent", len(b.harnessTool), "records_upserted", n)
+	}
 	if len(b.credential) > 0 && c.CredentialClient != nil {
 		payload, _ := json.Marshal(map[string][]json.RawMessage{"records": b.credential})
 		if _, err := c.CredentialClient.FlushCredential(ctx, b.credential); err != nil {
@@ -766,7 +781,7 @@ func (c *Collector) flushBatch(ctx context.Context, b parsedBatch, skipped *skip
 		}
 		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassCredential, "events_sent", len(b.credential), "payload_bytes", len(payload))
 	}
-	skipped.add(b, c.LifecycleClient != nil, c.HarnessToolClient != nil, c.CredentialClient != nil)
+	skipped.add(b, c.LifecycleClient != nil, c.HarnessToolClient != nil || c.HarnessAuditClient != nil, c.CredentialClient != nil)
 	return len(b.decisions), nil
 }
 

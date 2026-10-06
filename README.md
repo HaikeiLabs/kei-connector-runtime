@@ -147,6 +147,53 @@ position as `{segment, lines_sent}` in `<path>.state`, deletes a segment once
 every line in it is acknowledged, and migrates the older `<path>.offset` line
 count on first run. Flushes stay idempotent: the catalog dedupes on `span_id`.
 
+### Harness tool audit
+
+`kei-proxy hook <claude|codex|opencode> --harness <agent-id>` records each
+harness tool call as an `event_class: "harness_tool"` line. It appends to
+`KEI_PROXY_AUDIT` when set. Otherwise it appends to
+`$KEI_RUNTIME_STATE_DIR/audit/harness-tool.jsonl`, using the platform default
+state directory when that variable is unset. That directory is created `0700`
+and the spool files `0600`. The hook never blocks the harness: it always exits
+0, including when the spool cannot be written.
+
+The collector sends each `harness_tool` record to two places:
+
+- `POST /api/v1/runtime/harness-tool-events:batchCreate`, the
+  skill-tool-mappings ingest. It receives only `tool`, `skill`,
+  `harness_kind`, and `observed_at`.
+- `POST /api/v1/runtime/audit:flush`, which writes `abac.audit_records` and
+  shows in the console Audit Logs. Records follow the HP harness audit event
+  contract and are built field by field: `event_class`, `harness_agent_id`,
+  `harness_kind` (`claude|codex|opencode`, which the catalog maps to
+  `claude_code`, `codex`, and `opencode`), `tool`, `skill?`, `phase`,
+  `native_decision`, `args_digest`, `digest_key_id?`, `args_ciphertext?`,
+  `recipient_key_ids?`, `harness_session_id?`, `tool_use_id?`, and
+  `observed_at`. Raw tool input is never sent. `args_ciphertext` is passed
+  through unchanged; Kei cannot decrypt it (ADR-030). Batches hold at most 100
+  records. A record that is missing a required contract field is dropped
+  rather than left to block the spool.
+
+Both routes authenticate with `KEI_RUNTIME_TOKEN` and need
+`KEI_RUNTIME_CONTROL_PLANE_URL`. Delivery is at least once. The collector
+advances its `<path>.state` cursor only after every route has acknowledged a
+batch. A `429` waits for `Retry-After` (capped at 5 minutes); any other error,
+including other 4xx and 5xx responses, keeps the spool and retries with
+exponential backoff (1 second to 15 minutes, with jitter).
+
+There are two ways to run the collector, for example from the local heartbeat
+service (HAI-406). Both use the same spool default as the hook:
+
+- **Inside the daemon:** `kei-proxy serve` runs the collector in process, as
+  described under the `serve` command.
+- **Standalone:** `kei-proxy collector --poll [--poll-interval 1m]` runs until
+  SIGINT or SIGTERM. Run `kei-proxy collector` without `--poll` for one flush
+  pass, for example from a timer or after a heartbeat. `--jsonl <path>`
+  overrides the spool.
+
+Run one collector per spool. Don't run a standalone collector next to a
+`serve` daemon that already ships the same spool.
+
 ## Building
 
 The connector contract is a released **public** module
@@ -350,10 +397,12 @@ same-container OpenWebUI setup. See [docs/unix-socket.md](docs/unix-socket.md)
 for why the runtime uses a Unix socket and how to run the optional same-pod
 companion container.
 
-When `KEI_PROXY_AUDIT` is set, `serve` also owns the polling audit collector.
-It ships the existing bounded JSONL decision and lifecycle spool while running
-and makes one five-second bounded flush attempt during graceful shutdown.
-Failed records remain in the spool for the next start.
+`serve` also owns the polling audit collector. It ships `KEI_PROXY_AUDIT`
+when set, otherwise the harness-tool spool at
+`$KEI_RUNTIME_STATE_DIR/audit/harness-tool.jsonl` (see
+[Harness tool audit](#harness-tool-audit)). It flushes every minute while
+running and makes one five-second bounded flush attempt during graceful
+shutdown. Failed records remain in the spool for the next start.
 The health endpoint only confirms that the listener is running. Readiness is
 `503` until both `KEI_RUNTIME_TOKEN` and `KEI_RUNTIME_CONTROL_PLANE_URL` are
 configured; after provisioning, verify with:

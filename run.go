@@ -106,9 +106,7 @@ func runHook(args []string) int {
 	return hooks.Run(args, os.Stdin, os.Stdout, os.Stderr, hooks.Config{
 		RuntimeStateDir: cfg.RuntimeStateDir,
 		AuditCrypto:     auditProv,
-		AppendAudit: func(record []byte) error {
-			return keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, record)
-		},
+		AppendAudit:     hooks.SpoolAppender(cfg.AuditPath, cfg.RuntimeStateDir, cfg.AuditMaxBytes),
 	})
 }
 
@@ -220,7 +218,9 @@ Environment:
   KEI_CREDENTIAL_SYNC_KEY_ID sync recipient key identifier
   KEI_CREDENTIAL_SYNC_PRIVATE_KEY base64 X25519 private key for sync
   KEI_PROXY_REGISTRY        tool->service registry path (default /data/config/tools.yaml)
-  KEI_PROXY_AUDIT           audit JSONL file path (authorize appends, collector ships)
+  KEI_PROXY_AUDIT           audit JSONL file path (authorize appends, collector ships; when
+                            unset, hooks append to and the collector ships
+                            $KEI_RUNTIME_STATE_DIR/audit/harness-tool.jsonl)
   KEI_PROXY_AUDIT_MAX_BYTES total audit spool cap in bytes (default 104857600, 100 MiB)
   KEI_RUNTIME_SOCKET_PATH   local HTTP Unix socket (serve; default platform-dependent, see docs/unix-socket.md)
   KEI_RUNTIME_STATE_DIR     protected policy bundle state directory (default: macOS
