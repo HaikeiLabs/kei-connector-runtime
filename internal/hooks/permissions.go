@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -34,11 +35,25 @@ type permissionEvent struct {
 
 // Run dispatches the report-only permission hook CLI. Every harness-facing
 // invocation returns zero, including malformed input and spool failures.
-func Run(args []string, stdin io.Reader, stdout io.Writer, cfg Config) int {
-	if len(args) == 0 || args[0] != "report" {
-		return 2
+//
+// It accepts two forms:
+//   - hook report <kind> --harness <id>   (kept for backward compat)
+//   - hook <kind> --harness <id>          (rendered hook contract, see HookSpec)
+//
+// For unrecognised subcommands, it writes a one-line diagnostic to stderr
+// and still returns zero so the harness never blocks on a hook invocation.
+func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, cfg Config) int {
+	if len(args) == 0 {
+		return 0
 	}
-	return ReportPermissions(args[1:], stdin, stdout, cfg)
+	if args[0] == "report" {
+		return ReportPermissions(args[1:], stdin, stdout, cfg)
+	}
+	if validHarnessKind(args[0]) {
+		return ReportPermissions(args, stdin, stdout, cfg)
+	}
+	fmt.Fprintf(stderr, "kei-proxy hook: unknown subcommand %q\n", args[0])
+	return 0
 }
 
 // ReportPermissions records the harness's native tool decision without
