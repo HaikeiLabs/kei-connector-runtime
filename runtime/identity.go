@@ -189,6 +189,17 @@ const (
 	ToolManifestSupportedHeader = "X-Kei-Supported-Tool-Manifest-Schemas"
 )
 
+func toolManifestMediaType(schema string) string {
+	switch schema {
+	case ToolManifestSchemaV2:
+		return "application/vnd.kei.tool-manifest.v2+json"
+	case ToolManifestSchemaV3:
+		return "application/vnd.kei.tool-manifest.v3+json"
+	default:
+		return ""
+	}
+}
+
 // ToolSyncResponse is the catalog response for PUT /api/v1/runtime/tools.
 type ToolSyncResponse struct {
 	Added     int `json:"added"`
@@ -214,7 +225,7 @@ func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *T
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(ToolManifestProtocolHeader, manifest.Schema)
+	req.Header.Set("Accept", "application/json, "+toolManifestMediaType(manifest.Schema))
 	response, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("tool sync request failed: %w", err)
@@ -235,10 +246,10 @@ func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *T
 	if supportedHeader != "" && !containsManifestSchema(supportedHeader, manifest.Schema) {
 		return fmt.Errorf("tool sync protocol is not in the catalog's supported schemas")
 	}
-	if supportedHeader != "" && ack != manifest.Schema {
+	if supportedHeader != "" && (ack != manifest.Schema || response.Header.Get("Content-Type") != "application/json") {
 		return fmt.Errorf("tool sync protocol was advertised but not explicitly selected")
 	}
-	if manifest.Schema == ToolManifestSchemaV3 && (ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema)) {
+	if manifest.Schema == ToolManifestSchemaV3 && (ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema) || response.Header.Get("Content-Type") != "application/json") {
 		return fmt.Errorf("tool sync v3 protocol was not explicitly negotiated")
 	}
 	return nil

@@ -174,8 +174,8 @@ func TestSyncToolsSendsPUTAndParsesResponse(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Fatalf("Content-Type = %q", got)
 		}
-		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV2 {
-			t.Fatalf("protocol header = %q, want v2", got)
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v2+json" {
+			t.Fatalf("Accept = %q, want v2 media type", got)
 		}
 		var body ToolManifest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -206,8 +206,8 @@ func TestSyncToolsSendsPUTAndParsesResponse(t *testing.T) {
 
 func TestSyncToolsV3RequiresExplicitProtocolAcknowledgment(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV3 {
-			t.Fatalf("protocol header = %q, want v3", got)
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v3+json" {
+			t.Fatalf("Accept = %q, want v3 media type", got)
 		}
 		w.WriteHeader(http.StatusOK) // legacy endpoint did not negotiate v3
 	}))
@@ -224,8 +224,8 @@ func TestSyncToolsV3RequiresExplicitProtocolAcknowledgment(t *testing.T) {
 
 func TestSyncToolsPreservesLegacyV2PeerCompatibility(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV2 {
-			t.Fatalf("protocol proposal = %q", got)
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v2+json" {
+			t.Fatalf("Accept = %q", got)
 		}
 		w.WriteHeader(http.StatusOK) // pre-negotiation v2 catalog
 	}))
@@ -239,9 +239,10 @@ func TestSyncToolsPreservesLegacyV2PeerCompatibility(t *testing.T) {
 
 func TestSyncToolsAcceptsNegotiatedV3(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV3 {
-			t.Fatalf("protocol proposal = %q", got)
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v3+json" {
+			t.Fatalf("Accept = %q", got)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV3)
 		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV2+", "+ToolManifestSchemaV3)
 		w.WriteHeader(http.StatusOK)

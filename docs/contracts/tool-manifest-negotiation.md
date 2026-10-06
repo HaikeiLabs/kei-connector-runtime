@@ -3,11 +3,14 @@
 `PUT /api/v1/runtime/tools` uses explicit negotiation headers in addition to
 its schema-tagged JSON body:
 
-- Request `X-Kei-Tool-Manifest-Schema` proposes exactly
-  `kei.tool-manifest/v2` or `kei.tool-manifest/v3`.
+- Request `Accept` includes `application/json` for the sync-count response and
+  exactly one versioned protocol media type:
+  `application/vnd.kei.tool-manifest.v2+json` or
+  `application/vnd.kei.tool-manifest.v3+json`.
 - The catalog returns `X-Kei-Supported-Tool-Manifest-Schemas` listing the
   versions it supports and, after successful sync, echoes the selected schema
-  in `X-Kei-Tool-Manifest-Schema`.
+  in `X-Kei-Tool-Manifest-Schema`. The response body remains `application/json`
+  with sync counts.
 - The request header and JSON `schema` must match. A mismatch is rejected
   before writes. Unknown proposals receive HTTP 406 with supported versions;
   v3 without an explicit proposal receives HTTP 400.
