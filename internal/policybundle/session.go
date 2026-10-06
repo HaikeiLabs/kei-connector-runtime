@@ -38,14 +38,21 @@ type Memberships interface {
 // BundleMemberships returns the memberships carried by the bundle, or nil
 // when the bundle does not carry them (mode=online or no identities).
 func BundleMemberships(v *Verified) Memberships {
-	if len(v.Payload.Identities) == 0 {
+	return BundleMembershipsAt(v, time.Now())
+}
+
+// BundleMembershipsAt binds identity expiry checks to the evaluator's clock so
+// snapshot freshness and expiry can be tested deterministically.
+func BundleMembershipsAt(v *Verified, now time.Time) Memberships {
+	if v == nil || v.Payload.SubjectResolution.Mode != "bundle" || len(v.Payload.Identities) == 0 {
 		return nil
 	}
-	return &bundleMemberships{identities: v.Payload.Identities}
+	return &bundleMemberships{identities: v.Payload.Identities, now: now}
 }
 
 type bundleMemberships struct {
 	identities []Identity
+	now        time.Time
 }
 
 func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, granted, known bool) {
@@ -53,7 +60,7 @@ func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, grant
 		if id.UserID != userID {
 			continue
 		}
-		if !id.ExpireTime.IsZero() && !time.Now().Before(id.ExpireTime) {
+		if !id.ExpireTime.IsZero() && !m.now.Before(id.ExpireTime) {
 			return nil, nil, false, false
 		}
 		known = true
@@ -61,6 +68,27 @@ func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, grant
 		return id.Groups, id.OrgRoles, granted, known
 	}
 	return nil, nil, false, false
+}
+
+// LookupIdentity resolves an external session key against the verified
+// bundle's ADR-034 identities table. Duplicate matches and expired entries are
+// rejected rather than allowing array order to select an identity.
+func (v *Verified) LookupIdentity(source, externalID string, now time.Time) (Identity, bool) {
+	if v == nil || v.Payload.SubjectResolution.Mode != "bundle" || source == "" || externalID == "" {
+		return Identity{}, false
+	}
+	var found Identity
+	matched := false
+	for _, id := range v.Payload.Identities {
+		if id.Source != source || id.ExternalID != externalID {
+			continue
+		}
+		if matched || (!id.ExpireTime.IsZero() && !now.Before(id.ExpireTime)) {
+			return Identity{}, false
+		}
+		found, matched = id, true
+	}
+	return found, matched
 }
 
 // EvaluateSession decides a call with the in-memory session subject and no

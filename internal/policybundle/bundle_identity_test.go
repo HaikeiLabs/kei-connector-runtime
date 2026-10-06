@@ -28,11 +28,6 @@ func TestBundleMembershipsReturnsNilForEmptyIdentities(t *testing.T) {
 
 func TestBundleMembershipsLookup(t *testing.T) {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatal(r)
-		}
-	}()
 
 	cases := []struct {
 		name     string
@@ -144,7 +139,7 @@ func TestBundleMembershipsLookup(t *testing.T) {
 		Identities: identities,
 	}}
 
-	m := BundleMemberships(v)
+	m := BundleMembershipsAt(v, now)
 	if m == nil {
 		t.Fatal("expected non-nil memberships for mode=bundle with identities")
 	}
@@ -165,6 +160,40 @@ func TestBundleMembershipsLookup(t *testing.T) {
 				t.Errorf("known = %v, want %v", known, tc.expected.known)
 			}
 		})
+	}
+}
+
+func TestLookupIdentityUsesBundleKeysAndFailsClosed(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	v := &Verified{Payload: Payload{
+		SubjectResolution: struct {
+			Mode            string `json:"mode"`
+			MaxCacheSeconds int    `json:"max_cache_seconds"`
+		}{Mode: "bundle", MaxCacheSeconds: 60},
+		Identities: []Identity{
+			{Source: "discord", ExternalID: "alice", UserID: "u-alice", Status: SubjectLinked},
+			{Source: "discord", ExternalID: "pending", UserID: "u-pending", Status: SubjectPending},
+			{Source: "discord", ExternalID: "expired", UserID: "u-expired", Status: SubjectLinked, ExpireTime: now},
+		},
+	}}
+	if got, ok := v.LookupIdentity("discord", "alice", now); !ok || got.UserID != "u-alice" || got.Status != SubjectLinked {
+		t.Fatalf("linked identity = %+v, %v", got, ok)
+	}
+	if got, ok := v.LookupIdentity("discord", "pending", now); !ok || got.Status != SubjectPending {
+		t.Fatalf("pending identity = %+v, %v", got, ok)
+	}
+	for _, key := range [][2]string{{"discord", "missing"}, {"slack", "alice"}, {"discord", "expired"}, {"", "alice"}, {"discord", ""}} {
+		if got, ok := v.LookupIdentity(key[0], key[1], now); ok {
+			t.Errorf("LookupIdentity(%q,%q) = %+v, true; want fail closed", key[0], key[1], got)
+		}
+	}
+	v.Payload.Identities = append(v.Payload.Identities, Identity{Source: "discord", ExternalID: "alice", UserID: "u-substitution", Status: SubjectLinked})
+	if got, ok := v.LookupIdentity("discord", "alice", now); ok {
+		t.Fatalf("duplicate identity mapping selected %+v", got)
+	}
+	v.Payload.SubjectResolution.Mode = "online"
+	if got, ok := v.LookupIdentity("discord", "pending", now); ok {
+		t.Fatalf("online mode returned identity %+v", got)
 	}
 }
 

@@ -196,6 +196,49 @@ func TestSessionLifecycle(t *testing.T) {
 	want("subject_revoked")
 }
 
+func TestReconcileBundleSessionRevokesWhenIdentitySnapshotDropsSubject(t *testing.T) {
+	useValidator(t, schemaValidator(t))
+	bundle := testBundle(t, testNow, 42, evaluatorPolicies, nil)
+	var doc map[string]any
+	if err := json.Unmarshal(bundle, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["subject_resolution"] = map[string]any{"mode": "bundle", "max_cache_seconds": 60}
+	doc["identities"] = []any{map[string]any{
+		"source": "discord", "external_id": "discord-user", "user_id": "u-alice", "status": "linked",
+	}}
+	bundle, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := NewSessions()
+	if err := sessions.Start(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-user", Status: StatusLinked}); err != nil {
+		t.Fatal(err)
+	}
+	e, store, _ := newTestEvaluator(t, testNow, bundle, sessions)
+	e.ReconcileSession()
+	if got, _ := sessions.Current(); got.Status != StatusLinked {
+		t.Fatalf("current snapshot revoked linked identity: %s", got.Status)
+	}
+
+	doc["bundle_version"] = 43
+	doc["issued_at"] = testNow.Add(time.Second).Format(time.RFC3339)
+	doc["not_after"] = testNow.Add(12 * time.Hour).Format(time.RFC3339)
+	doc["identities"] = []any{}
+	bundle, err = json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, testInstallation, testOrg, testWorkspace, testNow.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	e.now = func() time.Time { return testNow.Add(time.Second) }
+	e.ReconcileSession()
+	if got, _ := sessions.Current(); got.Status != StatusRevoked {
+		t.Fatalf("identity removed from refreshed snapshot left session %s", got.Status)
+	}
+}
+
 func mustActivate(t *testing.T, s *policybundle.Store, bundle []byte) {
 	t.Helper()
 	if _, err := s.Activate(bundle, testInstallation, testOrg, testWorkspace, testNow); err != nil {

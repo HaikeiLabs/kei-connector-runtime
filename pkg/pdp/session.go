@@ -26,6 +26,8 @@ const (
 type Subject struct {
 	UserID     string
 	Email      string
+	Source     string
+	ExternalID string
 	Status     Status
 	Enrollment json.RawMessage
 	Token      string

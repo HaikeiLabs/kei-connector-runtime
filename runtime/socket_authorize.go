@@ -294,7 +294,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "cli token verification failed: "+err.Error())
 			return
 		}
-		sub = pdp.Subject{UserID: userID, Status: pdp.StatusLinked, Token: token}
+		sub = pdp.Subject{UserID: userID, Status: pdp.StatusLinked, Source: "cli", Token: token}
 	default:
 		if req.ExternalID == "" {
 			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "external_id is required for source "+req.Source)
@@ -338,21 +338,16 @@ func (l *LocalPDP) loadCredentials(ctx context.Context, sub pdp.Subject) {
 // the identity's status (unlinked, pending, cross_workspace, revoked). An
 // unknown or expired identity yields an unlinked subject.
 func resolveBundleSubject(e *pdp.Evaluator, source, externalID string) pdp.Subject {
-	for _, id := range e.BundleIdentities() {
-		if id.Source != source || id.ExternalID != externalID {
-			continue
-		}
-		if !id.ExpireTime.IsZero() && !time.Now().Before(id.ExpireTime) {
-			break
-		}
-		sub := pdp.Subject{UserID: id.UserID, Status: pdp.Status(id.Status)}
-		if sub.Status == pdp.StatusLinked {
-			// The identity's ES256 subject token is the I11 subject evidence.
-			sub.Token = id.SubjectToken
-		}
-		return sub
+	id, ok := e.ResolveBundleIdentity(source, externalID)
+	if !ok {
+		return pdp.Subject{Status: pdp.StatusUnlinked}
 	}
-	return pdp.Subject{Status: pdp.StatusUnlinked}
+	sub := pdp.Subject{UserID: id.UserID, Status: pdp.Status(id.Status), Source: source, ExternalID: externalID}
+	if sub.Status == pdp.StatusLinked {
+		// The identity's ES256 subject token is the I11 subject evidence.
+		sub.Token = id.SubjectToken
+	}
+	return sub
 }
 
 type socketSessionResponse struct {

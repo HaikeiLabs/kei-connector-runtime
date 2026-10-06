@@ -211,11 +211,22 @@ func (e *Evaluator) ReconcileSession() {
 	if err != nil {
 		return
 	}
-	m := e.memberships(v)
-	if m == nil {
+	if v.Payload.SubjectResolution.Mode == "bundle" && current.Source != "" && current.ExternalID != "" {
+		id, found := v.LookupIdentity(current.Source, current.ExternalID, e.now().UTC())
+		if !found || id.UserID != current.UserID || id.Status != policybundle.SubjectLinked {
+			e.sessions.revoke()
+		}
 		return
 	}
-	if _, _, granted, known := m.Lookup(current.UserID); known && !granted {
+	m := e.memberships(v)
+	if m == nil {
+		if v.Payload.SubjectResolution.Mode == "bundle" {
+			e.sessions.revoke()
+		}
+		return
+	}
+	_, _, granted, known := m.Lookup(current.UserID)
+	if (v.Payload.SubjectResolution.Mode == "bundle" && (!known || !granted)) || (known && !granted) {
 		e.sessions.revoke()
 	}
 }
@@ -225,6 +236,17 @@ func (e *Evaluator) RevokeSession() {
 	if e.sessions != nil {
 		e.sessions.revoke()
 	}
+}
+
+// ResolveBundleIdentity looks up one external identity in the current verified
+// local bundle. It performs no control-plane request and rejects stale bundle
+// state, non-bundle mode, duplicate matches, and expired identities.
+func (e *Evaluator) ResolveBundleIdentity(source, externalID string) (policybundle.Identity, bool) {
+	v, _, err := e.check()
+	if err != nil {
+		return policybundle.Identity{}, false
+	}
+	return v.LookupIdentity(source, externalID, e.now().UTC())
 }
 
 // BundleIdentities returns the identities from the current verified bundle,
