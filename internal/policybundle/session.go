@@ -167,8 +167,11 @@ func (v *Verified) EvaluateSession(call Call, subject *SessionSubject, members M
 // EvaluateSessionAt adds the v2 subject snapshot freshness gate while keeping
 // v1 decision semantics unchanged.
 func (v *Verified) EvaluateSessionAt(call Call, subject *SessionSubject, members Memberships, now time.Time) Decision {
-	if v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(now) {
-		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
+	if v.Payload.Schema == "kei.policy-bundle/v2" {
+		if !v.SubjectSnapshotFresh(now) {
+			return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
+		}
+		return Decision{Outcome: "deny", ReasonCode: "preflight_required", Reason: "v2 connector operations require complete-plan preflight"}
 	}
 	call.UserID, call.Email = "", ""
 	var pre Decision

@@ -1,0 +1,273 @@
+package policybundle
+
+import (
+	"encoding/json"
+	"sort"
+	"time"
+)
+
+// Operation is one exact planner-produced connector operation. Resource
+// identity remains structured; no field is parsed from or flattened into another.
+type Operation struct {
+	ConnectorID        string
+	Capability         string
+	Action             string
+	ResourceType       string
+	ResourceID         string
+	ResourceParent     string
+	ResourceParentType string
+}
+
+type V2ResourceType struct {
+	Type       string `json:"type"`
+	ParentType string `json:"parent_type,omitempty"`
+}
+
+type V2Tool struct {
+	Name           string `json:"name"`
+	Source         string `json:"source"`
+	OperationClass string `json:"operation_class"`
+	Route          struct {
+		ConnectorBinding *struct {
+			ConnectorID string `json:"connector_id"`
+		} `json:"connector_binding,omitempty"`
+		HarnessExecutor *json.RawMessage `json:"harness_executor,omitempty"`
+	} `json:"route"`
+	RequiredCapabilities []string         `json:"required_capabilities,omitempty"`
+	ResourceTypes        []V2ResourceType `json:"resource_types,omitempty"`
+}
+
+type v2Check struct {
+	PolicyID string `json:"policy_id"`
+	Name     string `json:"name"`
+	Effect   string `json:"effect"`
+	Priority int    `json:"priority"`
+	Scope    struct {
+		OrgID       *string `json:"org_id"`
+		WorkspaceID *string `json:"workspace_id"`
+		AgentID     *string `json:"agent_id"`
+	} `json:"scope"`
+	Selector map[string]string `json:"selector"`
+}
+
+type v2PolicySet struct {
+	Schema         string `json:"schema"`
+	OrgID          string `json:"org_id"`
+	WorkspaceID    string `json:"workspace_id"`
+	MatchSemantics string `json:"match_semantics"`
+	Evaluation     struct {
+		Precedence []string `json:"precedence"`
+		Checks     string   `json:"checks"`
+		Default    string   `json:"default"`
+	} `json:"evaluation"`
+	Tools        []V2Tool  `json:"tools"`
+	Checks       []v2Check `json:"checks"`
+	ToolPolicies []v2Check `json:"tool_policies"`
+}
+
+// EvaluateV2Plan locally AND-authorizes a complete exact operation plan for a
+// registered connector tool. Callers must supply planner-produced operations;
+// caller capability declarations are never used as authority.
+func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubject, ops []Operation, now time.Time) Decision {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
+	}
+	if subject == nil {
+		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "no session subject"}
+	}
+	if decision, denied := subjectGate(subject); denied {
+		return decision
+	}
+	var identity Identity
+	var known bool
+	if subject.Source == "cli" && subject.ExternalID == "" {
+		identity, known = v.LookupLinkedUser(subject.UserID, now)
+	} else {
+		identity, known = v.LookupIdentity(subject.Source, subject.ExternalID, now)
+	}
+	if !known || identity.UserID != subject.UserID {
+		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session identity is not present in the fresh bundle snapshot"}
+	}
+	if identity.Status != SubjectLinked {
+		return Decision{Outcome: "deny", ReasonCode: statusReasonCode(identity.Status), Reason: "the bundle snapshot does not grant the session identity"}
+	}
+	var set v2PolicySet
+	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
+		return invalidDecision()
+	}
+	var tool *V2Tool
+	for i := range set.Tools {
+		if set.Tools[i].Name == toolName {
+			tool = &set.Tools[i]
+			break
+		}
+	}
+	if tool == nil || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" {
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector tool is not registered in the policy bundle"}
+	}
+	if agentID == "" {
+		return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "agent is not assigned to this installation"}
+	}
+	connectorID := tool.Route.ConnectorBinding.ConnectorID
+	if !v.agentBound(agentID, connectorID, tool.RequiredCapabilities) {
+		return Decision{Outcome: "deny", ReasonCode: "agent_not_bound_to_connector", Reason: "agent binding does not cover the tool's required capabilities"}
+	}
+	if len(ops) == 0 || len(tool.RequiredCapabilities) == 0 {
+		return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan is empty"}
+	}
+	covered := make(map[string]bool, len(tool.RequiredCapabilities))
+	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
+	for _, op := range ops {
+		if op.ConnectorID != connectorID || op.Capability == "" || op.Action == "" {
+			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan contains a malformed operation"}
+		}
+		if !containsExact(tool.RequiredCapabilities, op.Capability) || !v.operationResourceRegistered(tool, op) {
+			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation does not match the tool registration"}
+		}
+		covered[op.Capability] = true
+		request := map[string]string{"source": tool.Source, "connector_id": connectorID, "tool": tool.Name, "capability": op.Capability}
+		if op.ResourceType != "" {
+			request["resource_type"] = op.ResourceType
+		}
+		if op.ResourceID != "" {
+			request["resource_id"] = op.ResourceID
+		}
+		if op.ResourceParent != "" {
+			request["resource_parent"] = op.ResourceParent
+		}
+		decision := evaluateV2Check(set.Checks, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+		if decision.Outcome != "allow" {
+			return decision
+		}
+	}
+	for _, required := range tool.RequiredCapabilities {
+		if !covered[required] {
+			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan omits a required capability"}
+		}
+	}
+	return Decision{Outcome: "allow", ReasonCode: "policy_permit"}
+}
+
+func (v *Verified) agentBound(agentID, connectorID string, required []string) bool {
+	var bindings []struct {
+		AgentID      string   `json:"agent_id"`
+		ConnectorID  string   `json:"connector_id"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if json.Unmarshal(v.Payload.AgentConnectorBindings, &bindings) != nil {
+		return false
+	}
+	for _, binding := range bindings {
+		if binding.AgentID != agentID || binding.ConnectorID != connectorID {
+			continue
+		}
+		for _, capability := range required {
+			if !containsExact(binding.Capabilities, capability) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool {
+	if len(tool.ResourceTypes) == 0 {
+		return op.ResourceType == "" && op.ResourceID == "" && op.ResourceParent == "" && op.ResourceParentType == ""
+	}
+	for _, rt := range tool.ResourceTypes {
+		if rt.Type == op.ResourceType && rt.ParentType == op.ResourceParentType {
+			if rt.ParentType == "" && (op.ResourceParent != "" || op.ResourceParentType != "") {
+				continue
+			}
+			if rt.ParentType != "" && (op.ResourceParent == "" || op.ResourceParentType != rt.ParentType) {
+				continue
+			}
+			return op.ResourceID != ""
+		}
+	}
+	return false
+}
+
+func evaluateV2Check(checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) Decision {
+	matching := make([]v2Check, 0, len(checks))
+	call := Call{AgentID: agentID, UserID: subject.UserID, Email: subject.Email}
+	for _, check := range checks {
+		if check.Effect != "permit" && check.Effect != "deny" || !v2ScopeMatches(check.Scope, agentID, orgID, workspaceID) {
+			continue
+		}
+		if !srcMatch(check.Selector["source_principal"], call, groups, roles) || !v2SelectorMatches(check.Selector, request) {
+			continue
+		}
+		matching = append(matching, check)
+	}
+	if len(matching) == 0 {
+		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no policy check matched the operation"}
+	}
+	sort.Slice(matching, func(i, j int) bool {
+		if matching[i].Priority != matching[j].Priority {
+			return matching[i].Priority > matching[j].Priority
+		}
+		if matching[i].Effect != matching[j].Effect {
+			return matching[i].Effect == "deny"
+		}
+		return matching[i].PolicyID < matching[j].PolicyID
+	})
+	winner := matching[0]
+	if winner.Effect == "deny" {
+		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}
+	}
+	return Decision{Outcome: "allow", PolicyID: winner.PolicyID}
+}
+
+func v2ScopeMatches(scope struct {
+	OrgID       *string `json:"org_id"`
+	WorkspaceID *string `json:"workspace_id"`
+	AgentID     *string `json:"agent_id"`
+}, agentID, orgID, workspaceID string) bool {
+	return (scope.OrgID == nil || *scope.OrgID == orgID) && (scope.WorkspaceID == nil || *scope.WorkspaceID == workspaceID) && (scope.AgentID == nil || *scope.AgentID == agentID)
+}
+
+func v2SelectorMatches(selector map[string]string, request map[string]string) bool {
+	for dimension, expected := range selector {
+		if dimension == "source_principal" {
+			continue
+		}
+		actual, ok := request[dimension]
+		if !ok || expected == "" || (expected != "*" && expected != actual) {
+			return false
+		}
+	}
+	return true
+}
+
+func membershipValues(identities []Identity, userID string, now time.Time) (groups, roles []string) {
+	groupSet, roleSet := map[string]bool{}, map[string]bool{}
+	for _, identity := range identities {
+		if identity.UserID != userID || identity.Status != SubjectLinked || (!identity.ExpireTime.IsZero() && !now.Before(identity.ExpireTime)) {
+			continue
+		}
+		for _, group := range identity.Groups {
+			groupSet[group] = true
+		}
+		for _, role := range identity.OrgRoles {
+			roleSet[role] = true
+		}
+	}
+	for group := range groupSet {
+		groups = append(groups, group)
+	}
+	for role := range roleSet {
+		roles = append(roles, role)
+	}
+	return groups, roles
+}
+
+func containsExact(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

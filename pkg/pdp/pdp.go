@@ -197,6 +197,25 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 	return HarnessResult{Outcome: outcome, PolicyID: policyID, Reason: reason}, nil
 }
 
+// AuthorizeV2Plan revalidates the exact current session and evaluates the
+// complete planner-produced operation set against a fresh local v2 bundle.
+func (e *Evaluator) AuthorizeV2Plan(installationID, subjectID, source, externalID, agentID, tool string, ops []policybundle.Operation) (string, int64, bool, error) {
+	if installationID != e.aud.InstallationID || subjectID == "" || agentID == "" || tool == "" || len(ops) == 0 || e.sessions == nil {
+		return "", 0, false, nil
+	}
+	current, ok := e.sessions.Current()
+	if !ok || current.UserID != subjectID || current.Source != source || current.ExternalID != externalID || current.Status != StatusLinked {
+		return "", 0, false, nil
+	}
+	v, _, err := e.check()
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" {
+		return "", 0, false, err
+	}
+	subject := &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+	decision := v.EvaluateV2Plan(tool, agentID, subject, ops, e.now().UTC())
+	return v.Digest, v.Payload.BundleVersion, decision.Outcome == "allow", nil
+}
+
 // ReconcileSession ends the session of a subject the active bundle no longer
 // grants (ADR-026 G0: revocation takes effect at the next refresh). The
 // refresher calls it after every refresh.
