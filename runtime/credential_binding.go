@@ -26,7 +26,7 @@ func (c *credentialBindingClient) Resolve(ctx context.Context, runtimeToken, use
 	if runtimeToken == "" {
 		return nil, fmt.Errorf("runtime token is required")
 	}
-	endpoint := c.baseURL + "/api/v1/runtime/credential-bindings/" + url.PathEscape(userID) + "/" + url.PathEscape(service)
+	endpoint := c.baseURL + "/api/v1/runtime/credential-bindings/" + url.PathEscape(userID) + "/services/" + url.PathEscape(service)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build credential binding request: %w", err)

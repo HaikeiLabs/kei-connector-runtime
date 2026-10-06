@@ -135,7 +135,7 @@ func (c *runtimeClient) Heartbeat(ctx context.Context, token string, report Hear
 	if err != nil {
 		return fmt.Errorf("encode runtime heartbeat: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/runtime/heartbeat", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/runtime:heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build runtime heartbeat: %w", err)
 	}

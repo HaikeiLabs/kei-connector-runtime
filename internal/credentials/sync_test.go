@@ -80,7 +80,7 @@ func newSyncControlPlane(t *testing.T, keyID, sealed, secretRef string) (*httpte
 	var ackBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runtime/credential-delivery/claim":
+		case "/api/v1/runtime/credential-delivery:claim":
 			_ = json.NewEncoder(w).Encode(claimResponse{
 				Delivery: &pendingDelivery{
 					OperationID: "op-1", RecipientID: "rec-1",
@@ -89,7 +89,7 @@ func newSyncControlPlane(t *testing.T, keyID, sealed, secretRef string) (*httpte
 					SealedPayload: sealed, RecipientKeyID: keyID, IdempotencyKey: "idem-1",
 				},
 			})
-		case "/api/v1/runtime/credential-delivery/ack":
+		case "/api/v1/runtime/credential-delivery:ack":
 			b, _ := io.ReadAll(r.Body)
 			ackBody = b
 			w.WriteHeader(http.StatusOK)

@@ -29,7 +29,7 @@ func newDeliveryClient(baseURL string, timeout time.Duration) deliveryClient {
 }
 
 func (c *httpDeliveryClient) ClaimDelivery(ctx context.Context, token string, req claimRequest) (*claimResponse, error) {
-	endpoint := c.baseURL + "/api/v1/runtime/credential-delivery/claim"
+	endpoint := c.baseURL + "/api/v1/runtime/credential-delivery:claim"
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -63,7 +63,7 @@ func (c *httpDeliveryClient) ClaimDelivery(ctx context.Context, token string, re
 }
 
 func (c *httpDeliveryClient) AcknowledgeDelivery(ctx context.Context, token string, req ackRequest) error {
-	endpoint := c.baseURL + "/api/v1/runtime/credential-delivery/ack"
+	endpoint := c.baseURL + "/api/v1/runtime/credential-delivery:ack"
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)

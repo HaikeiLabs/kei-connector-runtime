@@ -29,7 +29,7 @@ func TestRunAuthorizeNeverCallsCatalogDecisionEndpoint(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
 			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "installation-1", OrgID: "org-1", WorkspaceID: &workspace, Platform: "discord", Status: "active", BindingStatus: "verified"})
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -71,7 +71,7 @@ func TestRunAuthorizeNilWorkspaceIsFatal(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
 			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "installation-1", OrgID: "org-1", Platform: "discord", Status: "active", BindingStatus: "verified"})
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)

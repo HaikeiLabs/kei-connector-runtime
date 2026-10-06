@@ -11,7 +11,7 @@ import (
 
 func TestCredentialBindingClientResolvesWithRuntimeToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/api/v1/runtime/credential-bindings/user%2F1/github" {
+		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/api/v1/runtime/credential-bindings/user%2F1/services/github" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer runtime-token" {

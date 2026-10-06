@@ -22,7 +22,7 @@ func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
 			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace, Platform: "cli", Status: "active", BindingStatus: "verified"})
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/v1/runtime/subject-attributes:resolve":
 			subjectCalls++
@@ -73,7 +73,7 @@ func TestAuthorizeResolvesSubjectAtCatalogNotControlPlane(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
 			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace, Platform: "discord", Status: "active", BindingStatus: "verified"})
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/v1/runtime/subject-attributes:resolve":
 			t.Errorf("subject resolution unexpectedly used control-plane URL")
@@ -140,7 +140,7 @@ func TestAuthorizeUsesPersistedBundleAndOnlineSubjectForUserDefault(t *testing.T
 		switch r.URL.Path {
 		case "/api/v1/runtime/whoami":
 			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace, Platform: "discord", Status: "active", BindingStatus: "verified"})
-		case "/api/v1/runtime/heartbeat":
+		case "/api/v1/runtime:heartbeat":
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/v1/runtime/subject-attributes:resolve":
 			subjectCalls++

@@ -70,7 +70,7 @@ func ClassifyHeartbeatTransportError(err error) HeartbeatOutcome {
 	return HeartbeatCatalogUnreachable
 }
 
-// HeartbeatReport is the POST /api/v1/runtime/heartbeat payload.
+// HeartbeatReport is the POST /api/v1/runtime:heartbeat payload.
 type HeartbeatReport struct {
 	RuntimeVersion   string                     `json:"runtime_version"`
 	SchemaVersion    int                        `json:"schema_version,omitempty"`

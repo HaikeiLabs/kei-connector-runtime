@@ -377,7 +377,7 @@ not add an agent-ID environment variable to a harness. A supervised harness
 reads its agent from the heartbeat `identity` event below.
 
 `kei-proxy runtime heartbeat` reports that this runtime installation is
-connected to kei-policy-catalog (`POST /api/v1/runtime/heartbeat`). It is the
+connected to kei-policy-catalog (`POST /api/v1/runtime:heartbeat`). It is the
 runtime-to-catalog **liveness** leg; a harness-local `/healthz` or `whoami` is
 readiness only. The installation, org, and workspace come only from the token
 via `whoami`. The heartbeat body never carries identity, credentials, provider

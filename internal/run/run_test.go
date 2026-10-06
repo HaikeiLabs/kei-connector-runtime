@@ -319,7 +319,7 @@ func TestHTTPCredentialBindingClientResolves(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			t.Fatalf("bad auth: %s", r.Header.Get("Authorization"))
 		}
-		if !strings.HasSuffix(r.URL.Path, "/user-abc/github") {
+		if !strings.HasSuffix(r.URL.Path, "/user-abc/services/github") {
 			t.Fatalf("bad path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
