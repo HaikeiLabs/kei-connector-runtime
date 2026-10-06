@@ -509,3 +509,43 @@ func TestConnectorInvokeNeverLeaksCredential(t *testing.T) {
 		}
 	}
 }
+
+func TestProductionServeWiringFailsClosedWithoutTrustedPlanner(t *testing.T) {
+	rig := newInvokeRig(t)
+	now := time.Now().UTC()
+	bundle, err := json.Marshal(map[string]any{
+		"schema": "kei.policy-bundle/v2", "bundle_id": "bundle-serve-v2", "bundle_version": 43, "policy_revision": 7, "issuer": "kei-policy-catalog",
+		"audience":  map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"},
+		"issued_at": now.Format(time.RFC3339Nano), "not_after": now.Add(time.Hour).Format(time.RFC3339Nano),
+		"refresh": map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300}, "subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 60},
+		"policy_set":               map[string]any{"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2", "evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"}, "tools": []any{map[string]any{"name": "github.review_pr", "source": "github", "operation_class": "read", "route": map[string]any{"connector_binding": map[string]any{"connector_id": invokeConnector}}, "required_capabilities": []string{"repository.read"}, "resource_types": []any{map[string]any{"type": "repository"}}}}, "checks": []any{}, "tool_policies": []any{}},
+		"agent_connector_bindings": []any{map[string]any{"agent_id": "agent-fixture-0001", "connector_id": invokeConnector, "capabilities": []string{"repository.read"}}},
+		"identities":               []any{map[string]any{"source": "discord", "external_id": invokeExternalID, "user_id": "u-canary", "status": "linked", "groups": []string{"members"}, "subject_token": subjectCanary}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := policybundle.OpenStore(rig.cfg.RuntimeStateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	// newInvokeRig exercises newServeLocalPDP/newServeHandlers. No trusted
+	// argument-to-operation planner is currently registered by production.
+	rig.startSession(t)
+	preflight := socketDo(t, rig.client, http.MethodPost, "/v1/preflight", `{"schema":"kei.preflight-request/v1","tool":"github.review_pr","agent_id":"agent-fixture-0001","arguments":{}}`)
+	if preflight.code != http.StatusForbidden {
+		t.Fatalf("unregistered planner preflight status=%d body=%s", preflight.code, preflight.dump)
+	}
+	invokeBody := `{"schema":"kei.connector-invoke-request/v1","tool_name":"github.review_pr","preflight_handle":"not-a-grant","agent_id":"agent-fixture-0001","input":{},"trace_id":"trace-unregistered-plan"}`
+	response := socketDo(t, rig.client, http.MethodPost, "/v1/connectors:invoke", invokeBody)
+	if response.code != http.StatusOK || !strings.Contains(response.dump, `"decision":"deny"`) {
+		t.Fatalf("unregistered planner invocation=%d %s", response.code, response.dump)
+	}
+	_, providerCalls := rig.counts()
+	if len(providerCalls) != 0 {
+		t.Fatalf("unregistered planner reached provider: %v", providerCalls)
+	}
+}

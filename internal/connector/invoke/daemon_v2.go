@@ -38,11 +38,11 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	if !grant.HasSession {
 		return finish(deny("no_session", "no active session"))
 	}
-	if grant.Subject == "" {
-		return finish(deny("subject_unlinked", "the session subject is not linked"))
-	}
 	if !grant.V2Tool || grant.Provider == "" || grant.ConnectorID == "" || grant.AgentID == "" || (dr.AgentID != "" && dr.AgentID != grant.AgentID) {
 		return finish(deny("preflight_required", "the tool is not registered for v2 connector execution"))
+	}
+	if grant.Subject == "" {
+		return finish(deny("subject_unlinked", "the session subject is not linked"))
 	}
 	agentID := grant.AgentID
 	ops, err := d.PlanV2(ctx, dr.ToolName, agentID, append([]byte(nil), canonical...), dr.ParentSpan, dr.DelegationDepth)

@@ -43,7 +43,7 @@ func TestSyncPolicyBundleAcceptsUnsignedJSONWithRuntimeTokenAndDigest(t *testing
 		}
 		switch r.URL.Path {
 		case "/api/v1/runtime/policy-bundles/current":
-			if r.Header.Get("Accept") != policybundle.ContentType+", "+policybundle.ContentTypeV2 {
+			if r.Header.Get("Accept") != policybundle.ContentType {
 				t.Errorf("Accept=%q", r.Header.Get("Accept"))
 			}
 			w.Header().Set("Content-Type", policybundle.ContentType)
