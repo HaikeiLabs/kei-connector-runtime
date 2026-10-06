@@ -4,18 +4,18 @@
   "harness_version": "1.18.34",
   "verified_at": "2026-10-02T02:26:15Z",
   "tools": [
-    {"name":"opencode.read","source":"opencode","operation_class":"read","description":"Read files"},
-    {"name":"opencode.glob","source":"opencode","operation_class":"read","description":"Find files"},
-    {"name":"opencode.grep","source":"opencode","operation_class":"read","description":"Search files"},
-    {"name":"opencode.edit","source":"opencode","operation_class":"write","description":"Edit files"},
-    {"name":"opencode.write","source":"opencode","operation_class":"write","description":"Write files"},
-    {"name":"opencode.bash","source":"opencode","operation_class":"write","description":"Run shell commands"},
-    {"name":"opencode.webfetch","source":"opencode","operation_class":"read","description":"Fetch web pages"},
-    {"name":"opencode.websearch","source":"opencode","operation_class":"read","description":"Search the web"},
-    {"name":"opencode.list","source":"opencode","operation_class":"read","description":"List files"},
-    {"name":"opencode.patch","source":"opencode","operation_class":"write","description":"Apply a patch"},
-    {"name":"opencode.skill","source":"opencode","operation_class":"write","description":"Invoke a skill"},
-    {"name":"opencode.task","source":"opencode","operation_class":"write","description":"Delegate a task"},
-    {"name":"opencode.todowrite","source":"opencode","operation_class":"write","description":"Update task list"}
+    {"name":"opencode.read","service":"harness","executor":"opencode","registration":"opencode.read","source":"opencode","operation_class":"read","description":"Read files"},
+    {"name":"opencode.glob","service":"harness","executor":"opencode","registration":"opencode.glob","source":"opencode","operation_class":"read","description":"Find files"},
+    {"name":"opencode.grep","service":"harness","executor":"opencode","registration":"opencode.grep","source":"opencode","operation_class":"read","description":"Search files"},
+    {"name":"opencode.edit","service":"harness","executor":"opencode","registration":"opencode.edit","source":"opencode","operation_class":"write","description":"Edit files"},
+    {"name":"opencode.write","service":"harness","executor":"opencode","registration":"opencode.write","source":"opencode","operation_class":"write","description":"Write files"},
+    {"name":"opencode.bash","service":"harness","executor":"opencode","registration":"opencode.bash","source":"opencode","operation_class":"write","description":"Run shell commands"},
+    {"name":"opencode.webfetch","service":"harness","executor":"opencode","registration":"opencode.webfetch","source":"opencode","operation_class":"read","description":"Fetch web pages"},
+    {"name":"opencode.websearch","service":"harness","executor":"opencode","registration":"opencode.websearch","source":"opencode","operation_class":"read","description":"Search the web"},
+    {"name":"opencode.list","service":"harness","executor":"opencode","registration":"opencode.list","source":"opencode","operation_class":"read","description":"List files"},
+    {"name":"opencode.patch","service":"harness","executor":"opencode","registration":"opencode.patch","source":"opencode","operation_class":"write","description":"Apply a patch"},
+    {"name":"opencode.skill","service":"harness","executor":"opencode","registration":"opencode.skill","source":"opencode","operation_class":"write","description":"Invoke a skill"},
+    {"name":"opencode.task","service":"harness","executor":"opencode","registration":"opencode.task","source":"opencode","operation_class":"write","description":"Delegate a task"},
+    {"name":"opencode.todowrite","service":"harness","executor":"opencode","registration":"opencode.todowrite","source":"opencode","operation_class":"write","description":"Update task list"}
   ]
 }

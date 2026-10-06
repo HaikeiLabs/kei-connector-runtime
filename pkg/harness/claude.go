@@ -80,7 +80,7 @@ func (ClaudeCodeAdapter) DiscoverTools(ctx context.Context, env Env) (Discovery,
 					warnings = append(warnings, e.Error())
 					continue
 				}
-				d.MCP = append(d.MCP, Tool{Name: name, Source: "mcp", Selector: "mcp:" + server, OperationClass: "write", Description: "MCP server " + server})
+				d.MCP = append(d.MCP, Tool{Name: name, Service: "harness", Source: "mcp", Selector: "mcp:" + server, Executor: "claude_code", Registration: "mcp:" + server, OperationClass: "write", Description: "MCP server " + server})
 				continue
 			}
 			for _, mt := range cfg.Tools {
@@ -93,7 +93,7 @@ func (ClaudeCodeAdapter) DiscoverTools(ctx context.Context, env Env) (Discovery,
 				if mt.ReadOnly {
 					class = "read"
 				}
-				d.MCP = append(d.MCP, Tool{Name: name, Source: "mcp", Selector: "mcp:" + server + "." + mt.Name, OperationClass: class, Description: mt.Description})
+				d.MCP = append(d.MCP, Tool{Name: name, Service: "harness", Source: "mcp", Selector: "mcp:" + server + "." + mt.Name, Executor: "claude_code", Registration: "mcp:" + server + "." + mt.Name, OperationClass: class, Description: mt.Description})
 			}
 		}
 	}
@@ -156,7 +156,7 @@ func discoverSkills(ctx context.Context, dir string, kind Kind, d *Discovery, wa
 			*warnings = append(*warnings, e.Error())
 			return nil
 		}
-		d.Skills = append(d.Skills, Tool{Name: registry, Source: string(kind), Selector: "skill:" + name, OperationClass: "write", Description: description})
+		d.Skills = append(d.Skills, Tool{Name: registry, Service: "harness", Source: string(kind), Selector: "skill:" + name, Executor: string(kind), Registration: "skill:" + name, OperationClass: "write", Description: description})
 		return nil
 	})
 	if errors.Is(err, os.ErrNotExist) {

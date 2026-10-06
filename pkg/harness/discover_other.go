@@ -56,7 +56,7 @@ func (CodexAdapter) DiscoverTools(ctx context.Context, env Env) (Discovery, erro
 					d.Warnings = append(d.Warnings, e.Error())
 					continue
 				}
-				d.MCP = append(d.MCP, Tool{Name: name, Source: "mcp", Selector: "mcp:" + server, OperationClass: "write", Description: "MCP server " + server})
+				d.MCP = append(d.MCP, Tool{Name: name, Service: "harness", Source: "mcp", Selector: "mcp:" + server, Executor: "codex", Registration: "mcp:" + server, OperationClass: "write", Description: "MCP server " + server})
 			}
 		}
 	}
@@ -145,7 +145,7 @@ func (OpenCodeAdapter) DiscoverTools(ctx context.Context, env Env) (Discovery, e
 					d.Warnings = append(d.Warnings, e.Error())
 					continue
 				}
-				d.MCP = append(d.MCP, Tool{Name: name, Source: "mcp", Selector: "mcp:" + server, OperationClass: "write", Description: "MCP server " + server})
+				d.MCP = append(d.MCP, Tool{Name: name, Service: "harness", Source: "mcp", Selector: "mcp:" + server, Executor: "opencode", Registration: "mcp:" + server, OperationClass: "write", Description: "MCP server " + server})
 				continue
 			}
 			for _, mt := range s.Tools {
@@ -158,7 +158,7 @@ func (OpenCodeAdapter) DiscoverTools(ctx context.Context, env Env) (Discovery, e
 				if mt.ReadOnly {
 					class = "read"
 				}
-				d.MCP = append(d.MCP, Tool{Name: name, Source: "mcp", Selector: "mcp:" + server + "." + mt.Name, OperationClass: class, Description: mt.Description})
+				d.MCP = append(d.MCP, Tool{Name: name, Service: "harness", Source: "mcp", Selector: "mcp:" + server + "." + mt.Name, Executor: "opencode", Registration: "mcp:" + server + "." + mt.Name, OperationClass: class, Description: mt.Description})
 			}
 		}
 	}

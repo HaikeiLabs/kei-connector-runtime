@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+func TestValidateToolManifestV3TypedRoutes(t *testing.T) {
+	m := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{
+		{Name: "github.get_issue", Service: "github", Source: "github", OperationClass: "read", RequiredCapabilities: []string{"issue.read"}, ResourceTypes: []KeiResourceType{{Type: "issue", ParentType: "repository"}}, Route: &ToolRoute{ConnectorBinding: &ConnectorBindingRoute{AgentID: "agent-1", ConnectorID: "binding-1"}}},
+		{Name: "codex.shell", Service: "codex", Source: "codex", OperationClass: "write", Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "codex", Registration: "codex.shell"}}},
+	}}
+	if err := validateToolManifest(m); err != nil {
+		t.Fatalf("valid v3 manifest: %v", err)
+	}
+	m.Tools[0].Route.HarnessExecutor = &HarnessExecutorRoute{Executor: "codex", Registration: "codex.shell"}
+	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "exactly one branch") {
+		t.Fatalf("expected ambiguous-route failure, got %v", err)
+	}
+	m.Tools[0].Route = &ToolRoute{ConnectorBinding: &ConnectorBindingRoute{AgentID: "agent-1", ConnectorID: "binding-1"}}
+	m.Tools[0].RequiredCapabilities = nil
+	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "connector_binding") {
+		t.Fatalf("expected missing-capability failure, got %v", err)
+	}
+}
+
+func TestValidateToolManifestV3MissingService(t *testing.T) {
+	m := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{{Name: "codex.shell", Source: "codex", OperationClass: "write", Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "codex", Registration: "codex.shell"}}}}}
+	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "service") {
+		t.Fatalf("expected required service error, got %v", err)
+	}
+}
+
 func TestValidateToolManifestV2MissingSource(t *testing.T) {
 	m := &ToolManifest{
 		Schema: ToolManifestSchemaV2,

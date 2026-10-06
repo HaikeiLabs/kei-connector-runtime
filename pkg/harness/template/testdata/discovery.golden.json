@@ -2,7 +2,10 @@
   "built_ins": [
     {
       "name": "example.read",
+      "service": "harness",
       "source": "example",
+      "executor": "example",
+      "registration": "example.read",
       "operation_class": "read",
       "description": "Read example resources"
     }

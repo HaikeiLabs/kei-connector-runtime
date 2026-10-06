@@ -184,6 +184,22 @@ func (c *runtimeClient) RegisterCredentialSyncKey(ctx context.Context, token, st
 	return nil
 }
 
+const (
+	ToolManifestProtocolHeader  = "X-Kei-Tool-Manifest-Schema"
+	ToolManifestSupportedHeader = "X-Kei-Supported-Tool-Manifest-Schemas"
+)
+
+func toolManifestMediaType(schema string) string {
+	switch schema {
+	case ToolManifestSchemaV2:
+		return "application/vnd.kei.tool-manifest.v2+json"
+	case ToolManifestSchemaV3:
+		return "application/vnd.kei.tool-manifest.v3+json"
+	default:
+		return ""
+	}
+}
+
 // ToolSyncResponse is the catalog response for PUT /api/v1/runtime/tools.
 type ToolSyncResponse struct {
 	Added     int `json:"added"`
@@ -192,9 +208,13 @@ type ToolSyncResponse struct {
 	Unchanged int `json:"unchanged"`
 }
 
-// SyncTools PUTs the tool manifest to the catalog tool registry. A 409
-// (ALREADY_EXISTS) is returned as an error so callers can log and continue.
+// SyncTools proposes the exact manifest schema in a request header and
+// requires an explicit v3 acknowledgment. Missing acknowledgments remain
+// compatible only for v2 peers predating negotiation.
 func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *ToolManifest) error {
+	if manifest == nil || (manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3) {
+		return fmt.Errorf("unsupported tool manifest protocol")
+	}
 	body, err := json.Marshal(manifest)
 	if err != nil {
 		return fmt.Errorf("encode tool manifest: %w", err)
@@ -205,6 +225,7 @@ func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *T
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, "+toolManifestMediaType(manifest.Schema))
 	response, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("tool sync request failed: %w", err)
@@ -217,7 +238,30 @@ func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *T
 	if response.StatusCode != http.StatusOK {
 		return &ToolSyncError{StatusCode: response.StatusCode}
 	}
+	ack := response.Header.Get(ToolManifestProtocolHeader)
+	if ack != "" && ack != manifest.Schema {
+		return fmt.Errorf("tool sync protocol acknowledgment mismatch")
+	}
+	supportedHeader := response.Header.Get(ToolManifestSupportedHeader)
+	if supportedHeader != "" && !containsManifestSchema(supportedHeader, manifest.Schema) {
+		return fmt.Errorf("tool sync protocol is not in the catalog's supported schemas")
+	}
+	if supportedHeader != "" && (ack != manifest.Schema || response.Header.Get("Content-Type") != "application/json") {
+		return fmt.Errorf("tool sync protocol was advertised but not explicitly selected")
+	}
+	if manifest.Schema == ToolManifestSchemaV3 && (ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema) || response.Header.Get("Content-Type") != "application/json") {
+		return fmt.Errorf("tool sync v3 protocol was not explicitly negotiated")
+	}
 	return nil
+}
+
+func containsManifestSchema(header, schema string) bool {
+	for _, value := range strings.Split(header, ",") {
+		if strings.TrimSpace(value) == schema {
+			return true
+		}
+	}
+	return false
 }
 
 // ToolSyncError is a non-fatal error from SyncTools. Callers log it and

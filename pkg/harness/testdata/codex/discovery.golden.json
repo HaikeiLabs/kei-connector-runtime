@@ -1,1 +1,46 @@
-{"built_ins":[{"name":"codex.apply_patch","source":"codex","operation_class":"write","description":"Apply a patch"},{"name":"codex.shell","source":"codex","operation_class":"write","description":"Run shell commands"}],"skills":[{"name":"codex.skill.release_notes","source":"codex","selector":"skill:release-notes","operation_class":"write","description":"Prepare a release summary."}],"mcp":[{"name":"codex.mcp.linear","source":"mcp","selector":"mcp:linear","operation_class":"write","description":"MCP server linear"}]}
+{
+  "built_ins": [
+    {
+      "name": "codex.apply_patch",
+      "source": "codex",
+      "operation_class": "write",
+      "description": "Apply a patch",
+      "service": "harness",
+      "executor": "codex",
+      "registration": "codex.apply_patch"
+    },
+    {
+      "name": "codex.shell",
+      "source": "codex",
+      "operation_class": "write",
+      "description": "Run shell commands",
+      "service": "harness",
+      "executor": "codex",
+      "registration": "codex.shell"
+    }
+  ],
+  "skills": [
+    {
+      "name": "codex.skill.release_notes",
+      "source": "codex",
+      "selector": "skill:release-notes",
+      "operation_class": "write",
+      "description": "Prepare a release summary.",
+      "service": "harness",
+      "executor": "codex",
+      "registration": "skill:release-notes"
+    }
+  ],
+  "mcp": [
+    {
+      "name": "codex.mcp.linear",
+      "source": "mcp",
+      "selector": "mcp:linear",
+      "operation_class": "write",
+      "description": "MCP server linear",
+      "service": "harness",
+      "executor": "codex",
+      "registration": "mcp:linear"
+    }
+  ]
+}
