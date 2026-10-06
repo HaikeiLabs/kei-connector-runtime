@@ -196,7 +196,13 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 					return nil
 				},
 			},
-			Authorize:     connectorAuthorizer(local),
+			Authorize: connectorAuthorizer(local),
+			PlanV2: func(ctx context.Context, tool, agent string, args []byte, parent string, depth int) ([]policybundle.Operation, error) {
+				_, ops, err := local.PlanV2(ctx, tool, agent, args, parent, depth)
+				return ops, err
+			},
+			ValidateV2:    local.ValidateV2Plan,
+			ConsumeV2:     local.ConsumeV2,
 			UseCredential: local.UseCredential,
 		})
 		local.SetCommandRunner(&runcommand.Daemon{
@@ -216,6 +222,13 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 // daemon's invoke route.
 func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invoke.DaemonCall) (invoke.Grant, error) {
 	return func(ctx context.Context, c invoke.DaemonCall) (invoke.Grant, error) {
+		if c.ToolName != "" {
+			if _, hasSession := local.Sessions.Current(); !hasSession {
+				return invoke.Grant{}, nil
+			}
+			provider, connectorID, capabilities, subject, agentID, tenantID, workspaceID, ok := local.DescribeV2Tool(c.ToolName, c.AgentID)
+			return invoke.Grant{V2Tool: ok, HasSession: true, Subject: subject, AgentID: agentID, Provider: provider, ConnectorID: connectorID, Capabilities: capabilities, TenantID: tenantID, WorkspaceID: workspaceID}, nil
+		}
 		g, id, err := local.AuthorizeConnector(ctx, pdp.Request{
 			Resource: c.Resource, AgentID: c.AgentID,
 			Connector: &pdp.ConnectorTarget{ConnectorID: c.ConnectorID, Capability: c.Capability},

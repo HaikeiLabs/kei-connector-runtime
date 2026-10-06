@@ -47,27 +47,63 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 		return fail("input_invalid", "input must be one JSON object of at most 16 KiB", "--input must be one JSON object of at most 16 KiB")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
+	defer cancel()
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", env.DaemonSocket)
+		},
+	}}
+	if plan.toolName != "" && plan.req.PreflightHandle == "" {
+		preflightBody, marshalErr := json.Marshal(struct {
+			Schema          string          `json:"schema"`
+			Tool            string          `json:"tool"`
+			AgentID         string          `json:"agent_id,omitempty"`
+			Arguments       json.RawMessage `json:"arguments"`
+			ParentSpan      string          `json:"parent_span,omitempty"`
+			DelegationDepth int             `json:"delegation_depth,omitempty"`
+		}{"kei.preflight-request/v1", plan.toolName, plan.req.AgentID, canonical, plan.parentSpan, plan.delegationDepth})
+		if marshalErr != nil {
+			return fail("preflight_denied", "the tool call could not be preflighted", "local tool preflight failed closed")
+		}
+		preq, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/v1/preflight", bytes.NewReader(preflightBody))
+		if requestErr != nil {
+			return fail("preflight_denied", "the tool call could not be preflighted", "local tool preflight failed closed")
+		}
+		preq.Header.Set("Authorization", "Bearer "+env.RuntimeToken)
+		preq.Header.Set("Content-Type", "application/json")
+		presp, doErr := client.Do(preq)
+		if doErr != nil {
+			return fail("daemon_unavailable", "the daemon did not preflight the tool call", "local tool preflight failed closed")
+		}
+		var preflightResp struct {
+			Schema string `json:"schema"`
+			Handle string `json:"handle"`
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(presp.Body, 64<<10)).Decode(&preflightResp)
+		status := presp.StatusCode
+		_ = presp.Body.Close()
+		if status != http.StatusOK || decodeErr != nil || preflightResp.Schema != "kei.preflight-response/v1" || preflightResp.Handle == "" {
+			return fail("preflight_denied", "the tool call was not authorized", "local tool preflight denied the call")
+		}
+		plan.req.PreflightHandle = preflightResp.Handle
+	}
 	body, err := json.Marshal(daemonRequest{
-		Schema: daemonRequestSchema, ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability,
+		Schema: daemonRequestSchema, ToolName: plan.toolName, PreflightHandle: plan.req.PreflightHandle,
+		ParentSpan: plan.parentSpan, DelegationDepth: plan.delegationDepth,
+		ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability,
 		Action: plan.req.Action, Resource: plan.req.Resource, Input: canonical, TraceID: plan.req.TraceID,
 		IdempotencyKey: plan.req.IdempotencyKey, AgentID: plan.req.AgentID, Framework: plan.req.Framework,
 	})
 	if err != nil {
 		return fail("invalid_request", "request could not be encoded", "connector invoke request could not be encoded")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+DaemonInvokePath, bytes.NewReader(body))
 	if err != nil {
 		return fail("daemon_unavailable", "the kei-proxy serve daemon is not reachable", "connector invoke request could not be built")
 	}
 	req.Header.Set("Authorization", "Bearer "+env.RuntimeToken)
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", env.DaemonSocket)
-		},
-	}}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fail("daemon_unavailable", "the kei-proxy serve daemon is not reachable",

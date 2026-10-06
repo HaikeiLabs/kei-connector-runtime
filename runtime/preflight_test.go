@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,8 +23,13 @@ func (f planAuthorizerFunc) AuthorizePlan(b BindingContext, ops []Operation) (st
 func testBinding() BindingContext {
 	return BindingContext{InstallationID: "i", BundleVersion: 2, BundleDigest: "sha256:bundle", Subject: "u", SubjectSource: "discord", SubjectExternalID: "ext", AgentID: "a", Tool: "t", Route: ConnectorDispatch{ConnectorID: "c", RequiredCapabilities: []string{"read", "meta.read"}}}
 }
+func testInputDigest() string {
+	sum := sha256.Sum256([]byte(`{"id":"x"}`))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 func testPlan() []Operation {
-	return []Operation{{ConnectorID: "c", Capability: "read", Action: "read", ResourceType: "repo", ResourceID: "x"}, {ConnectorID: "c", Capability: "meta.read", Action: "read", ResourceType: "repo", ResourceID: "x"}}
+	digest := testInputDigest()
+	return []Operation{{ConnectorID: "c", Capability: "read", Action: "read", Resource: "repos/x", InputDigest: digest, ResourceType: "repo", ResourceID: "x"}, {ConnectorID: "c", Capability: "meta.read", Action: "read", Resource: "repos/x", InputDigest: digest, ResourceType: "repo", ResourceID: "x"}}
 }
 func testPreflightInput(allow bool) PreflightInput {
 	return PreflightInput{Binding: testBinding(), ValidatedArgs: []byte(`{"id":"x"}`), Planner: plannerFunc(func([]byte, BindingContext) ([]Operation, error) { return testPlan(), nil }), Authorizer: planAuthorizerFunc(func(b BindingContext, ops []Operation) (string, int64, bool, error) {
@@ -80,6 +88,11 @@ func TestConsumeRevalidatesPlanAndRejectsSubstitutionAndExpiry(t *testing.T) {
 	grant, err = s.Preflight(in, time.Second)
 	if err != nil {
 		t.Fatal(err)
+	}
+	changedInput := testPlan()[0]
+	changedInput.InputDigest = "sha256:" + strings.Repeat("0", 64)
+	if err = s.Consume(grant.Handle, in.Binding, changedInput, in.Authorizer); !errors.Is(err, ErrAuthorizationInvalid) {
+		t.Fatalf("same target with changed input digest=%v", err)
 	}
 	now = now.Add(time.Second)
 	if err = s.Consume(grant.Handle, in.Binding, testPlan()[0], in.Authorizer); !errors.Is(err, ErrAuthorizationInvalid) {

@@ -94,6 +94,9 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	if err := json.Unmarshal(bundleBytes, &identity); err != nil {
 		return nil, fmt.Errorf("decode policy bundle identity: %w", err)
 	}
+	if identity.Schema == "kei.policy-bundle/v2" {
+		return ValidateV2(bundleBytes, installationID, orgID, workspaceID, highestVersion, now)
+	}
 	if identity.Schema != "kei.policy-bundle/v1" {
 		return nil, ErrBundleUnsupported
 	}

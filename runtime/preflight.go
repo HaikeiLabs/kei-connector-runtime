@@ -95,6 +95,12 @@ func (s *AuthorizationStore) Preflight(in PreflightInput, ttl time.Duration) (Pr
 	if err := validatePlan(in.Binding.Route, ops); err != nil {
 		return PreflightResult{}, err
 	}
+	expectedInputDigest := operationInputDigest(in.ValidatedArgs)
+	for _, op := range ops {
+		if op.InputDigest != expectedInputDigest {
+			return PreflightResult{}, ErrPlanInvalid
+		}
+	}
 	digest, version, allowed, err := in.Authorizer.AuthorizePlan(cloneBinding(in.Binding), cloneOperations(ops))
 	if err != nil || !allowed || digest != in.Binding.BundleDigest || version != in.Binding.BundleVersion {
 		return PreflightResult{}, ErrPreflightDenied
@@ -113,6 +119,44 @@ func (s *AuthorizationStore) Preflight(in PreflightInput, ttl time.Duration) (Pr
 	return PreflightResult{Handle: handle, ExpiresAt: expires}, nil
 }
 
+// ValidatePlan checks that a newly resolved complete plan is byte-for-byte
+// equivalent as an operation multiset to the stored plan, without consuming it.
+func (s *AuthorizationStore) ValidatePlan(handle string, binding BindingContext, operations []Operation, authorizer PlanAuthorizer) error {
+	if handle == "" || authorizer == nil {
+		return ErrAuthorizationInvalid
+	}
+	key := sha256.Sum256([]byte(handle))
+	keyString := hex.EncodeToString(key[:])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[keyString]
+	if e == nil || !s.now().Before(e.expires) || !sameBinding(e.binding, binding) || !sameOperationSet(e.operations, operations) {
+		return ErrAuthorizationInvalid
+	}
+	digest, version, allowed, err := authorizer.AuthorizePlan(cloneBinding(e.binding), cloneOperations(e.operations))
+	if err != nil || !allowed || digest != e.binding.BundleDigest || version != e.binding.BundleVersion || !s.now().Before(e.expires) {
+		return ErrAuthorizationInvalid
+	}
+	return nil
+}
+
+func sameOperationSet(a, b []Operation) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[Operation]int, len(a))
+	for _, operation := range a {
+		counts[operation]++
+	}
+	for _, operation := range b {
+		if counts[operation] == 0 {
+			return false
+		}
+		counts[operation]--
+	}
+	return true
+}
+
 // Consume revalidates the full plan against the current verified bundle while
 // atomically consuming one exact item. No provider call may precede success.
 func (s *AuthorizationStore) Consume(handle string, binding BindingContext, operation Operation, authorizer PlanAuthorizer) error {
@@ -128,7 +172,7 @@ func (s *AuthorizationStore) Consume(handle string, binding BindingContext, oper
 		return ErrAuthorizationInvalid
 	}
 	digest, version, allowed, err := authorizer.AuthorizePlan(cloneBinding(e.binding), cloneOperations(e.operations))
-	if err != nil || !allowed || digest != e.binding.BundleDigest || version != e.binding.BundleVersion {
+	if err != nil || !allowed || digest != e.binding.BundleDigest || version != e.binding.BundleVersion || !s.now().Before(e.expires) {
 		delete(s.entries, keyString)
 		return ErrAuthorizationInvalid
 	}
@@ -200,6 +244,17 @@ func cloneBinding(b BindingContext) BindingContext {
 	return b
 }
 func cloneOperations(ops []Operation) []Operation { return append([]Operation(nil), ops...) }
+func operationInputDigest(canonical []byte) string {
+	sum := sha256.Sum256(canonical)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+func validInputDigest(digest string) bool {
+	if len(digest) != len("sha256:")+64 || digest[:len("sha256:")] != "sha256:" {
+		return false
+	}
+	_, err := hex.DecodeString(digest[len("sha256:"):])
+	return err == nil
+}
 func validatePlan(route DispatchRoute, ops []Operation) error {
 	r, ok := route.(ConnectorDispatch)
 	if !ok || r.ConnectorID == "" || len(r.RequiredCapabilities) == 0 {
@@ -214,13 +269,13 @@ func validatePlan(route DispatchRoute, ops []Operation) error {
 	}
 	covered := map[string]bool{}
 	for _, op := range ops {
-		if op.ConnectorID != r.ConnectorID || op.Capability == "" || op.Action == "" || !caps[op.Capability] {
+		if op.ConnectorID != r.ConnectorID || op.Capability == "" || op.Action == "" || !validInputDigest(op.InputDigest) || !caps[op.Capability] {
 			return ErrPlanInvalid
 		}
-		if op.ResourceType == "" && (op.ResourceID != "" || op.ResourceParent != "" || op.ResourceParentType != "") {
+		if op.ResourceType == "" && (op.ResourceID != "" || op.ResourceParent != "" || op.ResourceParentType != "" || op.Resource != "") {
 			return ErrPlanInvalid
 		}
-		if op.ResourceType != "" && op.ResourceID == "" {
+		if op.ResourceType != "" && (op.ResourceID == "" || op.Resource == "") {
 			return ErrPlanInvalid
 		}
 		if op.ResourceParent == "" && op.ResourceParentType != "" || op.ResourceParent != "" && op.ResourceParentType == "" {

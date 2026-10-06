@@ -23,6 +23,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/google/uuid"
 )
 
@@ -53,6 +54,7 @@ var sessionProviders = map[contract.Provider]bool{
 // Grant is the daemon's local decision for one connector call.
 type Grant struct {
 	Allow      bool
+	V2Tool     bool
 	ReasonCode string
 	Reason     string
 	Enrollment json.RawMessage
@@ -60,9 +62,11 @@ type Grant struct {
 	HasSession bool
 	// Subject is the linked session user id the decision was made for, or "".
 	Subject string
+	AgentID string
 	// Provider and Capabilities are the bundle's connector entry; Provider is
 	// "" when the bundle does not know the connector.
 	Provider     string
+	ConnectorID  string
 	Capabilities []string
 	TenantID     string
 	WorkspaceID  string
@@ -71,6 +75,7 @@ type Grant struct {
 // DaemonCall is what the daemon asks its PDP to decide.
 type DaemonCall struct {
 	ConnectorID, Capability, Resource, AgentID string
+	ToolName                                   string
 }
 
 // Daemon serves POST /v1/connectors:invoke inside the serve daemon. The
@@ -81,6 +86,12 @@ type Daemon struct {
 	Env Env
 	// Authorize decides a call with the local PDP and the session subject.
 	Authorize func(context.Context, DaemonCall) (Grant, error)
+	// PlanV2 resolves the trusted registered planner for tool and canonical args.
+	PlanV2 func(context.Context, string, string, []byte, string, int) ([]policybundle.Operation, error)
+	// ValidateV2 confirms the full current plan matches the opaque context.
+	ValidateV2 func(context.Context, string, string, string, []policybundle.Operation, string, int) error
+	// ConsumeV2 revalidates the complete stored plan and atomically consumes an item.
+	ConsumeV2 func(context.Context, string, string, string, policybundle.Operation, string, int) error
 	// UseCredential runs fn with the session credential subject holds for
 	// provider (credrelease.Store.Use).
 	UseCredential func(ctx context.Context, subject, provider string, fn func(token string) error) error
@@ -89,16 +100,20 @@ type Daemon struct {
 // daemonRequest is the route's body. It names the call only: the subject
 // comes from the daemon's session and the credential from its store.
 type daemonRequest struct {
-	Schema         string          `json:"schema"`
-	ConnectorID    string          `json:"connector_id"`
-	Capability     string          `json:"capability"`
-	Action         string          `json:"action"`
-	Resource       string          `json:"resource"`
-	Input          json.RawMessage `json:"input,omitempty"`
-	TraceID        string          `json:"trace_id,omitempty"`
-	IdempotencyKey string          `json:"idempotency_key,omitempty"`
-	AgentID        string          `json:"agent_id,omitempty"`
-	Framework      string          `json:"framework,omitempty"`
+	Schema          string          `json:"schema"`
+	ToolName        string          `json:"tool_name,omitempty"`
+	PreflightHandle string          `json:"preflight_handle,omitempty"`
+	ParentSpan      string          `json:"parent_span,omitempty"`
+	DelegationDepth int             `json:"delegation_depth,omitempty"`
+	ConnectorID     string          `json:"connector_id"`
+	Capability      string          `json:"capability"`
+	Action          string          `json:"action"`
+	Resource        string          `json:"resource"`
+	Input           json.RawMessage `json:"input,omitempty"`
+	TraceID         string          `json:"trace_id,omitempty"`
+	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
+	AgentID         string          `json:"agent_id,omitempty"`
+	Framework       string          `json:"framework,omitempty"`
 }
 
 // daemonResponse is the route's answer: the same object `connector invoke`
@@ -116,8 +131,8 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "request must be a "+daemonRequestSchema+" object with no unknown fields")
 		return
 	}
-	if req.ConnectorID == "" || req.Capability == "" || req.Action == "" || req.Resource == "" {
-		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "connector_id, capability, action and resource are required")
+	if (req.ToolName == "") != (req.PreflightHandle == "") || (req.ToolName == "" && (req.ConnectorID == "" || req.Capability == "" || req.Action == "" || req.Resource == "")) || (req.ToolName != "" && (req.ConnectorID != "" || req.Capability != "" || req.Action != "" || req.Resource != "")) {
+		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "a legacy operation or a v2 tool and preflight handle are required")
 		return
 	}
 	if req.TraceID == "" {
@@ -147,6 +162,9 @@ func (d *Daemon) invoke(ctx context.Context, dr daemonRequest) output {
 	}
 
 	raw := []byte(dr.Input)
+	if dr.ToolName != "" && len(raw) > input.MaxBytes {
+		return finish(deny("input_invalid", "input exceeds the v2 tool argument size limit"))
+	}
 	if len(raw) == 0 {
 		raw = []byte("{}")
 	}
@@ -154,8 +172,14 @@ func (d *Daemon) invoke(ctx context.Context, dr daemonRequest) output {
 	if err != nil {
 		return finish(deny("input_invalid", "input must be one JSON object of at most 16 KiB"))
 	}
+	if dr.ToolName != "" && len(canonical) > input.MaxBytes {
+		return finish(deny("input_invalid", "input exceeds the v2 tool argument size limit"))
+	}
 	plan.req.InputDigest = digest
 	out.Audit = &outputAudit{InputDigest: digest}
+	if dr.ToolName != "" {
+		return d.invokeV2(ctx, dr, plan, canonical, started, out)
+	}
 
 	grant, err := d.Authorize(ctx, DaemonCall{ConnectorID: dr.ConnectorID, Capability: dr.Capability, Resource: dr.Resource, AgentID: dr.AgentID})
 	if err != nil {

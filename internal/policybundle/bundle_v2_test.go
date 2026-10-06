@@ -128,12 +128,33 @@ func TestValidateV2ClosedBundleAndSnapshotFreshness(t *testing.T) {
 	}
 }
 
-func TestV1ValidatorStillRejectsV2Envelope(t *testing.T) {
+func TestV2StoreMarksOverAgeSnapshotStale(t *testing.T) {
 	previous := schemaValidatorV2
 	SetV2SchemaValidator(v2SchemaValidator(t))
 	t.Cleanup(func() { SetV2SchemaValidator(previous) })
-	if _, err := Validate(mustJSON(t, v2BundleDoc(time.Now().UTC())), v2Installation, v2Org, v2Workspace, 1, time.Now().UTC()); err != ErrBundleUnsupported {
-		t.Fatalf("v1 Validate accepted v2 envelope: %v", err)
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	raw := mustJSON(t, v2BundleDoc(now))
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(raw, v2Installation, v2Org, v2Workspace, now); err != nil {
+		t.Fatalf("activate v2 bundle: %v", err)
+	}
+	verified, state, err := store.Check(v2Installation, v2Org, v2Workspace, now.Add(30*time.Second))
+	if err != nil || verified == nil || state != Stale {
+		t.Fatalf("stale check verified=%v state=%s err=%v", verified != nil, state, err)
+	}
+}
+
+func TestValidateDispatchesV2WithoutChangingV1Validation(t *testing.T) {
+	previous := schemaValidatorV2
+	SetV2SchemaValidator(v2SchemaValidator(t))
+	t.Cleanup(func() { SetV2SchemaValidator(previous) })
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	v, err := Validate(mustJSON(t, v2BundleDoc(now)), v2Installation, v2Org, v2Workspace, 1, now)
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" {
+		t.Fatalf("Validate dispatch for v2 = %+v, %v", v, err)
 	}
 }
 

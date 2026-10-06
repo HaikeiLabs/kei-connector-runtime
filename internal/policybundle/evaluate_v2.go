@@ -12,6 +12,8 @@ type Operation struct {
 	ConnectorID        string
 	Capability         string
 	Action             string
+	Resource           string
+	InputDigest        string
 	ResourceType       string
 	ResourceID         string
 	ResourceParent     string
@@ -35,6 +37,23 @@ type V2Tool struct {
 	} `json:"route"`
 	RequiredCapabilities []string         `json:"required_capabilities,omitempty"`
 	ResourceTypes        []V2ResourceType `json:"resource_types,omitempty"`
+}
+
+// V2ConnectorTool resolves one trusted connector tool from the parsed v2 set.
+func (v *Verified) V2ConnectorTool(name string, now time.Time) (V2Tool, bool) {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return V2Tool{}, false
+	}
+	var set v2PolicySet
+	if strictJSON(v.Payload.PolicySet, &set) != nil {
+		return V2Tool{}, false
+	}
+	for _, tool := range set.Tools {
+		if tool.Name == name && tool.Route.ConnectorBinding != nil {
+			return tool, true
+		}
+	}
+	return V2Tool{}, false
 }
 
 type v2Check struct {
@@ -193,7 +212,13 @@ func evaluateV2Check(checks []v2Check, request map[string]string, subject *Sessi
 	matching := make([]v2Check, 0, len(checks))
 	call := Call{AgentID: agentID, UserID: subject.UserID, Email: subject.Email}
 	for _, check := range checks {
-		if check.Effect != "permit" && check.Effect != "deny" || !v2ScopeMatches(check.Scope, agentID, orgID, workspaceID) {
+		// A direct capability permit is a separate compatibility grant and
+		// cannot create the missing tool-call permit. Direct capability denies
+		// remain effective against the operation.
+		if check.Selector["tool"] == "" && check.Effect == policyPermitAction {
+			continue
+		}
+		if check.Effect != policyPermitAction && check.Effect != "deny" || !v2ScopeMatches(check.Scope, agentID, orgID, workspaceID) {
 			continue
 		}
 		if !srcMatch(check.Selector["source_principal"], call, groups, roles) || !v2SelectorMatches(check.Selector, request) {

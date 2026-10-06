@@ -199,6 +199,24 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 
 // AuthorizeV2Plan revalidates the exact current session and evaluates the
 // complete planner-produced operation set against a fresh local v2 bundle.
+type V2PlanContext struct {
+	BundleDigest  string
+	BundleVersion int64
+	Tool          policybundle.V2Tool
+}
+
+func (e *Evaluator) V2PlanContext(toolName string) (V2PlanContext, bool) {
+	v, _, err := e.check()
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(e.now().UTC()) {
+		return V2PlanContext{}, false
+	}
+	tool, ok := v.V2ConnectorTool(toolName, e.now().UTC())
+	if !ok {
+		return V2PlanContext{}, false
+	}
+	return V2PlanContext{BundleDigest: v.Digest, BundleVersion: v.Payload.BundleVersion, Tool: tool}, true
+}
+
 func (e *Evaluator) AuthorizeV2Plan(installationID, subjectID, source, externalID, agentID, tool string, ops []policybundle.Operation) (string, int64, bool, error) {
 	if installationID != e.aud.InstallationID || subjectID == "" || agentID == "" || tool == "" || len(ops) == 0 || e.sessions == nil {
 		return "", 0, false, nil
