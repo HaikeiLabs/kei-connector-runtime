@@ -18,7 +18,7 @@ func (Adapter) Kind() harness.Kind { return Kind }
 
 func (Adapter) DiscoverTools(context.Context, harness.Env) (harness.Discovery, error) {
 	return harness.Discovery{BuiltIns: []harness.Tool{{
-		Name: "example.read", Source: "example", OperationClass: "read", Description: "Read example resources",
+		Name: "example.read", Service: "harness", Source: "example", Executor: "example", Registration: "example.read", OperationClass: "read", Description: "Read example resources",
 	}}}, nil
 }
 

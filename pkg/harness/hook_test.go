@@ -34,11 +34,14 @@ func TestClaudeHookReportsDigestWithoutDecisionOrArguments(t *testing.T) {
 }
 
 func TestManifestFromDiscoveryUsesV3HarnessRoutes(t *testing.T) {
-	m := ManifestFromDiscovery(Discovery{BuiltIns: []Tool{{Name: "codex.read", Source: "codex", OperationClass: "read"}}, MCP: []Tool{{Name: "codex.mcp.linear.create_issue", Source: "mcp", OperationClass: "write"}}})
+	m := ManifestFromDiscovery(Discovery{BuiltIns: []Tool{{Name: "codex.read", Service: "harness", Source: "codex", Executor: "codex", Registration: "codex.read", OperationClass: "read"}}, MCP: []Tool{{Name: "codex.mcp.linear.create_issue", Service: "harness", Source: "mcp", Executor: "codex", Registration: "mcp:linear.create_issue", OperationClass: "write"}}})
 	if m.Schema != "kei.tool-manifest/v3" || len(m.Tools) != 2 {
 		t.Fatalf("manifest = %#v", m)
 	}
 	for _, tool := range m.Tools {
+		if tool.Service != "harness" || tool.Source == "" {
+			t.Fatalf("tool missing explicit service/source: %#v", tool)
+		}
 		if tool.Route.HarnessExecutor.Executor == "" || tool.Route.HarnessExecutor.Registration == "" {
 			t.Fatalf("tool missing explicit harness route: %#v", tool)
 		}

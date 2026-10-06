@@ -37,8 +37,11 @@ type Harness struct {
 // spelling for policy matching; Name is the normalized registry identifier.
 type Tool struct {
 	Name           string `json:"name"`
+	Service        string `json:"service"`
 	Source         string `json:"source"`
 	Selector       string `json:"selector,omitempty"`
+	Executor       string `json:"executor"`
+	Registration   string `json:"registration"`
 	OperationClass string `json:"operation_class"`
 	Description    string `json:"description"`
 }
@@ -120,15 +123,6 @@ type HarnessToolEvent struct {
 	ObservedAt        time.Time `json:"observed_at"`
 }
 
-func stringsBeforeDot(s string) string {
-	for i, r := range s {
-		if r == '.' {
-			return s[:i]
-		}
-	}
-	return s
-}
-
 // Adapter provides discovery, native config rendering, and report-only hook
 // decoding for one harness kind.
 type Adapter interface {
@@ -148,6 +142,7 @@ type Renderer interface {
 // ManifestTool maps discovery to the typed v3 catalog route contract.
 type ManifestTool struct {
 	Name           string    `json:"name"`
+	Service        string    `json:"service"`
 	Source         string    `json:"source"`
 	OperationClass string    `json:"operation_class"`
 	Route          ToolRoute `json:"route"`
@@ -180,15 +175,7 @@ func ManifestFromDiscovery(discoveries ...Discovery) ToolManifest {
 	for _, d := range discoveries {
 		for _, group := range [][]Tool{d.BuiltIns, d.Skills, d.MCP} {
 			for _, t := range group {
-				source := t.Source
-				if source == "" {
-					source = stringsBeforeDot(t.Name)
-				}
-				registration := t.Selector
-				if registration == "" {
-					registration = t.Name
-				}
-				m.Tools = append(m.Tools, ManifestTool{Name: t.Name, Source: source, OperationClass: t.OperationClass, Route: ToolRoute{HarnessExecutor: HarnessExecutorRoute{Executor: source, Registration: registration}}, Description: t.Description})
+				m.Tools = append(m.Tools, ManifestTool{Name: t.Name, Service: t.Service, Source: t.Source, OperationClass: t.OperationClass, Route: ToolRoute{HarnessExecutor: HarnessExecutorRoute{Executor: t.Executor, Registration: t.Registration}}, Description: t.Description})
 			}
 		}
 	}
