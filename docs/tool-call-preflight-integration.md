@@ -12,6 +12,6 @@ Successful preflight stores the approved plan in process memory and returns an o
 
 ## Integration gates
 
-1. HAI-392 must register typed routes, agent assignment, argument validators and trusted planners with the local PDP. Until then preflight returns `planner_unavailable`.
-2. HAI-280's policy-set v2 structured checks must be supported by the runtime before permitting plans that depend on typed resource type/id/parent constraints. This branch does not invent resource serialization or mapping; the existing v1 PDP evaluates its legacy exact resource string. Unsupported bundle schemas continue to fail closed.
-3. Add end-to-end tests that preflight a real registered tool, deny on any ANDed operation, then consume only the matching one-use entries through connector invocation. Keep PR #129 marked incomplete until these gates pass.
+1. HAI-392's typed v3 manifest/route types are proposed in open PR #130. This branch deliberately does not duplicate `runtime/tool_manifest.go`. Runtime startup still does not register trusted typed routes, assigned agents, validated-args validators, and operation planners with the local PDP; until that integration exists, preflight returns `planner_unavailable`.
+2. HAI-280's policy-set v2 structured checks are not supported by the current runtime evaluator. Do not invent a conversion to legacy resource strings: typed resource type/id/parent decisions must use the locally cached verified policy bundle, with no control-plane calls during preflight/consume. Unsupported bundle schemas remain fail-closed.
+3. End-to-end tests must connect an actual registered tool's complete plan to connector invocation and prove provider non-invocation before permit, any-operation denial, exact one-use consumption, replay/substitution denial, and v1 compatibility. Keep PR #129 marked incomplete until all gates pass.
