@@ -532,6 +532,9 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	if err != nil {
 		return fmt.Errorf("local policy bundle unavailable: %w", err)
 	}
+	if bundle.Payload.Schema == "kei.policy-bundle/v2" {
+		return errors.New("v2 model authorization is unsupported; refusing the legacy online subject path")
+	}
 	var attrs *policybundle.Subject
 	if invokingSubject != "" || h.cfg.ProviderUserID != "" {
 		client := keiruntime.NewPolicyControlClient(h.cfg.ABACURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())

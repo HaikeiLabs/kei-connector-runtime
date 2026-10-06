@@ -267,7 +267,15 @@ func (s *Store) Check(installationID, orgID, workspaceID string, now time.Time) 
 			state = Invalid
 			return errors.New("persisted policy bundle invalid")
 		}
-		if (v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(now)) || now.Sub(s.state.LastSuccess) > time.Duration(v.Payload.Refresh.StaleAfterSeconds)*time.Second {
+		if v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(now) {
+			if s.state.State != Stale {
+				s.state.State = Stale
+				_ = s.persist()
+			}
+			state = Stale
+			return ErrSubjectSnapshotStale
+		}
+		if now.Sub(s.state.LastSuccess) > time.Duration(v.Payload.Refresh.StaleAfterSeconds)*time.Second {
 			s.state.State = Stale
 		} else {
 			s.state.State = Active

@@ -2,6 +2,7 @@ package policybundle
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -141,8 +142,20 @@ func TestV2StoreMarksOverAgeSnapshotStale(t *testing.T) {
 	if _, err := store.Activate(raw, v2Installation, v2Org, v2Workspace, now); err != nil {
 		t.Fatalf("activate v2 bundle: %v", err)
 	}
+	fresh, state, err := store.Check(v2Installation, v2Org, v2Workspace, now)
+	if err != nil || fresh == nil || state != Active {
+		t.Fatalf("fresh check verified=%v state=%s err=%v", fresh != nil, state, err)
+	}
+	model := fresh.EvaluateAction("model:invoke", "model:profile", "agent-1", nil)
+	if model.Outcome != "deny" || model.ReasonCode != "subject_snapshot_stale" {
+		t.Fatalf("model action from aged v2 object = %+v", model)
+	}
+	harness, _, reason := fresh.EvaluateHarness(HarnessCall{Kind: "codex", Argv: []string{"git"}})
+	if harness != HarnessNotRenderable {
+		t.Fatalf("harness outcome=%s reason=%s", harness, reason)
+	}
 	verified, state, err := store.Check(v2Installation, v2Org, v2Workspace, now.Add(30*time.Second))
-	if err != nil || verified == nil || state != Stale {
+	if verified != nil || state != Stale || !errors.Is(err, ErrSubjectSnapshotStale) {
 		t.Fatalf("stale check verified=%v state=%s err=%v", verified != nil, state, err)
 	}
 }

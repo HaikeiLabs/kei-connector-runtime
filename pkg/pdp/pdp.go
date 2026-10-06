@@ -247,6 +247,9 @@ func (e *Evaluator) ReconcileSession() {
 	}
 	v, _, err := e.check()
 	if err != nil {
+		if errors.Is(err, policybundle.ErrSubjectSnapshotStale) {
+			e.sessions.revoke()
+		}
 		return
 	}
 	if v.Payload.SubjectResolution.Mode == "bundle" && current.Source != "" && current.ExternalID != "" {
@@ -306,6 +309,8 @@ func stateDenial(state policybundle.State) Decision {
 	switch state {
 	case policybundle.Expired:
 		code = "policy_bundle_expired"
+	case policybundle.Stale:
+		code = "subject_snapshot_stale"
 	case policybundle.Invalid:
 		code = "policy_bundle_invalid"
 	case policybundle.Unsupported:

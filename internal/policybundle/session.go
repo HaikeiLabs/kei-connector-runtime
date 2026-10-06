@@ -130,7 +130,7 @@ func (v *Verified) SubjectSnapshotFresh(now time.Time) bool {
 	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || v.Payload.SubjectResolution.MaxCacheSeconds < 1 || v.Payload.SubjectResolution.MaxCacheSeconds > 60 || v.Payload.Identities == nil {
 		return false
 	}
-	return now.Before(v.Payload.IssuedAt.Add(time.Duration(v.Payload.SubjectResolution.MaxCacheSeconds) * time.Second))
+	return !v.Payload.IssuedAt.After(now) && now.Before(v.Payload.IssuedAt.Add(time.Duration(v.Payload.SubjectResolution.MaxCacheSeconds)*time.Second))
 }
 
 // LookupIdentity resolves an external session key against the verified

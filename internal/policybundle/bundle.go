@@ -20,8 +20,9 @@ const ContentTypeV2 = "application/vnd.kei.policy-bundle.v2+json"
 const Issuer = "kei-policy-catalog"
 
 var (
-	ErrBundleExpired     = errors.New("policy bundle expired")
-	ErrBundleUnsupported = errors.New("policy bundle unsupported")
+	ErrBundleExpired        = errors.New("policy bundle expired")
+	ErrBundleUnsupported    = errors.New("policy bundle unsupported")
+	ErrSubjectSnapshotStale = errors.New("policy bundle subject snapshot is stale")
 )
 
 type Audience struct {
@@ -187,8 +188,8 @@ func ValidateV2(bundleBytes []byte, installationID, orgID, workspaceID string, h
 	if payload.BundleVersion <= highestVersion {
 		return nil, errors.New("policy bundle v2 version rollback or replay")
 	}
-	if payload.IssuedAt.After(now.Add(5 * time.Minute)) {
-		return nil, errors.New("policy bundle v2 issued too far in the future")
+	if payload.IssuedAt.After(now) {
+		return nil, errors.New("policy bundle v2 issued in the future")
 	}
 	if !now.Before(payload.NotAfter) {
 		return nil, ErrBundleExpired
