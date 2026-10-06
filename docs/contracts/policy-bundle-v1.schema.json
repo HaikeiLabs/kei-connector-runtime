@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.haikeilabs.com/kei/policy-bundle-v1.schema.json",
   "title": "kei.policy-bundle/v1",
-  "description": "The policy bundle a runtime installation's PEP (kei-connector-runtime) enforces (ADR-026). The root schema is the canonical JSON object served by the catalog and validated/persisted by the runtime. Transport integrity is provided by the exact-byte SHA-256 digest and authenticated HTTPS. The $id is an identifier, not a fetchable URL.",
+  "description": "The policy bundle a runtime installation's PEP (kei-connector-runtime) enforces (ADR-026). The root schema is the canonical JSON object served by the catalog and validated/persisted by the runtime. Transport integrity is provided by the exact-byte SHA-256 digest and authenticated HTTPS. The $id is an identifier, not a fetchable URL. ADR-029 adds the optional harness command fields (harnesses, harness_match_semantics), which kei harness sync renders into native harness permissions.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -19,6 +19,10 @@
     "policy_set",
     "agent_connector_bindings"
   ],
+  "dependentRequired": {
+    "harnesses": ["harness_match_semantics"],
+    "harness_match_semantics": ["harnesses"]
+  },
   "properties": {
     "schema": { "const": "kei.policy-bundle/v1" },
     "bundle_id": {
@@ -73,14 +77,17 @@
       }
     },
     "subject_resolution": {
-      "description": "How the PEP learns a human subject's user id, link state, effective groups and org roles. mode=online: the PEP asks the catalog (POST /api/v1/runtime/subject-attributes:resolve) and never reads memberships from the bundle. mode=bundle: identities are embedded in the bundle itself.",
+      "description": "How the PEP learns a human subject's user id, link state, effective groups and org roles. v1 supports two modes: online (deprecated, removed after transition) and bundle. In online mode the PEP calls POST /api/v1/runtime/subject-attributes:resolve. In bundle mode the PEP reads subject attributes from the bundle's identities array (ADR-034).",
       "type": "object",
       "additionalProperties": false,
       "required": ["mode", "max_cache_seconds"],
       "properties": {
-        "mode": { "enum": ["online", "bundle"] },
+        "mode": {
+          "description": "online is withdrawn (ADR-026 G0) and retained only for backward compatibility during transition. bundle is the replacement (ADR-034).",
+          "enum": ["online", "bundle"]
+        },
         "max_cache_seconds": {
-          "description": "The longest a resolved subject may be reused in memory by a long-running PEP. Per-call subprocesses do not cache.",
+          "description": "The longest a resolved subject may be reused in memory by a long-running PEP. Per-call subprocesses do not cache. In bundle mode this field is ignored (the bundle refresh cadence governs staleness).",
           "type": "integer",
           "minimum": 0,
           "maximum": 60
@@ -107,7 +114,7 @@
       }
     },
     "identities": {
-      "description": "Embedded subject identities for mode=bundle. Each identity maps an external platform user to a workspace subject. Present only when subject_resolution.mode is bundle.",
+      "description": "Remote-identity table for subject resolution in bundle mode (ADR-034). Present when subject_resolution.mode is bundle. The PEP matches the incoming subject token's user_id or (source, external_id) against this array to resolve group memberships, org roles and link status. Required when subject_resolution.mode is bundle.",
       "type": "array",
       "items": {
         "type": "object",
@@ -115,41 +122,84 @@
         "required": ["source", "external_id", "user_id", "status"],
         "properties": {
           "source": {
-            "description": "The external system the identity originates from (e.g. discord, github, cli). Open lowercase string matching ^[a-z][a-z0-9_-]*$.",
-            "$ref": "policy-set-v1.schema.json#/$defs/name"
+            "description": "The exact system this remote identity is linked from (e.g. discord, slack, teams, github, entra, whatsapp, cli). Open set, not an enum.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$"
           },
           "external_id": {
-            "description": "The user's identifier on the external platform.",
-            "type": "string",
-            "minLength": 1
+            "description": "The user's ID on that source.",
+            "type": "string"
           },
-          "user_id": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+          "user_id": {
+            "description": "The Kei user UUID this identity is linked to.",
+            "$ref": "policy-set-v1.schema.json#/$defs/id"
+          },
           "status": {
-            "description": "The identity's link status in this workspace.",
-            "type": "string",
+            "description": "Link status. revoked takes effect at the next bundle refresh and ends the in-memory session. cross_workspace never falls through to a permit.",
             "enum": ["linked", "pending", "revoked", "cross_workspace"]
           },
           "groups": {
-            "description": "Effective workspace groups for this identity (only when status=linked).",
+            "description": "Effective group memberships for this identity in this workspace.",
             "type": "array",
-            "items": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+            "items": { "$ref": "policy-set-v1.schema.json#/$defs/name" },
             "uniqueItems": true
           },
           "org_roles": {
-            "description": "Organization-level roles granted to this identity (only when status=linked).",
+            "description": "Effective org-level roles for this identity.",
             "type": "array",
-            "items": { "$ref": "policy-set-v1.schema.json#/$defs/id" },
+            "items": { "type": "string" },
             "uniqueItems": true
           },
           "subject_token": {
-            "description": "Optional opaque token the runtime may use for subject-level API authentication.",
+            "description": "An embedded subject token for offline-capable runtimes. When present the PEP may use this token instead of the session token for claim extraction. Optional.",
             "type": "string"
           },
           "expire_time": {
-            "description": "Optional RFC 3339 timestamp after which this identity is treated as unknown. Absence means no expiry.",
+            "description": "When this identity binding expires. After this instant the identity is treated as revoked.",
             "type": "string",
             "format": "date-time"
           }
+        }
+      }
+    },
+    "harness_match_semantics": {
+      "description": "The dialect renderers (kei harness sync) apply when compiling policy into native harness permissions (ADR-029 section 1.4); no runtime component evaluates harness tool calls against it: argv-token prefix matching for shell:, exact skill:, path: globs, mcp:<server>[.<tool>], tool: names of registered harness tools, harness: sources, and the rule that a shell command is permitted only by a shell: permit with a literal token. policy_set.match_semantics (kei.match/v1) is unchanged. Present if and only if harnesses is present.",
+      "const": "kei.harness-match/v1"
+    },
+    "harnesses": {
+      "description": "The coding-agent harnesses registered on the audience installation (ADR-029 section 2; abac.runtime_installation_harnesses). Installation state, so it sits at the bundle root rather than in the workspace policy_set. Absent means no harness is registered and kei harness sync renders nothing. Adding, changing or deleting a harness re-issues the bundle with a new bundle_version.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/harness" }
+    }
+  },
+  "if": {
+    "properties": {
+      "subject_resolution": {
+        "properties": {
+          "mode": { "const": "bundle" }
+        },
+        "required": ["mode"]
+      }
+    }
+  },
+  "then": {
+    "required": ["identities"]
+  },
+  "$defs": {
+    "harness": {
+      "description": "One registered harness. Identity is (installation_id, agent_id) — no surrogate id (3NF, amendment A2). Matched by harness:<agent_id> or harness:<kind>.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "kind"],
+      "properties": {
+        "agent_id": {
+          "description": "The harness identity. Matched by harness:<agent_id> source. Never equal to a kind value.",
+          "$ref": "policy-set-v1.schema.json#/$defs/id",
+          "not": { "enum": ["claude_code", "codex", "opencode", "custom"] }
+        },
+        "kind": {
+          "description": "Matched by the harness:<kind> source.",
+          "enum": ["claude_code", "codex", "opencode", "custom"]
         }
       }
     }
