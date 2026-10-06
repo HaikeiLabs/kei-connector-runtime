@@ -174,6 +174,9 @@ func TestSyncToolsSendsPUTAndParsesResponse(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Fatalf("Content-Type = %q", got)
 		}
+		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV2 {
+			t.Fatalf("protocol header = %q, want v2", got)
+		}
 		var body ToolManifest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
@@ -183,6 +186,8 @@ func TestSyncToolsSendsPUTAndParsesResponse(t *testing.T) {
 		}
 		routes["PUT /api/v1/runtime/tools"]++
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV2)
+		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV2+", "+ToolManifestSchemaV3)
 		json.NewEncoder(w).Encode(ToolSyncResponse{Added: 1, Unchanged: 1})
 	}))
 	defer server.Close()
@@ -196,6 +201,66 @@ func TestSyncToolsSendsPUTAndParsesResponse(t *testing.T) {
 	}
 	if routes["PUT /api/v1/runtime/tools"] != 1 {
 		t.Fatalf("PUT calls = %d, want 1", routes["PUT /api/v1/runtime/tools"])
+	}
+}
+
+func TestSyncToolsV3RequiresExplicitProtocolAcknowledgment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV3 {
+			t.Fatalf("protocol header = %q, want v3", got)
+		}
+		w.WriteHeader(http.StatusOK) // legacy endpoint did not negotiate v3
+	}))
+	defer server.Close()
+	client := NewRuntimeClient(server.URL, time.Second)
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{{
+		Name: "local.echo", Service: "harness", Source: "local", OperationClass: "write",
+		Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "harness", Registration: "echo"}},
+	}}}
+	if err := client.SyncTools(context.Background(), "test-token", manifest); err == nil || !strings.Contains(err.Error(), "not explicitly negotiated") {
+		t.Fatalf("SyncTools error = %v, want missing-v3-ack failure", err)
+	}
+}
+
+func TestSyncToolsPreservesLegacyV2PeerCompatibility(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV2 {
+			t.Fatalf("protocol proposal = %q", got)
+		}
+		w.WriteHeader(http.StatusOK) // pre-negotiation v2 catalog
+	}))
+	defer server.Close()
+	client := NewRuntimeClient(server.URL, time.Second)
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{{Name: "local.echo", Source: "local", OperationClass: "write"}}}
+	if err := client.SyncTools(context.Background(), "test-token", manifest); err != nil {
+		t.Fatalf("legacy v2 sync: %v", err)
+	}
+}
+
+func TestSyncToolsAcceptsNegotiatedV3(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(ToolManifestProtocolHeader); got != ToolManifestSchemaV3 {
+			t.Fatalf("protocol proposal = %q", got)
+		}
+		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV3)
+		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV2+", "+ToolManifestSchemaV3)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := NewRuntimeClient(server.URL, time.Second)
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{{
+		Name: "local.echo", Service: "harness", Source: "local", OperationClass: "write",
+		Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "harness", Registration: "echo"}},
+	}}}
+	if err := client.SyncTools(context.Background(), "test-token", manifest); err != nil {
+		t.Fatalf("negotiated v3 sync: %v", err)
+	}
+}
+
+func TestSyncToolsRejectsUnsupportedLocalProtocol(t *testing.T) {
+	client := NewRuntimeClient("http://unused", time.Second)
+	if err := client.SyncTools(context.Background(), "token", &ToolManifest{Schema: "kei.tool-manifest/v4"}); err == nil {
+		t.Fatal("unsupported local protocol was sent")
 	}
 }
 
