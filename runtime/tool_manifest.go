@@ -22,8 +22,9 @@ const (
 // ToolManifest is the schema-tagged catalog sync request. V2/v3 remain
 // compatible; v4 connector routes add a strictly validated declarative plan.
 type ToolManifest struct {
-	Schema string           `json:"schema"`
-	Tools  []ToolDefinition `json:"tools"`
+	Schema   string           `json:"schema"`
+	SyncMode string           `json:"sync_mode,omitempty"`
+	Tools    []ToolDefinition `json:"tools"`
 }
 
 type ToolRoute struct {
@@ -76,6 +77,9 @@ func validateToolManifest(m *ToolManifest) error {
 	if m == nil {
 		return fmt.Errorf("tool manifest is nil")
 	}
+	if err := validateToolManifestSyncMode(m.Schema, m.SyncMode); err != nil {
+		return err
+	}
 	if len(m.Tools) > 256 {
 		return fmt.Errorf("too many tools: %d (max 256)", len(m.Tools))
 	}
@@ -106,6 +110,16 @@ func validateToolManifest(m *ToolManifest) error {
 		} else if err := validateToolDefinition(td, prefix); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateToolManifestSyncMode(schema, mode string) error {
+	if mode == "" {
+		return nil // omitted means the catalog's legacy replace behavior
+	}
+	if schema != ToolManifestSchemaV4 || mode != "merge" {
+		return fmt.Errorf("sync_mode is unsupported for this manifest schema or value")
 	}
 	return nil
 }

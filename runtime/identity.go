@@ -217,6 +217,9 @@ func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *T
 	if manifest == nil || (manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4) {
 		return fmt.Errorf("unsupported tool manifest protocol")
 	}
+	if err := validateToolManifestSyncMode(manifest.Schema, manifest.SyncMode); err != nil {
+		return fmt.Errorf("invalid tool manifest sync mode")
+	}
 	if manifest.Schema == ToolManifestSchemaV4 {
 		if err := validateToolManifest(manifest); err != nil {
 			return fmt.Errorf("invalid v4 tool manifest")

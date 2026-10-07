@@ -2,12 +2,58 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestSyncToolsPreservesV4SyncMode(t *testing.T) {
+	for _, mode := range []string{"merge", ""} {
+		t.Run(map[string]string{"merge": "merge", "": "omitted"}[mode], func(t *testing.T) {
+			var got map[string]json.RawMessage
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || r.URL.Path != "/api/v1/runtime/tools" {
+					t.Errorf("request=%s %s", r.Method, r.URL.Path)
+				}
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+					t.Error(err)
+				}
+				w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV4)
+				w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV4)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			manifest := &ToolManifest{Schema: ToolManifestSchemaV4, SyncMode: mode, Tools: []ToolDefinition{{Name: "codex.shell", Service: "codex", Source: "codex", OperationClass: "write", Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "codex", Registration: "codex.shell"}}}}}
+			if err := NewRuntimeClient(server.URL, time.Second).SyncTools(context.Background(), "token", manifest); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "merge" {
+				var gotMode string
+				if err := json.Unmarshal(got["sync_mode"], &gotMode); err != nil || gotMode != mode {
+					t.Fatalf("encoded sync_mode=%s err=%v", got["sync_mode"], err)
+				}
+			} else if _, exists := got["sync_mode"]; exists {
+				t.Fatalf("omitted mode encoded: %s", got["sync_mode"])
+			}
+		})
+	}
+}
+
+func TestSyncToolsRejectsMergeOutsideV4(t *testing.T) {
+	client := NewRuntimeClient("http://127.0.0.1:1", time.Second)
+	for _, schema := range []string{ToolManifestSchemaV2, ToolManifestSchemaV3} {
+		if err := client.SyncTools(context.Background(), "token", &ToolManifest{Schema: schema, SyncMode: "merge"}); err == nil {
+			t.Errorf("SyncTools accepted sync_mode=merge for %s", schema)
+		}
+	}
+	if err := client.SyncTools(context.Background(), "token", &ToolManifest{Schema: ToolManifestSchemaV4, SyncMode: "replace"}); err == nil {
+		t.Error("SyncTools accepted unsupported v4 sync mode")
+	}
+}
 
 func TestWhoAmIRoundTripsWorkspaceID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
