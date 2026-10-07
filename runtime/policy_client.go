@@ -22,6 +22,8 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
+const policyBundleAccept = policybundle.ContentTypeV2 + ", " + policybundle.ContentType
+
 var (
 	ErrPolicyInstallationRevoked = errors.New("runtime installation is revoked or inactive")
 	ErrPolicyAuthorizationDenied = errors.New("runtime policy endpoint denied authorization")
@@ -107,7 +109,7 @@ func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (bod
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", policybundle.ContentType)
+	req.Header.Set("Accept", policyBundleAccept)
 	req.Header.Set("Accept-Encoding", "identity")
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
@@ -308,7 +310,7 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		return reject(errors.New("policy bundle response is missing ETag or version"))
 	}
 	mediaType, mediaParams, mediaErr := mime.ParseMediaType(contentType)
-	if mediaErr != nil || mediaType != policybundle.ContentType || len(mediaParams) != 0 {
+	if mediaErr != nil || (mediaType != policybundle.ContentType && mediaType != policybundle.ContentTypeV2) || len(mediaParams) != 0 {
 		return reject(errors.New("policy bundle response has an invalid content type"))
 	}
 	bodyDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
@@ -322,6 +324,13 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 	}
 	if candidate.Digest != bodyDigest {
 		return reject(errors.New("validated policy bundle digest differs from response digest"))
+	}
+	expectedContentType := policybundle.ContentType
+	if candidate.Payload.Schema == "kei.policy-bundle/v2" {
+		expectedContentType = policybundle.ContentTypeV2
+	}
+	if mediaType != expectedContentType {
+		return reject(errors.New("policy bundle content type does not match its schema"))
 	}
 	if headerVersion != candidate.Payload.BundleVersion {
 		return reject(errors.New("catalog bundle version header does not match policy bundle"))

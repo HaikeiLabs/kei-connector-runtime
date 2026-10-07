@@ -22,9 +22,11 @@ const (
 
 // SessionSubject is the acting user of the current worker session.
 type SessionSubject struct {
-	UserID string
-	Email  string
-	Status string
+	UserID     string
+	Email      string
+	Source     string
+	ExternalID string
+	Status     string
 }
 
 // Memberships answers which groups, org roles and workspace grant the bundle
@@ -38,22 +40,53 @@ type Memberships interface {
 // BundleMemberships returns the memberships carried by the bundle, or nil
 // when the bundle does not carry them (mode=online or no identities).
 func BundleMemberships(v *Verified) Memberships {
-	if len(v.Payload.Identities) == 0 {
+	return BundleMembershipsAt(v, time.Now())
+}
+
+// BundleMembershipsAt binds identity expiry checks to the evaluator's clock so
+// snapshot freshness and expiry can be tested deterministically.
+func BundleMembershipsAt(v *Verified, now time.Time) Memberships {
+	if v == nil || v.Payload.SubjectResolution.Mode != "bundle" || len(v.Payload.Identities) == 0 || (v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(now)) {
 		return nil
 	}
-	return &bundleMemberships{identities: v.Payload.Identities}
+	return &bundleMemberships{identities: v.Payload.Identities, now: now, aggregate: v.Payload.Schema == "kei.policy-bundle/v2"}
 }
 
 type bundleMemberships struct {
 	identities []Identity
+	now        time.Time
+	aggregate  bool
 }
 
 func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, granted, known bool) {
+	if m.aggregate {
+		groupSet, roleSet := map[string]bool{}, map[string]bool{}
+		for _, id := range m.identities {
+			if id.UserID != userID || (!id.ExpireTime.IsZero() && !m.now.Before(id.ExpireTime)) {
+				continue
+			}
+			known = true
+			granted = granted || id.Status == SubjectLinked
+			for _, group := range id.Groups {
+				groupSet[group] = true
+			}
+			for _, role := range id.OrgRoles {
+				roleSet[role] = true
+			}
+		}
+		for group := range groupSet {
+			groups = append(groups, group)
+		}
+		for role := range roleSet {
+			roles = append(roles, role)
+		}
+		return groups, roles, granted, known
+	}
 	for _, id := range m.identities {
 		if id.UserID != userID {
 			continue
 		}
-		if !id.ExpireTime.IsZero() && !time.Now().Before(id.ExpireTime) {
+		if !id.ExpireTime.IsZero() && !m.now.Before(id.ExpireTime) {
 			return nil, nil, false, false
 		}
 		known = true
@@ -63,6 +96,64 @@ func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, grant
 	return nil, nil, false, false
 }
 
+// LookupLinkedUser resolves a CLI session's user_id against bundle identities.
+// Remote sessions must use the exact source/external_id key instead.
+func (v *Verified) LookupLinkedUser(userID string, now time.Time) (Identity, bool) {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || !v.SubjectSnapshotFresh(now) || userID == "" {
+		return Identity{}, false
+	}
+	for _, id := range v.Payload.Identities {
+		if id.UserID == userID && id.Status == SubjectLinked && (id.ExpireTime.IsZero() || now.Before(id.ExpireTime)) {
+			return id, true
+		}
+	}
+	return Identity{}, false
+}
+
+func statusReasonCode(status string) string {
+	switch status {
+	case SubjectPending:
+		return "subject_pending"
+	case SubjectRevoked:
+		return "subject_revoked"
+	case SubjectCrossWorkspace:
+		return "subject_cross_workspace"
+	default:
+		return "subject_unlinked"
+	}
+}
+
+// SubjectSnapshotFresh reports whether a v2 identity table is within the
+// bundle's configured freshness window. V1 semantics intentionally remain
+// unchanged.
+func (v *Verified) SubjectSnapshotFresh(now time.Time) bool {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || v.Payload.SubjectResolution.MaxCacheSeconds < 1 || v.Payload.SubjectResolution.MaxCacheSeconds > 60 || v.Payload.Identities == nil {
+		return false
+	}
+	return !v.Payload.IssuedAt.After(now) && now.Before(v.Payload.IssuedAt.Add(time.Duration(v.Payload.SubjectResolution.MaxCacheSeconds)*time.Second))
+}
+
+// LookupIdentity resolves an external session key against the verified
+// bundle's ADR-034 identities table. Duplicate matches and expired entries are
+// rejected rather than allowing array order to select an identity.
+func (v *Verified) LookupIdentity(source, externalID string, now time.Time) (Identity, bool) {
+	if v == nil || v.Payload.SubjectResolution.Mode != "bundle" || source == "" || externalID == "" || (v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(now)) {
+		return Identity{}, false
+	}
+	var found Identity
+	matched := false
+	for _, id := range v.Payload.Identities {
+		if id.Source != source || id.ExternalID != externalID {
+			continue
+		}
+		if matched || (!id.ExpireTime.IsZero() && !now.Before(id.ExpireTime)) {
+			return Identity{}, false
+		}
+		found, matched = id, true
+	}
+	return found, matched
+}
+
 // EvaluateSession decides a call with the in-memory session subject and no
 // catalog round trip. Registry and agent checks come first, then the subject
 // gate (a non-linked session denies before any policy), then the
@@ -70,6 +161,18 @@ func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, grant
 // falls through: without a session it denies subject_unlinked, and without
 // bundle memberships a group or org source denies subject_pending.
 func (v *Verified) EvaluateSession(call Call, subject *SessionSubject, members Memberships) Decision {
+	return v.EvaluateSessionAt(call, subject, members, time.Now())
+}
+
+// EvaluateSessionAt adds the v2 subject snapshot freshness gate while keeping
+// v1 decision semantics unchanged.
+func (v *Verified) EvaluateSessionAt(call Call, subject *SessionSubject, members Memberships, now time.Time) Decision {
+	if v.Payload.Schema == "kei.policy-bundle/v2" {
+		if !v.SubjectSnapshotFresh(now) {
+			return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
+		}
+		return Decision{Outcome: "deny", ReasonCode: "preflight_required", Reason: "v2 connector operations require complete-plan preflight"}
+	}
 	call.UserID, call.Email = "", ""
 	var pre Decision
 	if call.ConnectorInvocation {
@@ -109,6 +212,21 @@ func (v *Verified) EvaluateSession(call Call, subject *SessionSubject, members M
 	if subject != nil {
 		if d, denied := subjectGate(subject); denied {
 			return d
+		}
+		if v.Payload.Schema == "kei.policy-bundle/v2" {
+			var id Identity
+			var found bool
+			if subject.Source == "cli" && subject.ExternalID == "" {
+				id, found = v.LookupLinkedUser(subject.UserID, now)
+			} else {
+				id, found = v.LookupIdentity(subject.Source, subject.ExternalID, now)
+			}
+			if !found || id.UserID != subject.UserID {
+				return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session identity is not present in the fresh bundle snapshot"}
+			}
+			if id.Status != SubjectLinked {
+				return Decision{Outcome: "deny", ReasonCode: statusReasonCode(id.Status), Reason: "the bundle snapshot does not grant the session identity"}
+			}
 		}
 		call.UserID, call.Email = subject.UserID, subject.Email
 	}

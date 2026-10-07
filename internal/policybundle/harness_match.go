@@ -1,6 +1,8 @@
 package policybundle
 
 import (
+	"time"
+
 	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
 )
 
@@ -31,6 +33,9 @@ const (
 // EvaluateHarness applies kei.harness-match/v1 to a harness tool call. It
 // decodes the bundle's policy set and delegates to harnessmatch.Evaluate.
 func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID, reason string) {
+	if v != nil && v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(time.Now()) {
+		return HarnessNotRenderable, "", HarnessReasonBundleInvalid
+	}
 	set, err := v.decodePolicySet()
 	if err != nil {
 		return HarnessNotRenderable, "", HarnessReasonBundleInvalid

@@ -23,10 +23,10 @@ const (
 	authorizeRequestSchema  = "kei.authorize-request/v1"
 	authorizeResponseSchema = "kei.authorize-response/v1"
 	sessionSchema           = "kei.session/v1"
-	// sessionSchemaV2 creates a named session (multi-session socket API,
-	// docs/unix-socket.md): many agents in parallel on one daemon.
-	sessionSchemaV2  = "kei.session/v2"
-	maxSocketRequest = 64 << 10
+	// sessionSchemaV2 creates a named session (multi-session socket API).
+	sessionSchemaV2      = "kei.session/v2"
+	maxSocketRequest     = 64 << 10
+	maxSocketPlanRequest = 192 << 10
 )
 
 type socketAuthorizeRequest struct {
@@ -115,6 +115,8 @@ type LocalPDP struct {
 	identity  atomic.Pointer[Identity]
 	emit      EmitAuditFunc
 	keychain  SessionKeychain
+	preflight *preflightService
+
 	// creds is the legacy default session's credential store; each named
 	// session has its own in sessionCreds (id -> *credrelease.Store).
 	creds        *credrelease.Store
@@ -128,7 +130,7 @@ type LocalPDP struct {
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
-	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, stopSweep: make(chan struct{})}
+	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, preflight: newPreflightService(), stopSweep: make(chan struct{})}
 	// A named session's credentials go with it, however it ends.
 	l.Sessions.OnEnd(l.dropSessionCredentials)
 	return l
@@ -171,6 +173,7 @@ func (l *LocalPDP) deprecate(route string) {
 		slog.Warn("default_session_deprecated", "route", route,
 			"detail", "name a session: PUT /v1/session with "+sessionSchemaV2+", then send "+session.Header+" (or KEI_SESSION_ID)")
 	}
+
 }
 
 func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
@@ -269,6 +272,9 @@ func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp
 // credential. The serve daemon calls it on exit.
 func (l *LocalPDP) Close() {
 	l.closeOnce.Do(func() { close(l.stopSweep) })
+	if l.preflight != nil {
+		l.preflight.store.Invalidate()
+	}
 	l.flushCredentials()
 }
 
@@ -284,6 +290,9 @@ func (l *LocalPDP) flushCredentials() {
 }
 
 func (l *LocalPDP) SetIdentity(identity *Identity) {
+	if l.preflight != nil {
+		l.preflight.store.Invalidate()
+	}
 	if identity == nil || identity.WorkspaceID == nil {
 		return
 	}
@@ -297,6 +306,9 @@ func (l *LocalPDP) SetIdentity(identity *Identity) {
 }
 
 func (l *LocalPDP) AfterSync(err error) {
+	if l.preflight != nil {
+		l.preflight.store.Invalidate()
+	}
 	e := l.evaluator.Load()
 	if errors.Is(err, ErrInstallationRevoked) {
 		if e != nil {
@@ -324,6 +336,8 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
+		case r.URL.Path == "/v1/preflight" && r.Method == http.MethodPost && l.preflight != nil:
+		case r.URL.Path == "/v1/consume" && r.Method == http.MethodPost && l.preflight != nil:
 		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
 		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		default:
@@ -344,6 +358,10 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize":
 			l.handleAuthorize(w, r)
+		case r.URL.Path == "/v1/preflight":
+			l.handlePreflight(w, r)
+		case r.URL.Path == "/v1/consume":
+			l.handleConsume(w, r)
 		// The two credentialed routes. Both run inside this serve daemon
 		// with the session-held credentials, which never leave it:
 		//   - connectors:invoke runs governed connector API calls on behalf
@@ -387,6 +405,9 @@ func (l *LocalPDP) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 // new named session and answers 201 with its id; a kei.session/v1 body
 // replaces the legacy default session (deprecated) and answers 204.
 func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
+	if l.preflight != nil {
+		l.preflight.store.Invalidate()
+	}
 	var req socketSessionRequest
 	err := decodeSocketJSON(w, r, &req)
 	legacy := req.Schema == sessionSchema
@@ -424,7 +445,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "cli token verification failed: "+err.Error())
 			return
 		}
-		sub = pdp.Subject{UserID: userID, Status: pdp.StatusLinked, Token: token}
+		sub = pdp.Subject{UserID: userID, Status: pdp.StatusLinked, Source: "cli", Token: token}
 	default:
 		if req.ExternalID == "" {
 			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "external_id is required for source "+req.Source)
@@ -494,21 +515,89 @@ func (l *LocalPDP) loadCredentials(ctx context.Context, id string, sub pdp.Subje
 // the identity's status (unlinked, pending, cross_workspace, revoked). An
 // unknown or expired identity yields an unlinked subject.
 func resolveBundleSubject(e *pdp.Evaluator, source, externalID string) pdp.Subject {
-	for _, id := range e.BundleIdentities() {
-		if id.Source != source || id.ExternalID != externalID {
-			continue
-		}
-		if !id.ExpireTime.IsZero() && !time.Now().Before(id.ExpireTime) {
-			break
-		}
-		sub := pdp.Subject{UserID: id.UserID, Status: pdp.Status(id.Status)}
-		if sub.Status == pdp.StatusLinked {
-			// The identity's ES256 subject token is the I11 subject evidence.
-			sub.Token = id.SubjectToken
-		}
-		return sub
+	id, ok := e.ResolveBundleIdentity(source, externalID)
+	if !ok {
+		return pdp.Subject{Status: pdp.StatusUnlinked}
 	}
-	return pdp.Subject{Status: pdp.StatusUnlinked}
+	sub := pdp.Subject{UserID: id.UserID, Status: pdp.Status(id.Status), Source: source, ExternalID: externalID}
+	if sub.Status == pdp.StatusLinked {
+		// The identity's ES256 subject token is the I11 subject evidence.
+		sub.Token = id.SubjectToken
+	}
+	return sub
+}
+
+type socketPreflightRequest struct {
+	Schema          string          `json:"schema"`
+	Tool            string          `json:"tool"`
+	SessionID       string          `json:"session_id"`
+	AgentID         string          `json:"agent_id,omitempty"`
+	Arguments       json.RawMessage `json:"arguments"`
+	Context         json.RawMessage `json:"context"`
+	ParentSpan      string          `json:"parent_span,omitempty"`
+	DelegationDepth int             `json:"delegation_depth,omitempty"`
+}
+
+type socketPreflightResponse struct {
+	Schema    string    `json:"schema"`
+	Handle    string    `json:"handle"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type socketConsumeOperation struct {
+	ID                 string `json:"id"`
+	ConnectorID        string `json:"connector_id"`
+	Capability         string `json:"capability"`
+	Action             string `json:"action"`
+	Resource           string `json:"resource,omitempty"`
+	ResourceType       string `json:"resource_type,omitempty"`
+	ResourceID         string `json:"resource_id,omitempty"`
+	ResourceParent     string `json:"resource_parent,omitempty"`
+	ResourceParentType string `json:"resource_parent_type,omitempty"`
+	InputDigest        string `json:"input_digest"`
+}
+
+type socketConsumeRequest struct {
+	Schema          string                 `json:"schema"`
+	Handle          string                 `json:"handle"`
+	SessionID       string                 `json:"session_id"`
+	Tool            string                 `json:"tool"`
+	Arguments       json.RawMessage        `json:"arguments"`
+	Context         json.RawMessage        `json:"context"`
+	AgentID         string                 `json:"agent_id,omitempty"`
+	Operation       socketConsumeOperation `json:"operation"`
+	ParentSpan      string                 `json:"parent_span,omitempty"`
+	DelegationDepth int                    `json:"delegation_depth,omitempty"`
+}
+
+func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	var req socketPreflightRequest
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.preflight-request/v1" || req.SessionID == "" || session.FromRequest(r) != req.SessionID || req.Tool == "" || !jsonJSONObject(req.Arguments) || (len(req.Context) > 0 && !jsonJSONObject(req.Context)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
+		return
+	}
+	grant, err := l.PreflightV2(r.Context(), req.SessionID, req.Tool, req.AgentID, req.Arguments, req.Context, req.ParentSpan, req.DelegationDepth, 10*time.Second)
+	if err != nil {
+		writeRuntimeError(w, http.StatusForbidden, "preflight_denied", "the complete operation plan was not authorized")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(socketPreflightResponse{Schema: "kei.preflight-response/v1", Handle: grant.Handle, ExpiresAt: grant.ExpiresAt})
+}
+
+func (l *LocalPDP) handleConsume(w http.ResponseWriter, r *http.Request) {
+	var req socketConsumeRequest
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.consume-request/v1" || req.SessionID == "" || session.FromRequest(r) != req.SessionID || req.Handle == "" || req.Tool == "" || req.Operation.ID == "" || req.Operation.ConnectorID == "" || req.Operation.Capability == "" || req.Operation.Action == "" || req.Operation.InputDigest == "" {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
+		return
+	}
+	op := Operation{ID: req.Operation.ID, ConnectorID: req.Operation.ConnectorID, Capability: req.Operation.Capability, Action: req.Operation.Action, Resource: req.Operation.Resource, ResourceType: req.Operation.ResourceType, ResourceID: req.Operation.ResourceID, ResourceParent: req.Operation.ResourceParent, ResourceParentType: req.Operation.ResourceParentType, InputDigest: req.Operation.InputDigest}
+	if err := l.ConsumeV2(r.Context(), req.Handle, req.SessionID, req.Tool, req.AgentID, req.Arguments, req.Context, op, req.ParentSpan, req.DelegationDepth); err != nil {
+		writeRuntimeError(w, http.StatusForbidden, "authorization_invalid", "the operation authorization is invalid or expired")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type socketSessionResponse struct {
@@ -631,8 +720,17 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID strin
 	return data
 }
 
+func jsonJSONObject(raw json.RawMessage) bool {
+	var object map[string]json.RawMessage
+	return len(raw) > 0 && json.Unmarshal(raw, &object) == nil && object != nil
+}
+
 func decodeSocketJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSocketRequest))
+	return decodeSocketJSONLimit(w, r, dst, maxSocketRequest)
+}
+
+func decodeSocketJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	d.DisallowUnknownFields()
 	if err := d.Decode(dst); err != nil {
 		return err

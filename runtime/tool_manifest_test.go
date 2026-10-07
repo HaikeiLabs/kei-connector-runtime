@@ -1,9 +1,45 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadToolManifestSyncMode(t *testing.T) {
+	validV4 := `{"schema":"kei.tool-manifest/v4","sync_mode":"merge","tools":[{"name":"codex.shell","service":"codex","source":"codex","operation_class":"write","route":{"harness_executor":{"executor":"codex","registration":"codex.shell"}}}]}`
+	cases := []struct {
+		name, raw string
+		wantErr   bool
+	}{
+		{"v4 merge", validV4, false},
+		{"v4 omitted replace default", `{"schema":"kei.tool-manifest/v4","tools":[{"name":"codex.shell","service":"codex","source":"codex","operation_class":"write","route":{"harness_executor":{"executor":"codex","registration":"codex.shell"}}}]}`, false},
+		{"v4 unsupported value", strings.Replace(validV4, `"merge"`, `"replace"`, 1), true},
+		{"v4 invalid mode", strings.Replace(validV4, `"merge"`, `"merge-ish"`, 1), true},
+		{"v2 merge forbidden", `{"schema":"kei.tool-manifest/v2","sync_mode":"merge","tools":[]}`, true},
+		{"v3 merge forbidden", `{"schema":"kei.tool-manifest/v3","sync_mode":"merge","tools":[]}`, true},
+		{"unknown field closed", strings.Replace(validV4, `"sync_mode":"merge"`, `"sync_mode":"merge","other":"value"`, 1), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "manifest.json")
+			if err := os.WriteFile(path, []byte(tc.raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := LoadToolManifest(path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("manifest=%+v err=%v wantErr=%v", manifest, err, tc.wantErr)
+			}
+			if err == nil && tc.name == "v4 merge" && manifest.SyncMode != "merge" {
+				t.Fatalf("sync mode=%q", manifest.SyncMode)
+			}
+			if err == nil && tc.name == "v4 omitted replace default" && manifest.SyncMode != "" {
+				t.Fatalf("omitted sync mode=%q", manifest.SyncMode)
+			}
+		})
+	}
+}
 
 func TestValidateToolManifestV3TypedRoutes(t *testing.T) {
 	m := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{

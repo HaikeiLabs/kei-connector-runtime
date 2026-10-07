@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
@@ -39,25 +40,99 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 		return fail("invalid_request", "the subject comes from the daemon session",
 			"--user-id, --user and --provider-user are not accepted: the daemon acts for its session subject")
 	}
-	raw, err := input.Read(plan.input, env.Stdin)
+	maxInput := input.MaxBytes
+	if plan.toolName != "" {
+		maxInput = policybundle.MaxPlanDataBytes
+	}
+	raw, err := input.ReadBounded(plan.input, env.Stdin, maxInput)
 	var canonical json.RawMessage
+	if err == nil && plan.toolName != "" && policybundle.RejectDuplicateJSON(raw) != nil {
+		err = input.ErrInvalid
+	}
 	if err == nil {
 		canonical, _, err = input.Canonicalize(raw)
 	}
 	if err != nil {
-		return fail("input_invalid", "input must be one JSON object of at most 16 KiB", "--input must be one JSON object of at most 16 KiB")
+		if plan.toolName == "" {
+			return fail("input_invalid", "input must be one JSON object of at most 16 KiB", "--input must be one JSON object of at most 16 KiB")
+		}
+		return fail("input_invalid", "input must be one bounded JSON object", "--input must be one bounded JSON object")
+	}
+	if plan.toolName != "" && len(canonical) > policybundle.MaxPlanDataBytes {
+		return fail("input_invalid", "input exceeds the v4 argument limit", "--input exceeds the v4 argument limit")
+	}
+	var canonicalContext json.RawMessage
+	if plan.toolName != "" {
+		contextRaw, readErr := input.ReadBounded(plan.context, nil, policybundle.MaxPlanDataBytes)
+		if readErr != nil || plan.context == "-" {
+			return fail("input_invalid", "context must be a bounded JSON object", "local tool context is invalid")
+		}
+		if policybundle.RejectDuplicateJSON(contextRaw) != nil {
+			return fail("input_invalid", "context must be a bounded JSON object", "local tool context is invalid")
+		}
+		canonicalContext, _, err = input.Canonicalize(contextRaw)
+		if err != nil || len(canonicalContext) > policybundle.MaxPlanDataBytes {
+			return fail("input_invalid", "context must be a bounded JSON object", "local tool context is invalid")
+		}
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
+	defer cancel()
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", env.DaemonSocket)
+		},
+	}}
+	if plan.toolName != "" && plan.session == "" {
+		return fail("session_required", "v2 tool calls require a named session", "set KEI_SESSION_ID from the runtime session response")
+	}
+	if plan.toolName != "" && plan.req.PreflightHandle == "" {
+		preflightBody, marshalErr := json.Marshal(struct {
+			Schema          string          `json:"schema"`
+			SessionID       string          `json:"session_id"`
+			Tool            string          `json:"tool"`
+			AgentID         string          `json:"agent_id,omitempty"`
+			Arguments       json.RawMessage `json:"arguments"`
+			Context         json.RawMessage `json:"context"`
+			ParentSpan      string          `json:"parent_span,omitempty"`
+			DelegationDepth int             `json:"delegation_depth,omitempty"`
+		}{Schema: "kei.preflight-request/v1", SessionID: plan.session, Tool: plan.toolName, AgentID: plan.req.AgentID, Arguments: canonical, Context: canonicalContext, ParentSpan: plan.parentSpan, DelegationDepth: plan.delegationDepth})
+		if marshalErr != nil {
+			return fail("preflight_denied", "the tool call could not be preflighted", "local tool preflight failed closed")
+		}
+		preq, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/v1/preflight", bytes.NewReader(preflightBody))
+		if requestErr != nil {
+			return fail("preflight_denied", "the tool call could not be preflighted", "local tool preflight failed closed")
+		}
+		preq.Header.Set("Authorization", "Bearer "+env.RuntimeToken)
+		preq.Header.Set("Content-Type", "application/json")
+		session.SetHeader(preq, plan.session)
+		presp, doErr := client.Do(preq)
+		if doErr != nil {
+			return fail("daemon_unavailable", "the daemon did not preflight the tool call", "local tool preflight failed closed")
+		}
+		var preflightResp struct {
+			Schema string `json:"schema"`
+			Handle string `json:"handle"`
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(presp.Body, 64<<10)).Decode(&preflightResp)
+		status := presp.StatusCode
+		_ = presp.Body.Close()
+		if status != http.StatusOK || decodeErr != nil || preflightResp.Schema != "kei.preflight-response/v1" || preflightResp.Handle == "" {
+			return fail("preflight_denied", "the tool call was not authorized", "local tool preflight denied the call")
+		}
+		plan.req.PreflightHandle = preflightResp.Handle
+	}
 	body, err := json.Marshal(daemonRequest{
-		Schema: daemonRequestSchema, ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability,
+		Schema: daemonRequestSchema, ToolName: plan.toolName, PreflightHandle: plan.req.PreflightHandle, SessionID: plan.session,
+		ParentSpan: plan.parentSpan, DelegationDepth: plan.delegationDepth,
+		ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability,
 		Action: plan.req.Action, Resource: plan.req.Resource, Input: canonical, TraceID: plan.req.TraceID,
-		IdempotencyKey: plan.req.IdempotencyKey, AgentID: plan.req.AgentID, Framework: plan.req.Framework,
+		IdempotencyKey: plan.req.IdempotencyKey, AgentID: plan.req.AgentID, Framework: plan.req.Framework, Context: canonicalContext,
 	})
 	if err != nil {
 		return fail("invalid_request", "request could not be encoded", "connector invoke request could not be encoded")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+DaemonInvokePath, bytes.NewReader(body))
 	if err != nil {
 		return fail("daemon_unavailable", "the kei-proxy serve daemon is not reachable", "connector invoke request could not be built")
@@ -65,11 +140,6 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 	req.Header.Set("Authorization", "Bearer "+env.RuntimeToken)
 	req.Header.Set("Content-Type", "application/json")
 	session.SetHeader(req, plan.session)
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", env.DaemonSocket)
-		},
-	}}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fail("daemon_unavailable", "the kei-proxy serve daemon is not reachable",

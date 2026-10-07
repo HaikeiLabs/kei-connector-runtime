@@ -46,6 +46,7 @@ type invokeRig struct {
 	// githubStatus is the GitHub API status for each call; the last repeats.
 	githubStatus []int
 	githubAuth   []string
+	githubPaths  []string
 }
 
 func newInvokeRig(t *testing.T) *invokeRig {
@@ -112,6 +113,7 @@ func (rig *invokeRig) serveGitHub(r *http.Request) (*http.Response, error) {
 	rig.mu.Lock()
 	n := len(rig.githubAuth)
 	rig.githubAuth = append(rig.githubAuth, auth)
+	rig.githubPaths = append(rig.githubPaths, r.URL.Path)
 	status := rig.githubStatus[min(n, len(rig.githubStatus)-1)]
 	rig.mu.Unlock()
 	rec.Header().Set("Content-Type", "application/json")
@@ -121,7 +123,11 @@ func (rig *invokeRig) serveGitHub(r *http.Request) (*http.Response, error) {
 		_, _ = io.WriteString(rec, `{"message":"Bad credentials: `+auth+`"}`)
 		return rec.Result(), nil
 	}
-	_, _ = io.WriteString(rec, `{"name":"kei","owner":{"login":"acme"},"description":"d","default_branch":"main","private":true}`)
+	if strings.Contains(r.URL.Path, "/issues/") {
+		_, _ = io.WriteString(rec, `{"number":7,"title":"test issue","state":"open","labels":[],"repository":{"name":"kei","owner":{"login":"acme"}}}`)
+	} else {
+		_, _ = io.WriteString(rec, `{"name":"kei","owner":{"login":"acme"},"description":"d","default_branch":"main","private":true}`)
+	}
 	return rec.Result(), nil
 }
 
@@ -129,6 +135,12 @@ func (rig *invokeRig) counts() (i11 []string, github []string) {
 	rig.mu.Lock()
 	defer rig.mu.Unlock()
 	return append([]string(nil), rig.i11Calls...), append([]string(nil), rig.githubAuth...)
+}
+
+func (rig *invokeRig) providerPaths() []string {
+	rig.mu.Lock()
+	defer rig.mu.Unlock()
+	return append([]string(nil), rig.githubPaths...)
 }
 
 func (rig *invokeRig) startSession(t *testing.T) {
@@ -507,5 +519,51 @@ func TestConnectorInvokeNeverLeaksCredential(t *testing.T) {
 				t.Errorf("%s leaked %s:\n%s", name, canary, content)
 			}
 		}
+	}
+}
+
+func TestProductionServeInterpretsCachedPlanWithoutPlannerRegistration(t *testing.T) {
+	rig := newInvokeRig(t)
+	now := time.Now().UTC()
+	check := map[string]any{"policy_id": "permit-repository", "name": "repo read", "effect": "permit", "priority": 10, "scope": map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": "agent-fixture-0001"}, "selector": map[string]any{"source_principal": "user:u-canary", "source": "github", "connector_id": invokeConnector, "tool": "github.repository_read", "capability": "repository.read"}}
+	plan := map[string]any{"args_schema": map[string]any{"type": "object", "properties": map[string]any{"note": map[string]any{"type": "string", "maxLength": 64}}, "required": []any{"note"}, "additionalProperties": false}, "context_schema": map[string]any{"type": "object", "properties": map[string]any{"repository": map[string]any{"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}}, "required": []any{"repository"}, "additionalProperties": false}, "operations": []any{map[string]any{"id": "get-repository", "capability": "repository.read", "resource": map[string]any{"type": "repository", "id": map[string]any{"from": "context", "field": "repository", "type": "string"}}, "provider_resource_template": "repos/{resource.id}", "provider_input": map[string]any{}}}}
+	bundle, err := json.Marshal(map[string]any{"schema": "kei.policy-bundle/v2", "bundle_id": "bundle-serve-v2", "bundle_version": 43, "policy_revision": 7, "issuer": "kei-policy-catalog", "audience": map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"}, "issued_at": now.Format(time.RFC3339Nano), "not_after": now.Add(time.Hour).Format(time.RFC3339Nano), "refresh": map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300}, "subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 60}, "policy_set": map[string]any{"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2", "evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"}, "tools": []any{map[string]any{"name": "github.repository_read", "source": "github", "operation_class": "read", "route": map[string]any{"connector_binding": map[string]any{"connector_id": invokeConnector}}, "required_capabilities": []string{"repository.read"}, "resource_types": []any{map[string]any{"type": "repository"}}, "plan": plan}}, "checks": []any{check}, "tool_policies": []any{}}, "agent_connector_bindings": []any{map[string]any{"agent_id": "agent-fixture-0001", "connector_id": invokeConnector, "capabilities": []string{"repository.read"}}}, "identities": []any{map[string]any{"source": "discord", "external_id": invokeExternalID, "user_id": "u-canary", "status": "linked", "groups": []string{"members"}, "subject_token": subjectCanary}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := policybundle.OpenStore(rig.cfg.RuntimeStateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	// newInvokeRig uses production newServeLocalPDP/newServeHandlers wiring;
+	// no per-tool planner is registered anywhere in serve.
+	sessionID := rig.startNamedSession(t)
+	args := `{"note":"model-visible"}`
+	contextMap := `{"repository":"acme/kei"}`
+	preflight := socketDoSession(t, rig.client, http.MethodPost, "/v1/preflight", sessionID, `{"schema":"kei.preflight-request/v1","session_id":"`+sessionID+`","tool":"github.repository_read","agent_id":"agent-fixture-0001","arguments":`+args+`,"context":`+contextMap+`}`)
+	if preflight.code != http.StatusOK {
+		t.Fatalf("catalog-plan preflight status=%d body=%s", preflight.code, preflight.dump)
+	}
+	var grant struct {
+		Handle string `json:"handle"`
+	}
+	bodyStart := strings.Index(preflight.dump, "{")
+	if bodyStart < 0 {
+		t.Fatalf("preflight response=%s", preflight.dump)
+	}
+	if err := json.Unmarshal([]byte(preflight.dump[bodyStart:]), &grant); err != nil || grant.Handle == "" {
+		t.Fatalf("preflight response=%s err=%v", preflight.dump, err)
+	}
+	invokeBody, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.repository_read", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-generic-plan"})
+	response := socketDoSession(t, rig.client, http.MethodPost, "/v1/connectors:invoke", sessionID, string(invokeBody))
+	if response.code != http.StatusOK || !strings.Contains(response.dump, `"decision":"allow"`) {
+		t.Fatalf("generic bundle plan invoke=%d %s", response.code, response.dump)
+	}
+	_, providerCalls := rig.counts()
+	if len(providerCalls) != 1 {
+		t.Fatalf("provider calls=%d want 1", len(providerCalls))
 	}
 }

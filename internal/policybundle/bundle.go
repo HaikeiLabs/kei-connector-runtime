@@ -16,11 +16,13 @@ import (
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 const ContentType = "application/vnd.kei.policy-bundle.v1+json"
+const ContentTypeV2 = "application/vnd.kei.policy-bundle.v2+json"
 const Issuer = "kei-policy-catalog"
 
 var (
-	ErrBundleExpired     = errors.New("policy bundle expired")
-	ErrBundleUnsupported = errors.New("policy bundle unsupported")
+	ErrBundleExpired        = errors.New("policy bundle expired")
+	ErrBundleUnsupported    = errors.New("policy bundle unsupported")
+	ErrSubjectSnapshotStale = errors.New("policy bundle subject snapshot is stale")
 )
 
 type Audience struct {
@@ -93,6 +95,9 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	if err := json.Unmarshal(bundleBytes, &identity); err != nil {
 		return nil, fmt.Errorf("decode policy bundle identity: %w", err)
 	}
+	if identity.Schema == "kei.policy-bundle/v2" {
+		return ValidateV2(bundleBytes, installationID, orgID, workspaceID, highestVersion, now)
+	}
 	if identity.Schema != "kei.policy-bundle/v1" {
 		return nil, ErrBundleUnsupported
 	}
@@ -143,9 +148,96 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	return &Verified{Payload: payload, PayloadBytes: append([]byte(nil), bundleBytes...), Digest: fmt.Sprintf("sha256:%x", digest)}, nil
 }
 
-var schemaValidator func([]byte) error
+var (
+	schemaValidator   func([]byte) error
+	schemaValidatorV2 func([]byte) error
+)
 
-func SetSchemaValidator(v func([]byte) error) { schemaValidator = v }
+func SetSchemaValidator(v func([]byte) error)   { schemaValidator = v }
+func SetV2SchemaValidator(v func([]byte) error) { schemaValidatorV2 = v }
+
+// ValidateV2 validates the ADR-035 envelope without making it active in the
+// v1 Store/PEP path. Activation remains disabled until the v2 evaluator and
+// connector preflight are wired together.
+func ValidateV2(bundleBytes []byte, installationID, orgID, workspaceID string, highestVersion int64, now time.Time) (*Verified, error) {
+	if len(bundleBytes) == 0 {
+		return nil, errors.New("empty policy bundle")
+	}
+	if err := RejectDuplicateJSON(bundleBytes); err != nil {
+		return nil, err
+	}
+	if schemaValidatorV2 == nil {
+		return nil, errors.New("policy bundle v2 schema validator is unavailable")
+	}
+	if err := schemaValidatorV2(bundleBytes); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "additional properties") {
+			return nil, fmt.Errorf("%w: closed v2 schema rejected unknown field", ErrBundleUnsupported)
+		}
+		return nil, fmt.Errorf("invalid policy bundle v2 schema: %w", err)
+	}
+	var payload Payload
+	if err := strictJSON(bundleBytes, &payload); err != nil {
+		return nil, fmt.Errorf("decode policy bundle v2: %w", err)
+	}
+	if payload.Schema != "kei.policy-bundle/v2" || payload.Issuer != Issuer || payload.BundleID == "" || payload.BundleVersion < 1 || payload.PolicyRevision < 1 {
+		return nil, errors.New("invalid policy bundle v2 identity")
+	}
+	if payload.Audience.InstallationID != installationID || payload.Audience.OrgID != orgID || payload.Audience.WorkspaceID != workspaceID {
+		return nil, errors.New("policy bundle v2 audience mismatch")
+	}
+	if payload.BundleVersion <= highestVersion {
+		return nil, errors.New("policy bundle v2 version rollback or replay")
+	}
+	if payload.IssuedAt.After(now) {
+		return nil, errors.New("policy bundle v2 issued in the future")
+	}
+	if !now.Before(payload.NotAfter) {
+		return nil, ErrBundleExpired
+	}
+	if payload.NotAfter.After(payload.IssuedAt.Add(24*time.Hour)) || !payload.NotAfter.After(payload.IssuedAt) {
+		return nil, errors.New("invalid policy bundle v2 validity window")
+	}
+	if payload.SubjectResolution.Mode != "bundle" || payload.SubjectResolution.MaxCacheSeconds < 1 || payload.SubjectResolution.MaxCacheSeconds > 60 || payload.Identities == nil {
+		return nil, ErrBundleUnsupported
+	}
+	if err := validatePolicySetV2(payload.PolicySet); err != nil {
+		return nil, err
+	}
+	if err := validateHarnesses(payload.Harnesses, payload.HarnessMatchSemantics); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBundleUnsupported, err)
+	}
+	digest := sha256.Sum256(bundleBytes)
+	return &Verified{Payload: payload, PayloadBytes: append([]byte(nil), bundleBytes...), Digest: fmt.Sprintf("sha256:%x", digest)}, nil
+}
+
+func validatePolicySetV2(raw json.RawMessage) error {
+	var v struct {
+		Schema         string `json:"schema"`
+		MatchSemantics string `json:"match_semantics"`
+		Evaluation     struct {
+			Checks  string `json:"checks"`
+			Default string `json:"default"`
+		} `json:"evaluation"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	if v.Schema != "kei.policy-set/v2" || v.MatchSemantics != "kei.match/v2" || v.Evaluation.Checks != "per_capability_first_match_and" || v.Evaluation.Default != "deny" {
+		return ErrBundleUnsupported
+	}
+	var set v2PolicySet
+	if err := strictJSON(raw, &set); err != nil {
+		return ErrBundleUnsupported
+	}
+	for _, tool := range set.Tools {
+		if tool.Route.ConnectorBinding != nil && len(tool.Plan) > 0 {
+			if err := ValidateV2Plan(tool); err != nil {
+				return ErrBundleUnsupported
+			}
+		}
+	}
+	return nil
+}
 
 func validatePayloadSchema(raw []byte) error {
 	if err := RejectDuplicateJSON(raw); err != nil {

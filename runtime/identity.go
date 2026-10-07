@@ -195,6 +195,8 @@ func toolManifestMediaType(schema string) string {
 		return "application/vnd.kei.tool-manifest.v2+json"
 	case ToolManifestSchemaV3:
 		return "application/vnd.kei.tool-manifest.v3+json"
+	case ToolManifestSchemaV4:
+		return "application/vnd.kei.tool-manifest.v4+json"
 	default:
 		return ""
 	}
@@ -208,12 +210,20 @@ type ToolSyncResponse struct {
 	Unchanged int `json:"unchanged"`
 }
 
-// SyncTools proposes the exact manifest schema in a request header and
-// requires an explicit v3 acknowledgment. Missing acknowledgments remain
+// SyncTools proposes the exact manifest schema in Accept. V3 and v4 require
+// an explicit catalog acknowledgment; missing acknowledgments remain
 // compatible only for v2 peers predating negotiation.
 func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *ToolManifest) error {
-	if manifest == nil || (manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3) {
+	if manifest == nil || (manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4) {
 		return fmt.Errorf("unsupported tool manifest protocol")
+	}
+	if err := validateToolManifestSyncMode(manifest.Schema, manifest.SyncMode); err != nil {
+		return fmt.Errorf("invalid tool manifest sync mode")
+	}
+	if manifest.Schema == ToolManifestSchemaV4 {
+		if err := validateToolManifest(manifest); err != nil {
+			return fmt.Errorf("invalid v4 tool manifest")
+		}
 	}
 	body, err := json.Marshal(manifest)
 	if err != nil {
@@ -249,8 +259,8 @@ func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *T
 	if supportedHeader != "" && (ack != manifest.Schema || response.Header.Get("Content-Type") != "application/json") {
 		return fmt.Errorf("tool sync protocol was advertised but not explicitly selected")
 	}
-	if manifest.Schema == ToolManifestSchemaV3 && (ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema) || response.Header.Get("Content-Type") != "application/json") {
-		return fmt.Errorf("tool sync v3 protocol was not explicitly negotiated")
+	if (manifest.Schema == ToolManifestSchemaV3 || manifest.Schema == ToolManifestSchemaV4) && (ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema) || response.Header.Get("Content-Type") != "application/json") {
+		return fmt.Errorf("tool sync protocol was not explicitly negotiated")
 	}
 	return nil
 }

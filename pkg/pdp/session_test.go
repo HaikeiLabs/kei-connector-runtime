@@ -191,11 +191,11 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 	bob, _ := sessions.Create(Subject{UserID: "u-bob", Status: StatusLinked})
 	_ = sessions.Start(Subject{UserID: "u-bob", Status: StatusLinked})
 
-	e.memberships = func(*policybundle.Verified) policybundle.Memberships {
+	e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships {
 		return fakeMemberships{"u-alice": {granted: false}, "u-bob": {granted: true}}
 	}
 	revoked := e.ReconcileSessions()
-	e.memberships = policybundle.BundleMemberships
+	e.memberships = policybundle.BundleMembershipsAt
 	if len(revoked) != 1 || revoked[0] != alice {
 		t.Fatalf("revoked %v, want only alice's session %s", revoked, alice)
 	}

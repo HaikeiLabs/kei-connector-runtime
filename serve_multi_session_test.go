@@ -2,6 +2,7 @@ package connectorruntime
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -95,5 +96,6 @@ func socketDoSession(t *testing.T, c *http.Client, method, path, id, body string
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
-	return socketResponse{route: method + " " + path, code: resp.StatusCode, dump: resp.Status}
+	b, _ := io.ReadAll(resp.Body)
+	return socketResponse{route: method + " " + path, code: resp.StatusCode, dump: resp.Status + "\n" + string(b)}
 }

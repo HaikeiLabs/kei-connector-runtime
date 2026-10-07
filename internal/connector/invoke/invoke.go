@@ -32,6 +32,10 @@ import (
 // the resource, and the identity-propagation context.
 type Request struct {
 	HarnessToken    string `json:"harness_token"`
+	ToolName        string `json:"tool_name,omitempty"`
+	PreflightHandle string `json:"preflight_handle,omitempty"`
+	ParentSpan      string `json:"parent_span,omitempty"`
+	DelegationDepth int    `json:"delegation_depth,omitempty"`
 	AgentID         string `json:"agent_id,omitempty"`
 	ConnectorID     string `json:"connector_id"`
 	Capability      string `json:"capability"`
@@ -187,13 +191,17 @@ type connectorInvokeArgs struct {
 // the request plus the ABAC endpoint, credential, and timeout the caller
 // should use, after applying CLI overrides and the runtime relay rules.
 type connectorInvokePlan struct {
-	req Request
-	// session is the daemon session the call ran in, for the audit record.
-	session    string
-	abacURL    string
-	abacSecret string
-	timeout    time.Duration
-	input      string
+	req             Request
+	session         string
+	abacURL         string
+	abacSecret      string
+	timeout         time.Duration
+	input           string
+	context         string
+	toolName        string
+	preflightHandle string
+	parentSpan      string
+	delegationDepth int
 	// explicitSubject is set when --user-id/--user/--provider-user was given.
 	explicitSubject bool
 }
@@ -217,7 +225,12 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
 	inputArg := fs.String("input", "", "capability input: a JSON object, @<file>, or - for stdin (default {})")
 	providerUser := fs.String("provider-user", "", "chat-platform identity, e.g. a WhatsApp E.164 number (default $KEI_PROXY_PROVIDER_USER)")
-	sessionID := fs.String("session", session.IDFromEnv(), "kei-proxy daemon session id from PUT /v1/session (default $KEI_SESSION_ID; empty = the deprecated default session)")
+	toolName := fs.String("tool", "", "registered v2 tool name; preflight is performed by the daemon")
+	contextArg := fs.String("context", "", "separate bounded JSON context map for a v2 tool plan")
+	preflightHandle := fs.String("preflight-handle", "", "opaque preflight handle (normally obtained by daemon preflight)")
+	parentSpan := fs.String("parent-span", "", "parent span bound to preflight")
+	delegationDepth := fs.Int("delegation-depth", 0, "delegation depth bound to preflight")
+	sessionID := fs.String("session", session.IDFromEnv(), "kei-proxy daemon session id from PUT /v1/session")
 
 	if err := fs.Parse(args); err != nil {
 		return connectorInvokePlan{}, err
@@ -232,8 +245,20 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		cfg.ABACURL = *abacURL
 	}
 
-	if *connectorID == "" || *capability == "" || *action == "" || *resource == "" {
-		return connectorInvokePlan{}, fmt.Errorf("--connector, --capability, --action, and --resource are required")
+	if *toolName == "" && (*connectorID == "" || *capability == "" || *action == "" || *resource == "") {
+		return connectorInvokePlan{}, fmt.Errorf("--connector, --capability, --action, and --resource are required without --tool")
+	}
+	if *toolName == "" && *contextArg != "" {
+		return connectorInvokePlan{}, fmt.Errorf("--context requires --tool")
+	}
+	if *toolName != "" && (*connectorID != "" || *capability != "" || *action != "" || *resource != "") {
+		return connectorInvokePlan{}, fmt.Errorf("v2 --tool calls must not include caller-selected connector operation fields")
+	}
+	if *toolName == "" && *preflightHandle != "" {
+		return connectorInvokePlan{}, fmt.Errorf("--preflight-handle requires --tool")
+	}
+	if *toolName != "" && env.DaemonSocket == "" {
+		return connectorInvokePlan{}, fmt.Errorf("v2 tool invocation requires daemon mode")
 	}
 	if cfg.RuntimeToken == "" {
 		return connectorInvokePlan{}, fmt.Errorf("KEI_RUNTIME_TOKEN is required")
@@ -256,7 +281,8 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 
 	return connectorInvokePlan{
 		req: Request{
-			HarnessToken:   cfg.RuntimeToken,
+			HarnessToken: cfg.RuntimeToken,
+			ToolName:     *toolName, PreflightHandle: *preflightHandle, ParentSpan: *parentSpan, DelegationDepth: *delegationDepth,
 			AgentID:        *agentID,
 			ConnectorID:    *connectorID,
 			Capability:     *capability,
@@ -268,10 +294,12 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 			Framework:      *framework,
 			ProviderUserID: *providerUser,
 		},
-		abacURL:         abacURLValue,
-		abacSecret:      secret,
-		timeout:         time.Duration(*timeout) * time.Second,
-		input:           *inputArg,
+		abacURL:    abacURLValue,
+		abacSecret: secret,
+		timeout:    time.Duration(*timeout) * time.Second,
+		input:      *inputArg,
+		context:    *contextArg,
+		toolName:   *toolName, preflightHandle: *preflightHandle, parentSpan: *parentSpan, delegationDepth: *delegationDepth,
 		explicitSubject: explicitSubject,
 		session:         *sessionID,
 	}, nil

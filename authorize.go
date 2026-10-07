@@ -152,6 +152,9 @@ func runAuthorize(args []string) int {
 		}
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, reason, err)
 	}
+	if activeBundle.Payload.Schema == "kei.policy-bundle/v2" {
+		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "preflight_required", errors.New("v2 connector calls require the local serve daemon preflight path"))
+	}
 	invokingSubject := *invokingSubjectFlag
 	if invokingSubject == "" && cfg.IsRuntime() {
 		if s, err := session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken).Subject(session.WithID(context.Background(), *sessionID)); err == nil {

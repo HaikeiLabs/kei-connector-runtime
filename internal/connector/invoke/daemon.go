@@ -14,25 +14,29 @@ package invoke
 // instead.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/google/uuid"
 )
 
 const (
 	// DaemonInvokePath is the socket route the daemon serves.
-	DaemonInvokePath      = "/v1/connectors:invoke"
-	daemonRequestSchema   = "kei.connector-invoke-request/v1"
-	daemonResponseSchema  = "kei.connector-invoke-response/v1"
-	maxDaemonRequestBytes = 64 << 10
+	DaemonInvokePath            = "/v1/connectors:invoke"
+	daemonRequestSchema         = "kei.connector-invoke-request/v1"
+	daemonResponseSchema        = "kei.connector-invoke-response/v1"
+	maxDaemonRequestBytes       = 192 << 10
+	maxLegacyDaemonRequestBytes = 64 << 10
 	// daemonCredentialRef names where a session connector's credential comes
 	// from in its synthesized metadata; it is a label, not a reference.
 	daemonCredentialRef = "kei-session-credential"
@@ -54,6 +58,7 @@ var sessionProviders = map[contract.Provider]bool{
 // Grant is the daemon's local decision for one connector call.
 type Grant struct {
 	Allow      bool
+	V2Tool     bool
 	ReasonCode string
 	Reason     string
 	Enrollment json.RawMessage
@@ -61,9 +66,11 @@ type Grant struct {
 	HasSession bool
 	// Subject is the linked session user id the decision was made for, or "".
 	Subject string
+	AgentID string
 	// Provider and Capabilities are the bundle's connector entry; Provider is
 	// "" when the bundle does not know the connector.
 	Provider     string
+	ConnectorID  string
 	Capabilities []string
 	TenantID     string
 	WorkspaceID  string
@@ -74,6 +81,7 @@ type Grant struct {
 type DaemonCall struct {
 	Session                                    string
 	ConnectorID, Capability, Resource, AgentID string
+	ToolName                                   string
 }
 
 // ReasonSessionNotFound is the PDP's deny reason for a session id that is
@@ -88,25 +96,35 @@ type Daemon struct {
 	Env Env
 	// Authorize decides a call with the local PDP and the session subject.
 	Authorize func(context.Context, DaemonCall) (Grant, error)
-	// UseCredential runs fn with the credential the named session holds for
-	// subject and provider (credrelease.Store.Use); a session reaches only its
-	// own credentials.
+	// PlanV2 resolves the trusted registered planner for tool and canonical args.
+	PlanV2 func(context.Context, string, string, string, []byte, []byte, string, int) ([]policybundle.Operation, error)
+	// ValidateV2 confirms the full current plan matches the opaque context.
+	ValidateV2 func(context.Context, string, string, string, string, []byte, []byte, []policybundle.Operation, string, int) error
+	// ConsumeV2Plan atomically consumes the complete plan before provider work.
+	ConsumeV2Plan func(context.Context, string, string, string, string, []byte, []byte, []policybundle.Operation, string, int) error
+	// UseCredential runs fn with the named session credential for subject/provider.
 	UseCredential func(ctx context.Context, session, subject, provider string, fn func(token string) error) error
 }
 
 // daemonRequest is the route's body. It names the call only: the subject
 // comes from the daemon's session and the credential from its store.
 type daemonRequest struct {
-	Schema         string          `json:"schema"`
-	ConnectorID    string          `json:"connector_id"`
-	Capability     string          `json:"capability"`
-	Action         string          `json:"action"`
-	Resource       string          `json:"resource"`
-	Input          json.RawMessage `json:"input,omitempty"`
-	TraceID        string          `json:"trace_id,omitempty"`
-	IdempotencyKey string          `json:"idempotency_key,omitempty"`
-	AgentID        string          `json:"agent_id,omitempty"`
-	Framework      string          `json:"framework,omitempty"`
+	Schema          string          `json:"schema"`
+	ToolName        string          `json:"tool_name,omitempty"`
+	PreflightHandle string          `json:"preflight_handle,omitempty"`
+	SessionID       string          `json:"session_id,omitempty"`
+	ParentSpan      string          `json:"parent_span,omitempty"`
+	DelegationDepth int             `json:"delegation_depth,omitempty"`
+	ConnectorID     string          `json:"connector_id"`
+	Capability      string          `json:"capability"`
+	Action          string          `json:"action"`
+	Resource        string          `json:"resource"`
+	Input           json.RawMessage `json:"input,omitempty"`
+	Context         json.RawMessage `json:"context,omitempty"`
+	TraceID         string          `json:"trace_id,omitempty"`
+	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
+	AgentID         string          `json:"agent_id,omitempty"`
+	Framework       string          `json:"framework,omitempty"`
 }
 
 // daemonResponse is the route's answer: the same object `connector invoke`
@@ -118,14 +136,34 @@ type daemonResponse struct {
 
 func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req daemonRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxDaemonRequestBytes))
+	body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxDaemonRequestBytes))
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || req.Schema != daemonRequestSchema || dec.More() {
+	decodeErr := dec.Decode(&req)
+	if decodeErr == nil {
+		var extra any
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			decodeErr = errors.New("trailing JSON")
+		}
+	}
+	if readErr != nil || decodeErr != nil || req.Schema != daemonRequestSchema {
 		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "request must be a "+daemonRequestSchema+" object with no unknown fields")
 		return
 	}
-	if req.ConnectorID == "" || req.Capability == "" || req.Action == "" || req.Resource == "" {
-		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "connector_id, capability, action and resource are required")
+	if req.ToolName != "" && (req.SessionID == "" || session.FromRequest(r) != req.SessionID) {
+		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "v2 invoke requires the matching named session")
+		return
+	}
+	if req.ToolName == "" && len(body) > maxLegacyDaemonRequestBytes {
+		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "legacy request exceeds the size limit")
+		return
+	}
+	if req.ToolName != "" && policybundle.RejectDuplicateJSON(body) != nil {
+		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "v2 request contains ambiguous JSON")
+		return
+	}
+	if (req.ToolName == "") != (req.PreflightHandle == "") || (req.ToolName == "" && (req.ConnectorID == "" || req.Capability == "" || req.Action == "" || req.Resource == "")) || (req.ToolName != "" && (req.SessionID == "" || req.ConnectorID != "" || req.Capability != "" || req.Action != "" || req.Resource != "")) {
+		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "a legacy operation or a v2 tool and preflight handle are required")
 		return
 	}
 	if req.TraceID == "" {
@@ -156,15 +194,27 @@ func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest)
 	}
 
 	raw := []byte(dr.Input)
+	if dr.ToolName != "" && len(raw) > policybundle.MaxPlanDataBytes || dr.ToolName == "" && len(raw) > input.MaxBytes {
+		return finish(deny("input_invalid", "input exceeds the connector input size limit"))
+	}
 	if len(raw) == 0 {
 		raw = []byte("{}")
 	}
+	if dr.ToolName != "" && policybundle.RejectDuplicateJSON(raw) != nil {
+		return finish(deny("input_invalid", "tool arguments contain ambiguous JSON"))
+	}
 	canonical, digest, err := input.Canonicalize(raw)
 	if err != nil {
-		return finish(deny("input_invalid", "input must be one JSON object of at most 16 KiB"))
+		return finish(deny("input_invalid", "input must be one JSON object"))
+	}
+	if dr.ToolName != "" && len(canonical) > policybundle.MaxPlanDataBytes || dr.ToolName == "" && len(canonical) > input.MaxBytes {
+		return finish(deny("input_invalid", "input exceeds the connector input size limit"))
 	}
 	plan.req.InputDigest = digest
 	out.Audit = &outputAudit{InputDigest: digest}
+	if dr.ToolName != "" {
+		return d.invokeV2(ctx, dr, plan, canonical, started, out)
+	}
 
 	grant, err := d.Authorize(ctx, DaemonCall{Session: sessionID, ConnectorID: dr.ConnectorID, Capability: dr.Capability, Resource: dr.Resource, AgentID: dr.AgentID})
 	if err != nil {

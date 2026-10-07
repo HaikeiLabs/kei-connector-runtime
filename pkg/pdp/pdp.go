@@ -65,7 +65,7 @@ type Evaluator struct {
 	aud         Audience
 	sessions    *Sessions
 	now         func() time.Time
-	memberships func(*policybundle.Verified) policybundle.Memberships
+	memberships func(*policybundle.Verified, time.Time) policybundle.Memberships
 }
 
 // New opens the policy state directory. sessions may be nil, in which case
@@ -78,7 +78,7 @@ func New(stateDir string, aud Audience, sessions *Sessions) (*Evaluator, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &Evaluator{store: store, aud: aud, sessions: sessions, now: time.Now, memberships: policybundle.BundleMemberships}, nil
+	return &Evaluator{store: store, aud: aud, sessions: sessions, now: time.Now, memberships: policybundle.BundleMembershipsAt}, nil
 }
 
 // Evaluate decides one call. The error is non-nil only when ctx is done.
@@ -163,11 +163,12 @@ func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State,
 	if e.sessions != nil {
 		var ok bool
 		if current, ok = e.sessions.Get(req.Session); ok {
-			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Status: string(current.Status)}
+			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
 			used = &current
 		}
 	}
-	d := v.EvaluateSession(call, subject, e.memberships(v))
+	now := e.now().UTC()
+	d := v.EvaluateSessionAt(call, subject, e.memberships(v, now), now)
 	out := Decision{
 		Allow:          d.Outcome == "allow",
 		Reason:         d.Reason,
@@ -216,32 +217,71 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 	return HarnessResult{Outcome: outcome, PolicyID: policyID, Reason: reason}, nil
 }
 
-// ReconcileSession revokes every session whose subject the active bundle no
-// longer grants (ADR-026 G0: revocation takes effect at the next refresh).
-// The refresher calls it after every refresh.
-func (e *Evaluator) ReconcileSession() { e.ReconcileSessions() }
+// AuthorizeV2Plan revalidates the exact named session and evaluates the complete plan.
+type V2PlanContext struct {
+	BundleDigest  string
+	BundleVersion int64
+	Tool          policybundle.V2Tool
+}
 
-// ReconcileSessions is ReconcileSession, returning the ids of the sessions it
-// revoked (DefaultSession for the default session) so their credentials can
-// be flushed.
+func (e *Evaluator) V2PlanContext(toolName string) (V2PlanContext, bool) {
+	v, _, err := e.check()
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(e.now().UTC()) {
+		return V2PlanContext{}, false
+	}
+	tool, ok := v.V2ConnectorTool(toolName, e.now().UTC())
+	if !ok {
+		return V2PlanContext{}, false
+	}
+	return V2PlanContext{v.Digest, v.Payload.BundleVersion, tool}, true
+}
+func (e *Evaluator) AuthorizeV2Plan(sessionID, installationID, subjectID, source, externalID, agentID, tool string, ops []policybundle.Operation) (string, int64, bool, error) {
+	if installationID != e.aud.InstallationID || sessionID == "" || subjectID == "" || agentID == "" || tool == "" || len(ops) == 0 || e.sessions == nil {
+		return "", 0, false, nil
+	}
+	current, ok := e.sessions.Get(sessionID)
+	if !ok || current.UserID != subjectID || current.Source != source || current.ExternalID != externalID || current.Status != StatusLinked {
+		return "", 0, false, nil
+	}
+	v, _, err := e.check()
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" {
+		return "", 0, false, err
+	}
+	subject := &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+	decision := v.EvaluateV2Plan(tool, agentID, subject, ops, e.now().UTC())
+	return v.Digest, v.Payload.BundleVersion, decision.Outcome == "allow", nil
+}
+
+// ReconcileSession is the compatibility wrapper for callers that ignore revoked ids.
+func (e *Evaluator) ReconcileSession() { e.ReconcileSessions() }
 func (e *Evaluator) ReconcileSessions() []string {
 	if e.sessions == nil {
 		return nil
 	}
 	v, _, err := e.check()
 	if err != nil {
+		if errors.Is(err, policybundle.ErrSubjectSnapshotStale) {
+			return e.sessions.revokeIf(func(sub Subject) bool { return sub.Status == StatusLinked })
+		}
 		return nil
 	}
-	m := e.memberships(v)
-	if m == nil {
-		return nil
-	}
+	now := e.now().UTC()
+	m := e.memberships(v, now)
 	return e.sessions.revokeIf(func(sub Subject) bool {
 		if sub.Status != StatusLinked {
 			return false
 		}
+		if v.Payload.SubjectResolution.Mode == "bundle" {
+			id, found := v.LookupIdentity(sub.Source, sub.ExternalID, now)
+			if sub.Source == "" || sub.ExternalID == "" || !found || id.UserID != sub.UserID || id.Status != policybundle.SubjectLinked {
+				return true
+			}
+		}
+		if m == nil {
+			return v.Payload.SubjectResolution.Mode == "bundle"
+		}
 		_, _, granted, known := m.Lookup(sub.UserID)
-		return known && !granted
+		return (known && !granted) || (v.Payload.SubjectResolution.Mode == "bundle" && (!known || !granted))
 	})
 }
 
@@ -250,6 +290,17 @@ func (e *Evaluator) RevokeSession() {
 	if e.sessions != nil {
 		e.sessions.revoke()
 	}
+}
+
+// ResolveBundleIdentity looks up one external identity in the current verified
+// local bundle. It performs no control-plane request and rejects stale bundle
+// state, non-bundle mode, duplicate matches, and expired identities.
+func (e *Evaluator) ResolveBundleIdentity(source, externalID string) (policybundle.Identity, bool) {
+	v, _, err := e.check()
+	if err != nil {
+		return policybundle.Identity{}, false
+	}
+	return v.LookupIdentity(source, externalID, e.now().UTC())
 }
 
 // BundleIdentities returns the identities from the current verified bundle,
@@ -271,6 +322,8 @@ func stateDenial(state policybundle.State) Decision {
 	switch state {
 	case policybundle.Expired:
 		code = "policy_bundle_expired"
+	case policybundle.Stale:
+		code = "subject_snapshot_stale"
 	case policybundle.Invalid:
 		code = "policy_bundle_invalid"
 	case policybundle.Unsupported:

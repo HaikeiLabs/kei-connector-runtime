@@ -177,7 +177,13 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 					return nil
 				},
 			},
-			Authorize:     connectorAuthorizer(local),
+			Authorize: connectorAuthorizer(local),
+			PlanV2: func(ctx context.Context, sessionID, tool, agent string, args, contextValues []byte, parent string, depth int) ([]policybundle.Operation, error) {
+				_, ops, err := local.PlanV2(ctx, sessionID, tool, agent, args, contextValues, parent, depth)
+				return ops, err
+			},
+			ValidateV2:    local.ValidateV2Plan,
+			ConsumeV2Plan: local.ConsumeV2Plan,
 			UseCredential: local.UseCredential,
 		})
 		local.SetCommandRunner(&runcommand.Daemon{
@@ -197,6 +203,17 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 // daemon's invoke route.
 func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invoke.DaemonCall) (invoke.Grant, error) {
 	return func(ctx context.Context, c invoke.DaemonCall) (invoke.Grant, error) {
+		if c.ToolName != "" {
+			subjectSnapshot, hasSession := local.Sessions.Get(c.Session)
+			if !hasSession {
+				return invoke.Grant{ReasonCode: pdp.ReasonSessionNotFound}, nil
+			}
+			provider, connectorID, capabilities, subject, agentID, tenantID, workspaceID, ok := local.DescribeV2Tool(c.Session, c.ToolName, c.AgentID)
+			if subject != subjectSnapshot.UserID {
+				ok = false
+			}
+			return invoke.Grant{V2Tool: ok, HasSession: true, Subject: subject, AgentID: agentID, Provider: provider, ConnectorID: connectorID, Capabilities: capabilities, TenantID: tenantID, WorkspaceID: workspaceID}, nil
+		}
 		g, id, err := local.AuthorizeConnector(ctx, pdp.Request{
 			Session:  c.Session,
 			Resource: c.Resource, AgentID: c.AgentID,
@@ -506,6 +523,9 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	bundle, _, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("local policy bundle unavailable: %w", err)
+	}
+	if bundle.Payload.Schema == "kei.policy-bundle/v2" {
+		return errors.New("v2 model authorization is unsupported; refusing the legacy online subject path")
 	}
 	var attrs *policybundle.Subject
 	if invokingSubject != "" || h.cfg.ProviderUserID != "" {

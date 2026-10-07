@@ -29,7 +29,14 @@ var ErrInvalid = errors.New("connector input is invalid")
 
 // Read returns the raw input named by --input: a literal JSON object,
 // "@<file>", or "-" for stdin. An empty argument means an empty object.
-func Read(arg string, stdin io.Reader) ([]byte, error) {
+func Read(arg string, stdin io.Reader) ([]byte, error) { return ReadBounded(arg, stdin, MaxBytes) }
+
+// ReadBounded is the size-bounded counterpart used by v4 plan arguments and
+// delegated context. Legacy capability input keeps Read's 16 KiB limit.
+func ReadBounded(arg string, stdin io.Reader, maxBytes int) ([]byte, error) {
+	if maxBytes < 1 {
+		return nil, ErrInvalid
+	}
 	var r io.Reader
 	switch {
 	case arg == "":
@@ -49,8 +56,8 @@ func Read(arg string, stdin io.Reader) ([]byte, error) {
 	if r == nil {
 		return nil, ErrInvalid
 	}
-	raw, err := io.ReadAll(io.LimitReader(r, MaxBytes+1))
-	if err != nil || len(raw) > MaxBytes {
+	raw, err := io.ReadAll(io.LimitReader(r, int64(maxBytes)+1))
+	if err != nil || len(raw) > maxBytes {
 		return nil, ErrInvalid
 	}
 	return raw, nil

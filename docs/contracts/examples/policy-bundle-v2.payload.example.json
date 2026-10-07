@@ -1,0 +1,47 @@
+{
+  "schema": "kei.policy-bundle/v2",
+  "bundle_id": "bundle-v2-fixture",
+  "bundle_version": 2,
+  "policy_revision": 7,
+  "issuer": "kei-policy-catalog",
+  "audience": {
+    "installation_id": "inst-v2",
+    "org_id": "org-v2",
+    "workspace_id": "ws-v2"
+  },
+  "issued_at": "2026-10-05T12:00:00Z",
+  "not_after": "2026-10-05T23:00:00Z",
+  "refresh": {
+    "poll_interval_seconds": 60,
+    "stale_after_seconds": 300
+  },
+  "subject_resolution": {
+    "mode": "bundle",
+    "max_cache_seconds": 30
+  },
+  "policy_set": {
+    "schema": "kei.policy-set/v2",
+    "org_id": "org-v2",
+    "workspace_id": "ws-v2",
+    "match_semantics": "kei.match/v2",
+    "evaluation": {
+      "precedence": ["priority_desc", "deny_before_permit", "policy_id_asc"],
+      "checks": "per_capability_first_match_and",
+      "default": "deny"
+    },
+    "tools": [],
+    "checks": [],
+    "tool_policies": []
+  },
+  "agent_connector_bindings": [],
+  "identities": [
+    {
+      "source": "discord",
+      "external_id": "discord-user-123",
+      "user_id": "kei-user-123",
+      "status": "linked",
+      "groups": ["members"],
+      "org_roles": ["member"]
+    }
+  ]
+}
