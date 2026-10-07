@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
 // maxDaemonResponseBytes bounds the daemon's answer; a result is at most
@@ -38,13 +39,40 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 		return fail("invalid_request", "the subject comes from the daemon session",
 			"--user-id, --user and --provider-user are not accepted: the daemon acts for its session subject")
 	}
-	raw, err := input.Read(plan.input, env.Stdin)
+	maxInput := input.MaxBytes
+	if plan.toolName != "" {
+		maxInput = policybundle.MaxPlanDataBytes
+	}
+	raw, err := input.ReadBounded(plan.input, env.Stdin, maxInput)
 	var canonical json.RawMessage
+	if err == nil && plan.toolName != "" && policybundle.RejectDuplicateJSON(raw) != nil {
+		err = input.ErrInvalid
+	}
 	if err == nil {
 		canonical, _, err = input.Canonicalize(raw)
 	}
 	if err != nil {
-		return fail("input_invalid", "input must be one JSON object of at most 16 KiB", "--input must be one JSON object of at most 16 KiB")
+		if plan.toolName == "" {
+			return fail("input_invalid", "input must be one JSON object of at most 16 KiB", "--input must be one JSON object of at most 16 KiB")
+		}
+		return fail("input_invalid", "input must be one bounded JSON object", "--input must be one bounded JSON object")
+	}
+	if plan.toolName != "" && len(canonical) > policybundle.MaxPlanDataBytes {
+		return fail("input_invalid", "input exceeds the v4 argument limit", "--input exceeds the v4 argument limit")
+	}
+	var canonicalContext json.RawMessage
+	if plan.toolName != "" {
+		contextRaw, readErr := input.ReadBounded(plan.context, nil, policybundle.MaxPlanDataBytes)
+		if readErr != nil || plan.context == "-" {
+			return fail("input_invalid", "context must be a bounded JSON object", "local tool context is invalid")
+		}
+		if policybundle.RejectDuplicateJSON(contextRaw) != nil {
+			return fail("input_invalid", "context must be a bounded JSON object", "local tool context is invalid")
+		}
+		canonicalContext, _, err = input.Canonicalize(contextRaw)
+		if err != nil || len(canonicalContext) > policybundle.MaxPlanDataBytes {
+			return fail("input_invalid", "context must be a bounded JSON object", "local tool context is invalid")
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), plan.timeout)
@@ -60,9 +88,10 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 			Tool            string          `json:"tool"`
 			AgentID         string          `json:"agent_id,omitempty"`
 			Arguments       json.RawMessage `json:"arguments"`
+			Context         json.RawMessage `json:"context"`
 			ParentSpan      string          `json:"parent_span,omitempty"`
 			DelegationDepth int             `json:"delegation_depth,omitempty"`
-		}{"kei.preflight-request/v1", plan.toolName, plan.req.AgentID, canonical, plan.parentSpan, plan.delegationDepth})
+		}{"kei.preflight-request/v1", plan.toolName, plan.req.AgentID, canonical, canonicalContext, plan.parentSpan, plan.delegationDepth})
 		if marshalErr != nil {
 			return fail("preflight_denied", "the tool call could not be preflighted", "local tool preflight failed closed")
 		}
@@ -93,7 +122,7 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 		ParentSpan: plan.parentSpan, DelegationDepth: plan.delegationDepth,
 		ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability,
 		Action: plan.req.Action, Resource: plan.req.Resource, Input: canonical, TraceID: plan.req.TraceID,
-		IdempotencyKey: plan.req.IdempotencyKey, AgentID: plan.req.AgentID, Framework: plan.req.Framework,
+		IdempotencyKey: plan.req.IdempotencyKey, AgentID: plan.req.AgentID, Framework: plan.req.Framework, Context: canonicalContext,
 	})
 	if err != nil {
 		return fail("invalid_request", "request could not be encoded", "connector invoke request could not be encoded")

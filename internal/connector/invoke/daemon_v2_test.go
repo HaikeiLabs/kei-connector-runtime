@@ -16,26 +16,23 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-func TestDaemonV2ConsumesExactInputPlanBeforeProvider(t *testing.T) {
-	canonical := []byte(`{}`)
-	sum := sha256.Sum256(canonical)
-	goodDigest := "sha256:" + hex.EncodeToString(sum[:])
-	expected := policybundle.Operation{ConnectorID: execConnector, Capability: "repository.read", Action: "read", Resource: "repos/acme/kei", ResourceType: "repository", ResourceID: "acme/kei", InputDigest: goodDigest}
+func TestDaemonV2ConsumesExactArgsContextAndProviderPlanBeforeProvider(t *testing.T) {
+	providerInput := json.RawMessage(`{}`)
+	sum := sha256.Sum256(providerInput)
+	inputDigest := "sha256:" + hex.EncodeToString(sum[:])
+	expected := policybundle.Operation{ID: "get-repository", ConnectorID: execConnector, Capability: "repository.read", Action: "read", Resource: "repos/acme/kei", ResourceType: "repository", ResourceID: "acme/kei", InputDigest: inputDigest, ProviderInput: providerInput}
 	for _, tc := range []struct {
-		name              string
-		handle            string
-		input             string
-		allow             bool
-		replay            bool
-		expired           bool
-		wantProviderCalls int
+		name, handle, args, context, approvedArgs, approvedContext string
+		allow, replay, expired                                     bool
+		wantProviderCalls                                          int
 	}{
-		{name: "missing handle", handle: "", input: `{}`, allow: true},
-		{name: "denied consume", handle: "opaque-handle", input: `{}`, allow: false},
-		{name: "changed input with same target", handle: "opaque-handle", input: `{"filter":"changed"}`, allow: true},
-		{name: "expired handle", handle: "expired-handle", input: `{}`, allow: true, expired: true},
-		{name: "successful consume", handle: "opaque-handle", input: `{}`, allow: true, wantProviderCalls: 1},
-		{name: "replay", handle: "opaque-handle", input: `{}`, allow: true, replay: true, wantProviderCalls: 1},
+		{name: "missing handle", args: `{}`, context: `{}`, approvedArgs: `{}`, approvedContext: `{}`},
+		{name: "denied whole plan", handle: "opaque-handle", args: `{"note":"approved"}`, context: `{"repository":"acme/kei"}`, approvedArgs: `{"note":"approved"}`, approvedContext: `{"repository":"acme/kei"}`},
+		{name: "changed args", handle: "opaque-handle", args: `{"note":"changed"}`, context: `{"repository":"acme/kei"}`, approvedArgs: `{"note":"approved"}`, approvedContext: `{"repository":"acme/kei"}`, allow: true},
+		{name: "changed context", handle: "opaque-handle", args: `{"note":"approved"}`, context: `{"repository":"acme/other"}`, approvedArgs: `{"note":"approved"}`, approvedContext: `{"repository":"acme/kei"}`, allow: true},
+		{name: "expired handle", handle: "expired-handle", args: `{"note":"approved"}`, context: `{"repository":"acme/kei"}`, approvedArgs: `{"note":"approved"}`, approvedContext: `{"repository":"acme/kei"}`, allow: true, expired: true},
+		{name: "successful one-request plan", handle: "opaque-handle", args: `{"note":"approved"}`, context: `{"repository":"acme/kei"}`, approvedArgs: `{"note":"approved"}`, approvedContext: `{"repository":"acme/kei"}`, allow: true, wantProviderCalls: 1},
+		{name: "replay", handle: "opaque-handle", args: `{"note":"approved"}`, context: `{"repository":"acme/kei"}`, approvedArgs: `{"note":"approved"}`, approvedContext: `{"repository":"acme/kei"}`, allow: true, replay: true, wantProviderCalls: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			providerCalls, consumeCalls := 0, 0
@@ -51,24 +48,21 @@ func TestDaemonV2ConsumesExactInputPlanBeforeProvider(t *testing.T) {
 				Authorize: func(context.Context, DaemonCall) (Grant, error) {
 					return Grant{V2Tool: true, HasSession: true, Subject: execUser, AgentID: execAgent, Provider: "github", ConnectorID: execConnector, Capabilities: []string{"repository.read"}, TenantID: execTenant, WorkspaceID: execWorkspace}, nil
 				},
-				ValidateV2: func(_ context.Context, handle, tool, agent string, ops []policybundle.Operation, _ string, _ int) error {
-					if handle != tc.handle || tc.expired || tool != "github.review_pr" || agent != execAgent || len(ops) != 1 || ops[0].ConnectorID != expected.ConnectorID || ops[0].Capability != expected.Capability || ops[0].Resource != expected.Resource || ops[0].InputDigest != expected.InputDigest {
+				PlanV2: func(_ context.Context, tool, agent string, args, contextValues []byte, _ string, _ int) ([]policybundle.Operation, error) {
+					if tool != "github.get_issue" || agent != execAgent || len(args) == 0 || len(contextValues) == 0 {
+						return nil, errors.New("untrusted route or missing separated context")
+					}
+					return []policybundle.Operation{expected}, nil
+				},
+				ValidateV2: func(_ context.Context, handle, tool, agent string, args, contextValues []byte, ops []policybundle.Operation, _ string, _ int) error {
+					if handle != tc.handle || tc.expired || !tc.allow || tool != "github.get_issue" || agent != execAgent || string(args) != tc.approvedArgs || string(contextValues) != tc.approvedContext || !sameTestOps(ops, []policybundle.Operation{expected}) {
 						return errors.New("plan mismatch")
 					}
 					return nil
 				},
-				PlanV2: func(_ context.Context, tool, agent string, args []byte, _ string, _ int) ([]policybundle.Operation, error) {
-					if tool != "github.review_pr" || agent != execAgent {
-						return nil, errors.New("untrusted route")
-					}
-					digest := sha256.Sum256(args)
-					op := expected
-					op.InputDigest = "sha256:" + hex.EncodeToString(digest[:])
-					return []policybundle.Operation{op}, nil
-				},
-				ConsumeV2: func(_ context.Context, handle, tool, agent string, op policybundle.Operation, _ string, _ int) error {
+				ConsumeV2Plan: func(_ context.Context, handle, tool, agent string, args, contextValues []byte, ops []policybundle.Operation, _ string, _ int) error {
 					consumeCalls++
-					if handle != tc.handle || tc.expired || tool != "github.review_pr" || agent != execAgent || !tc.allow || op.ConnectorID != expected.ConnectorID || op.Capability != expected.Capability || op.Resource != expected.Resource || op.InputDigest != expected.InputDigest {
+					if handle != tc.handle || tc.expired || !tc.allow || string(args) != tc.approvedArgs || string(contextValues) != tc.approvedContext || !sameTestOps(ops, []policybundle.Operation{expected}) {
 						return errors.New("authorization mismatch")
 					}
 					if tc.replay && used {
@@ -89,7 +83,7 @@ func TestDaemonV2ConsumesExactInputPlanBeforeProvider(t *testing.T) {
 				runs = 2
 			}
 			for attempt := 0; attempt < runs; attempt++ {
-				body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, ToolName: "github.review_pr", PreflightHandle: tc.handle, AgentID: execAgent, Input: json.RawMessage(tc.input), TraceID: "v2-trace"})
+				body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, ToolName: "github.get_issue", PreflightHandle: tc.handle, AgentID: execAgent, Input: json.RawMessage(tc.args), Context: json.RawMessage(tc.context), TraceID: "v4-trace"})
 				rec := httptest.NewRecorder()
 				d.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DaemonInvokePath, bytes.NewReader(body)))
 				if tc.name == "missing handle" {
@@ -113,17 +107,35 @@ func TestDaemonV2ConsumesExactInputPlanBeforeProvider(t *testing.T) {
 			if providerCalls != tc.wantProviderCalls {
 				t.Fatalf("provider calls=%d want=%d", providerCalls, tc.wantProviderCalls)
 			}
-			if tc.name == "successful consume" && consumeCalls != 1 {
-				t.Fatalf("consume calls=%d want 1", consumeCalls)
+			if tc.wantProviderCalls == 1 {
+				wantConsumes := 1
+				if tc.replay {
+					wantConsumes = 2
+				}
+				if consumeCalls != wantConsumes {
+					t.Fatalf("whole-plan consume calls=%d want %d", consumeCalls, wantConsumes)
+				}
 			}
 		})
 	}
 }
 
+func sameTestOps(a, b []policybundle.Operation) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].Capability != b[i].Capability || a[i].Resource != b[i].Resource || a[i].InputDigest != b[i].InputDigest || !bytes.Equal(a[i].ProviderInput, b[i].ProviderInput) {
+			return false
+		}
+	}
+	return true
+}
+
 func TestDaemonV2RejectsMixedCallerOperationFields(t *testing.T) {
 	providerCalls := 0
 	d := &Daemon{Env: Env{ProviderTransport: roundTripFunc(func(*http.Request) (*http.Response, error) { providerCalls++; return nil, nil })}}
-	body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, ToolName: "github.review_pr", PreflightHandle: "opaque", ConnectorID: execConnector, Capability: "repository.read", Action: "read", Resource: "repos/acme/kei"})
+	body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, ToolName: "github.get_issue", PreflightHandle: "opaque", ConnectorID: execConnector, Capability: "repository.read", Action: "read", Resource: "repos/acme/kei"})
 	rec := httptest.NewRecorder()
 	d.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DaemonInvokePath, bytes.NewReader(body)))
 	if rec.Code != http.StatusBadRequest || providerCalls != 0 {

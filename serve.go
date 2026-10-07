@@ -197,12 +197,12 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 				},
 			},
 			Authorize: connectorAuthorizer(local),
-			PlanV2: func(ctx context.Context, tool, agent string, args []byte, parent string, depth int) ([]policybundle.Operation, error) {
-				_, ops, err := local.PlanV2(ctx, tool, agent, args, parent, depth)
+			PlanV2: func(ctx context.Context, tool, agent string, args, contextValues []byte, parent string, depth int) ([]policybundle.Operation, error) {
+				_, ops, err := local.PlanV2(ctx, tool, agent, args, contextValues, parent, depth)
 				return ops, err
 			},
 			ValidateV2:    local.ValidateV2Plan,
-			ConsumeV2:     local.ConsumeV2,
+			ConsumeV2Plan: local.ConsumeV2Plan,
 			UseCredential: local.UseCredential,
 		})
 		local.SetCommandRunner(&runcommand.Daemon{

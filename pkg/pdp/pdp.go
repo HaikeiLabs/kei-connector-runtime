@@ -198,7 +198,7 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 }
 
 // AuthorizeV2Plan revalidates the exact current session and evaluates the
-// complete planner-produced operation set against a fresh local v2 bundle.
+// complete bundle-plan-derived operation set against a fresh local v2 bundle.
 type V2PlanContext struct {
 	BundleDigest  string
 	BundleVersion int64

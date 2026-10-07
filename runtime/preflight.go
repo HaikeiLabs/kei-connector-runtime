@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 type DispatchRoute interface{ isDispatchRoute() }
 
 type ConnectorDispatch struct {
+	Provider             string
 	ConnectorID          string
 	RequiredCapabilities []string
 }
@@ -26,6 +28,8 @@ type BindingContext struct {
 	InstallationID    string
 	BundleVersion     int64
 	BundleDigest      string
+	ArgsDigest        string
+	ContextDigest     string
 	Subject           string
 	SubjectSource     string
 	SubjectExternalID string
@@ -37,7 +41,7 @@ type BindingContext struct {
 }
 
 type OperationPlanner interface {
-	Plan(validatedArgs []byte, binding BindingContext) ([]Operation, error)
+	Plan(validatedArgs, validatedContext []byte, binding BindingContext) ([]Operation, error)
 }
 
 type PlanAuthorizer interface {
@@ -45,10 +49,11 @@ type PlanAuthorizer interface {
 }
 
 type PreflightInput struct {
-	Binding       BindingContext
-	ValidatedArgs []byte
-	Planner       OperationPlanner
-	Authorizer    PlanAuthorizer
+	Binding          BindingContext
+	ValidatedArgs    []byte
+	ValidatedContext []byte
+	Planner          OperationPlanner
+	Authorizer       PlanAuthorizer
 }
 type PreflightResult struct {
 	Handle    string    `json:"handle"`
@@ -88,18 +93,15 @@ func (s *AuthorizationStore) Preflight(in PreflightInput, ttl time.Duration) (Pr
 	if in.Planner == nil || in.Authorizer == nil || len(in.ValidatedArgs) == 0 || !validBinding(in.Binding) || ttl < minAuthorizationTTL || ttl > maxAuthorizationTTL {
 		return PreflightResult{}, ErrPreflightDenied
 	}
-	ops, err := in.Planner.Plan(append([]byte(nil), in.ValidatedArgs...), cloneBinding(in.Binding))
+	if operationInputDigest(in.ValidatedArgs) != in.Binding.ArgsDigest || operationInputDigest(in.ValidatedContext) != in.Binding.ContextDigest {
+		return PreflightResult{}, ErrPlanInvalid
+	}
+	ops, err := in.Planner.Plan(append([]byte(nil), in.ValidatedArgs...), append([]byte(nil), in.ValidatedContext...), cloneBinding(in.Binding))
 	if err != nil || len(ops) == 0 {
 		return PreflightResult{}, ErrPlanInvalid
 	}
 	if err := validatePlan(in.Binding.Route, ops); err != nil {
 		return PreflightResult{}, err
-	}
-	expectedInputDigest := operationInputDigest(in.ValidatedArgs)
-	for _, op := range ops {
-		if op.InputDigest != expectedInputDigest {
-			return PreflightResult{}, ErrPlanInvalid
-		}
 	}
 	digest, version, allowed, err := in.Authorizer.AuthorizePlan(cloneBinding(in.Binding), cloneOperations(ops))
 	if err != nil || !allowed || digest != in.Binding.BundleDigest || version != in.Binding.BundleVersion {
@@ -140,19 +142,23 @@ func (s *AuthorizationStore) ValidatePlan(handle string, binding BindingContext,
 	return nil
 }
 
+func sameOperationForConsume(stored, requested Operation) bool {
+	if len(requested.ProviderInput) != 0 {
+		return sameOperationSet([]Operation{stored}, []Operation{requested})
+	}
+	stored.ProviderInput = nil
+	return stored.ID == requested.ID && stored.ConnectorID == requested.ConnectorID && stored.Capability == requested.Capability && stored.Action == requested.Action && stored.Resource == requested.Resource && stored.InputDigest == requested.InputDigest && stored.ResourceType == requested.ResourceType && stored.ResourceID == requested.ResourceID && stored.ResourceParent == requested.ResourceParent && stored.ResourceParentType == requested.ResourceParentType
+}
+
 func sameOperationSet(a, b []Operation) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	counts := make(map[Operation]int, len(a))
-	for _, operation := range a {
-		counts[operation]++
-	}
-	for _, operation := range b {
-		if counts[operation] == 0 {
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.ID != y.ID || x.ConnectorID != y.ConnectorID || x.Capability != y.Capability || x.Action != y.Action || x.Resource != y.Resource || x.InputDigest != y.InputDigest || x.ResourceType != y.ResourceType || x.ResourceID != y.ResourceID || x.ResourceParent != y.ResourceParent || x.ResourceParentType != y.ResourceParentType || !bytes.Equal(x.ProviderInput, y.ProviderInput) {
 			return false
 		}
-		counts[operation]--
 	}
 	return true
 }
@@ -177,7 +183,7 @@ func (s *AuthorizationStore) Consume(handle string, binding BindingContext, oper
 		return ErrAuthorizationInvalid
 	}
 	for i, op := range e.operations {
-		if !e.consumed[i] && op == operation {
+		if !e.consumed[i] && sameOperationForConsume(op, operation) {
 			e.consumed[i] = true
 			all := true
 			for _, consumed := range e.consumed {
@@ -192,6 +198,29 @@ func (s *AuthorizationStore) Consume(handle string, binding BindingContext, oper
 	return ErrAuthorizationInvalid
 }
 
+// ConsumePlan atomically consumes the whole ordered plan before a multi-op
+// daemon request can begin any provider work.
+func (s *AuthorizationStore) ConsumePlan(handle string, binding BindingContext, operations []Operation, authorizer PlanAuthorizer) error {
+	if handle == "" || authorizer == nil {
+		return ErrAuthorizationInvalid
+	}
+	key := sha256.Sum256([]byte(handle))
+	keyString := hex.EncodeToString(key[:])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[keyString]
+	if e == nil || !s.now().Before(e.expires) || !sameBinding(e.binding, binding) || !sameOperationSet(e.operations, operations) {
+		return ErrAuthorizationInvalid
+	}
+	digest, version, allowed, err := authorizer.AuthorizePlan(cloneBinding(e.binding), cloneOperations(e.operations))
+	if err != nil || !allowed || digest != e.binding.BundleDigest || version != e.binding.BundleVersion || !s.now().Before(e.expires) {
+		delete(s.entries, keyString)
+		return ErrAuthorizationInvalid
+	}
+	delete(s.entries, keyString)
+	return nil
+}
+
 // Invalidate drops all outstanding plan handles on session change or bundle
 // refresh. Process restart also invalidates them because the store is memory-only.
 func (s *AuthorizationStore) Invalidate() {
@@ -201,11 +230,11 @@ func (s *AuthorizationStore) Invalidate() {
 }
 
 func validBinding(b BindingContext) bool {
-	if b.InstallationID == "" || b.BundleVersion < 1 || b.BundleDigest == "" || b.Subject == "" || b.AgentID == "" || b.Tool == "" {
+	if b.InstallationID == "" || b.BundleVersion < 1 || b.BundleDigest == "" || !validInputDigest(b.ArgsDigest) || !validInputDigest(b.ContextDigest) || b.Subject == "" || b.AgentID == "" || b.Tool == "" {
 		return false
 	}
 	route, ok := b.Route.(ConnectorDispatch)
-	return ok && route.ConnectorID != "" && len(route.RequiredCapabilities) > 0
+	return ok && route.Provider != "" && route.ConnectorID != "" && len(route.RequiredCapabilities) > 0
 }
 func (s *AuthorizationStore) purgeLocked(now time.Time) {
 	for k, e := range s.entries {
@@ -215,7 +244,7 @@ func (s *AuthorizationStore) purgeLocked(now time.Time) {
 	}
 }
 func sameBinding(a, b BindingContext) bool {
-	return a.InstallationID == b.InstallationID && a.BundleVersion == b.BundleVersion && a.BundleDigest == b.BundleDigest && a.Subject == b.Subject && a.SubjectSource == b.SubjectSource && a.SubjectExternalID == b.SubjectExternalID && a.AgentID == b.AgentID && a.Tool == b.Tool && a.ParentSpan == b.ParentSpan && a.DelegationDepth == b.DelegationDepth && routeEqual(a.Route, b.Route)
+	return a.InstallationID == b.InstallationID && a.BundleVersion == b.BundleVersion && a.BundleDigest == b.BundleDigest && a.ArgsDigest == b.ArgsDigest && a.ContextDigest == b.ContextDigest && a.Subject == b.Subject && a.SubjectSource == b.SubjectSource && a.SubjectExternalID == b.SubjectExternalID && a.AgentID == b.AgentID && a.Tool == b.Tool && a.ParentSpan == b.ParentSpan && a.DelegationDepth == b.DelegationDepth && routeEqual(a.Route, b.Route)
 }
 func routeEqual(a, b DispatchRoute) bool {
 	x, ok := a.(ConnectorDispatch)
@@ -223,7 +252,7 @@ func routeEqual(a, b DispatchRoute) bool {
 		return false
 	}
 	y, ok := b.(ConnectorDispatch)
-	return ok && x.ConnectorID == y.ConnectorID && equalStrings(x.RequiredCapabilities, y.RequiredCapabilities)
+	return ok && x.Provider == y.Provider && x.ConnectorID == y.ConnectorID && equalStrings(x.RequiredCapabilities, y.RequiredCapabilities)
 }
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
@@ -243,7 +272,13 @@ func cloneBinding(b BindingContext) BindingContext {
 	}
 	return b
 }
-func cloneOperations(ops []Operation) []Operation { return append([]Operation(nil), ops...) }
+func cloneOperations(ops []Operation) []Operation {
+	cloned := append([]Operation(nil), ops...)
+	for i := range cloned {
+		cloned[i].ProviderInput = append([]byte(nil), cloned[i].ProviderInput...)
+	}
+	return cloned
+}
 func operationInputDigest(canonical []byte) string {
 	sum := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -257,7 +292,7 @@ func validInputDigest(digest string) bool {
 }
 func validatePlan(route DispatchRoute, ops []Operation) error {
 	r, ok := route.(ConnectorDispatch)
-	if !ok || r.ConnectorID == "" || len(r.RequiredCapabilities) == 0 {
+	if !ok || r.Provider == "" || r.ConnectorID == "" || len(r.RequiredCapabilities) == 0 || len(ops) == 0 || len(ops) > policybundle.MaxPlanOperations {
 		return ErrPlanInvalid
 	}
 	caps := map[string]bool{}
@@ -268,14 +303,16 @@ func validatePlan(route DispatchRoute, ops []Operation) error {
 		caps[c] = true
 	}
 	covered := map[string]bool{}
+	ids := map[string]bool{}
 	for _, op := range ops {
-		if op.ConnectorID != r.ConnectorID || op.Capability == "" || op.Action == "" || !validInputDigest(op.InputDigest) || !caps[op.Capability] {
+		if op.ID == "" || ids[op.ID] || op.ConnectorID != r.ConnectorID || op.Capability == "" || op.Action == "" || op.Resource == "" || len(op.ProviderInput) == 0 || len(op.ProviderInput) > policybundle.MaxPlanProviderInputBytes || !validInputDigest(op.InputDigest) || op.InputDigest != operationInputDigest(op.ProviderInput) || !caps[op.Capability] {
 			return ErrPlanInvalid
 		}
-		if op.ResourceType == "" && (op.ResourceID != "" || op.ResourceParent != "" || op.ResourceParentType != "" || op.Resource != "") {
+		ids[op.ID] = true
+		if op.ResourceType == "" && (op.ResourceID != "" || op.ResourceParent != "" || op.ResourceParentType != "") {
 			return ErrPlanInvalid
 		}
-		if op.ResourceType != "" && (op.ResourceID == "" || op.Resource == "") {
+		if op.ResourceType != "" && op.Resource == "" {
 			return ErrPlanInvalid
 		}
 		if op.ResourceParent == "" && op.ResourceParentType != "" || op.ResourceParent != "" && op.ResourceParentType == "" {

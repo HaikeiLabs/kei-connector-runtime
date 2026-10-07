@@ -10,9 +10,11 @@ import (
 	"time"
 )
 
-type plannerFunc func([]byte, BindingContext) ([]Operation, error)
+type plannerFunc func([]byte, []byte, BindingContext) ([]Operation, error)
 
-func (f plannerFunc) Plan(b []byte, c BindingContext) ([]Operation, error) { return f(b, c) }
+func (f plannerFunc) Plan(args, context []byte, c BindingContext) ([]Operation, error) {
+	return f(args, context, c)
+}
 
 type planAuthorizerFunc func(BindingContext, []Operation) (string, int64, bool, error)
 
@@ -21,7 +23,7 @@ func (f planAuthorizerFunc) AuthorizePlan(b BindingContext, ops []Operation) (st
 }
 
 func testBinding() BindingContext {
-	return BindingContext{InstallationID: "i", BundleVersion: 2, BundleDigest: "sha256:bundle", Subject: "u", SubjectSource: "discord", SubjectExternalID: "ext", AgentID: "a", Tool: "t", Route: ConnectorDispatch{ConnectorID: "c", RequiredCapabilities: []string{"read", "meta.read"}}}
+	return BindingContext{InstallationID: "i", BundleVersion: 2, BundleDigest: "sha256:bundle", ArgsDigest: operationInputDigest([]byte(`{"id":"x"}`)), ContextDigest: operationInputDigest([]byte(`{}`)), Subject: "u", SubjectSource: "discord", SubjectExternalID: "ext", AgentID: "a", Tool: "t", Route: ConnectorDispatch{Provider: "github", ConnectorID: "c", RequiredCapabilities: []string{"read", "meta.read"}}}
 }
 func testInputDigest() string {
 	sum := sha256.Sum256([]byte(`{"id":"x"}`))
@@ -29,10 +31,11 @@ func testInputDigest() string {
 }
 func testPlan() []Operation {
 	digest := testInputDigest()
-	return []Operation{{ConnectorID: "c", Capability: "read", Action: "read", Resource: "repos/x", InputDigest: digest, ResourceType: "repo", ResourceID: "x"}, {ConnectorID: "c", Capability: "meta.read", Action: "read", Resource: "repos/x", InputDigest: digest, ResourceType: "repo", ResourceID: "x"}}
+	input := []byte(`{"id":"x"}`)
+	return []Operation{{ID: "one", ConnectorID: "c", Capability: "read", Action: "read", Resource: "repos/x", InputDigest: digest, ProviderInput: input, ResourceType: "repo", ResourceID: "x"}, {ID: "two", ConnectorID: "c", Capability: "meta.read", Action: "read", Resource: "repos/x", InputDigest: digest, ProviderInput: input, ResourceType: "repo", ResourceID: "x"}}
 }
 func testPreflightInput(allow bool) PreflightInput {
-	return PreflightInput{Binding: testBinding(), ValidatedArgs: []byte(`{"id":"x"}`), Planner: plannerFunc(func([]byte, BindingContext) ([]Operation, error) { return testPlan(), nil }), Authorizer: planAuthorizerFunc(func(b BindingContext, ops []Operation) (string, int64, bool, error) {
+	return PreflightInput{Binding: testBinding(), ValidatedArgs: []byte(`{"id":"x"}`), ValidatedContext: []byte(`{}`), Planner: plannerFunc(func([]byte, []byte, BindingContext) ([]Operation, error) { return testPlan(), nil }), Authorizer: planAuthorizerFunc(func(b BindingContext, ops []Operation) (string, int64, bool, error) {
 		return b.BundleDigest, b.BundleVersion, allow, nil
 	})}
 }
@@ -57,7 +60,7 @@ func TestPreflightRequiresCompleteAndAuthorizedPlan(t *testing.T) {
 	for name, plan := range map[string][]Operation{"missing": nil, "extra": append(testPlan(), Operation{ConnectorID: "c", Capability: "secret", Action: "read"}), "missing required": testPlan()[:1]} {
 		t.Run(name, func(t *testing.T) {
 			in := testPreflightInput(true)
-			in.Planner = plannerFunc(func([]byte, BindingContext) ([]Operation, error) { return plan, nil })
+			in.Planner = plannerFunc(func([]byte, []byte, BindingContext) ([]Operation, error) { return plan, nil })
 			if _, err := NewAuthorizationStore().Preflight(in, time.Second); err == nil {
 				t.Fatal("invalid plan accepted")
 			}

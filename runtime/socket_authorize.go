@@ -22,6 +22,7 @@ const (
 	authorizeResponseSchema = "kei.authorize-response/v1"
 	sessionSchema           = "kei.session/v1"
 	maxSocketRequest        = 64 << 10
+	maxSocketPlanRequest    = 192 << 10
 )
 
 type socketAuthorizeRequest struct {
@@ -377,6 +378,7 @@ type socketPreflightRequest struct {
 	Tool            string          `json:"tool"`
 	AgentID         string          `json:"agent_id,omitempty"`
 	Arguments       json.RawMessage `json:"arguments"`
+	Context         json.RawMessage `json:"context"`
 	ParentSpan      string          `json:"parent_span,omitempty"`
 	DelegationDepth int             `json:"delegation_depth,omitempty"`
 }
@@ -388,6 +390,7 @@ type socketPreflightResponse struct {
 }
 
 type socketConsumeOperation struct {
+	ID                 string `json:"id"`
 	ConnectorID        string `json:"connector_id"`
 	Capability         string `json:"capability"`
 	Action             string `json:"action"`
@@ -403,6 +406,8 @@ type socketConsumeRequest struct {
 	Schema          string                 `json:"schema"`
 	Handle          string                 `json:"handle"`
 	Tool            string                 `json:"tool"`
+	Arguments       json.RawMessage        `json:"arguments"`
+	Context         json.RawMessage        `json:"context"`
 	AgentID         string                 `json:"agent_id,omitempty"`
 	Operation       socketConsumeOperation `json:"operation"`
 	ParentSpan      string                 `json:"parent_span,omitempty"`
@@ -411,11 +416,11 @@ type socketConsumeRequest struct {
 
 func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
 	var req socketPreflightRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != "kei.preflight-request/v1" || req.Tool == "" || !jsonJSONObject(req.Arguments) {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.preflight-request/v1" || req.Tool == "" || !jsonJSONObject(req.Arguments) || (len(req.Context) > 0 && !jsonJSONObject(req.Context)) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
 		return
 	}
-	grant, err := l.PreflightV2(r.Context(), req.Tool, req.AgentID, req.Arguments, req.ParentSpan, req.DelegationDepth, 10*time.Second)
+	grant, err := l.PreflightV2(r.Context(), req.Tool, req.AgentID, req.Arguments, req.Context, req.ParentSpan, req.DelegationDepth, 10*time.Second)
 	if err != nil {
 		writeRuntimeError(w, http.StatusForbidden, "preflight_denied", "the complete operation plan was not authorized")
 		return
@@ -427,12 +432,12 @@ func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
 
 func (l *LocalPDP) handleConsume(w http.ResponseWriter, r *http.Request) {
 	var req socketConsumeRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != "kei.consume-request/v1" || req.Handle == "" || req.Tool == "" || req.Operation.ConnectorID == "" || req.Operation.Capability == "" || req.Operation.Action == "" || req.Operation.InputDigest == "" {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.consume-request/v1" || req.Handle == "" || req.Tool == "" || req.Operation.ID == "" || req.Operation.ConnectorID == "" || req.Operation.Capability == "" || req.Operation.Action == "" || req.Operation.InputDigest == "" {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
 		return
 	}
-	op := Operation{ConnectorID: req.Operation.ConnectorID, Capability: req.Operation.Capability, Action: req.Operation.Action, Resource: req.Operation.Resource, ResourceType: req.Operation.ResourceType, ResourceID: req.Operation.ResourceID, ResourceParent: req.Operation.ResourceParent, ResourceParentType: req.Operation.ResourceParentType, InputDigest: req.Operation.InputDigest}
-	if err := l.ConsumeV2(r.Context(), req.Handle, req.Tool, req.AgentID, op, req.ParentSpan, req.DelegationDepth); err != nil {
+	op := Operation{ID: req.Operation.ID, ConnectorID: req.Operation.ConnectorID, Capability: req.Operation.Capability, Action: req.Operation.Action, Resource: req.Operation.Resource, ResourceType: req.Operation.ResourceType, ResourceID: req.Operation.ResourceID, ResourceParent: req.Operation.ResourceParent, ResourceParentType: req.Operation.ResourceParentType, InputDigest: req.Operation.InputDigest}
+	if err := l.ConsumeV2(r.Context(), req.Handle, req.Tool, req.AgentID, req.Arguments, req.Context, op, req.ParentSpan, req.DelegationDepth); err != nil {
 		writeRuntimeError(w, http.StatusForbidden, "authorization_invalid", "the operation authorization is invalid or expired")
 		return
 	}
@@ -549,7 +554,11 @@ func jsonJSONObject(raw json.RawMessage) bool {
 }
 
 func decodeSocketJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSocketRequest))
+	return decodeSocketJSONLimit(w, r, dst, maxSocketRequest)
+}
+
+func decodeSocketJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	d.DisallowUnknownFields()
 	if err := d.Decode(dst); err != nil {
 		return err

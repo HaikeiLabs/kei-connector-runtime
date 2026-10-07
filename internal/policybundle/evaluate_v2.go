@@ -9,11 +9,13 @@ import (
 // Operation is one exact planner-produced connector operation. Resource
 // identity remains structured; no field is parsed from or flattened into another.
 type Operation struct {
+	ID                 string
 	ConnectorID        string
 	Capability         string
 	Action             string
 	Resource           string
 	InputDigest        string
+	ProviderInput      json.RawMessage
 	ResourceType       string
 	ResourceID         string
 	ResourceParent     string
@@ -37,6 +39,7 @@ type V2Tool struct {
 	} `json:"route"`
 	RequiredCapabilities []string         `json:"required_capabilities,omitempty"`
 	ResourceTypes        []V2ResourceType `json:"resource_types,omitempty"`
+	Plan                 json.RawMessage  `json:"plan,omitempty"`
 }
 
 // V2ConnectorTool resolves one trusted connector tool from the parsed v2 set.
@@ -49,7 +52,7 @@ func (v *Verified) V2ConnectorTool(name string, now time.Time) (V2Tool, bool) {
 		return V2Tool{}, false
 	}
 	for _, tool := range set.Tools {
-		if tool.Name == name && tool.Route.ConnectorBinding != nil {
+		if tool.Name == name && tool.Route.ConnectorBinding != nil && len(tool.Plan) > 0 && ValidateV2Plan(tool) == nil {
 			return tool, true
 		}
 	}
@@ -85,8 +88,8 @@ type v2PolicySet struct {
 }
 
 // EvaluateV2Plan locally AND-authorizes a complete exact operation plan for a
-// registered connector tool. Callers must supply planner-produced operations;
-// caller capability declarations are never used as authority.
+// registered connector tool. The runtime derives operations from its validated
+// cached bundle plan; caller capability declarations are never authority.
 func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubject, ops []Operation, now time.Time) Decision {
 	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
 		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
@@ -121,7 +124,7 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 			break
 		}
 	}
-	if tool == nil || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" {
+	if tool == nil || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" || ValidateV2Plan(*tool) != nil {
 		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector tool is not registered in the policy bundle"}
 	}
 	if agentID == "" {
@@ -191,8 +194,8 @@ func (v *Verified) agentBound(agentID, connectorID string, required []string) bo
 }
 
 func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool {
-	if len(tool.ResourceTypes) == 0 {
-		return op.ResourceType == "" && op.ResourceID == "" && op.ResourceParent == "" && op.ResourceParentType == ""
+	if op.ResourceType == "" {
+		return op.ResourceID == "" && op.ResourceParent == "" && op.ResourceParentType == ""
 	}
 	for _, rt := range tool.ResourceTypes {
 		if rt.Type == op.ResourceType && rt.ParentType == op.ResourceParentType {
@@ -202,7 +205,7 @@ func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool 
 			if rt.ParentType != "" && (op.ResourceParent == "" || op.ResourceParentType != rt.ParentType) {
 				continue
 			}
-			return op.ResourceID != ""
+			return true
 		}
 	}
 	return false

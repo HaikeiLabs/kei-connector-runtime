@@ -31,21 +31,21 @@ import (
 // server-side from the harness token; the proxy only forwards the capability,
 // the resource, and the identity-propagation context.
 type Request struct {
-	HarnessToken    string `json:"harness_token"`
+	HarnessToken    string          `json:"harness_token"`
 	ToolName        string `json:"tool_name,omitempty"`
-	PreflightHandle string `json:"preflight_handle,omitempty"`
-	ParentSpan      string `json:"parent_span,omitempty"`
-	DelegationDepth int    `json:"delegation_depth,omitempty"`
-	AgentID         string `json:"agent_id,omitempty"`
-	ConnectorID     string `json:"connector_id"`
-	Capability      string `json:"capability"`
-	Action          string `json:"action"`
-	Resource        string `json:"resource"`
-	TraceID         string `json:"trace_id"`
-	IdempotencyKey  string `json:"idempotency_key,omitempty"`
-	InvokingSubject string `json:"invoking_subject,omitempty"`
-	UserID          string `json:"user_id,omitempty"`
-	Framework       string `json:"framework,omitempty"`
+	PreflightHandle string          `json:"preflight_handle,omitempty"`
+	ParentSpan      string          `json:"parent_span,omitempty"`
+	DelegationDepth int             `json:"delegation_depth,omitempty"`
+	AgentID         string          `json:"agent_id,omitempty"`
+	ConnectorID     string          `json:"connector_id"`
+	Capability      string          `json:"capability"`
+	Action          string          `json:"action"`
+	Resource        string          `json:"resource"`
+	TraceID         string          `json:"trace_id"`
+	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
+	InvokingSubject string          `json:"invoking_subject,omitempty"`
+	UserID          string          `json:"user_id,omitempty"`
+	Framework       string          `json:"framework,omitempty"`
 	// ProviderUserID is the chat-platform identity (e.g. a WhatsApp E.164
 	// number); the catalog resolves it to the invoking Kei user.
 	ProviderUserID string `json:"provider_user_id,omitempty"`
@@ -196,6 +196,7 @@ type connectorInvokePlan struct {
 	abacSecret      string
 	timeout         time.Duration
 	input           string
+	context         string
 	toolName        string
 	preflightHandle string
 	parentSpan      string
@@ -224,6 +225,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	inputArg := fs.String("input", "", "capability input: a JSON object, @<file>, or - for stdin (default {})")
 	providerUser := fs.String("provider-user", "", "chat-platform identity, e.g. a WhatsApp E.164 number (default $KEI_PROXY_PROVIDER_USER)")
 	toolName := fs.String("tool", "", "registered v2 tool name; preflight is performed by the daemon")
+	contextArg := fs.String("context", "", "separate bounded JSON context map for a v2 tool plan")
 	preflightHandle := fs.String("preflight-handle", "", "opaque preflight handle (normally obtained by daemon preflight)")
 	parentSpan := fs.String("parent-span", "", "parent span bound to preflight")
 	delegationDepth := fs.Int("delegation-depth", 0, "delegation depth bound to preflight")
@@ -243,6 +245,9 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 
 	if *toolName == "" && (*connectorID == "" || *capability == "" || *action == "" || *resource == "") {
 		return connectorInvokePlan{}, fmt.Errorf("--connector, --capability, --action, and --resource are required without --tool")
+	}
+	if *toolName == "" && *contextArg != "" {
+		return connectorInvokePlan{}, fmt.Errorf("--context requires --tool")
 	}
 	if *toolName != "" && (*connectorID != "" || *capability != "" || *action != "" || *resource != "") {
 		return connectorInvokePlan{}, fmt.Errorf("v2 --tool calls must not include caller-selected connector operation fields")
@@ -291,6 +296,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		abacSecret: secret,
 		timeout:    time.Duration(*timeout) * time.Second,
 		input:      *inputArg,
+		context:    *contextArg,
 		toolName:   *toolName, preflightHandle: *preflightHandle, parentSpan: *parentSpan, delegationDepth: *delegationDepth,
 		explicitSubject: explicitSubject,
 	}, nil

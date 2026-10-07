@@ -225,6 +225,17 @@ func validatePolicySetV2(raw json.RawMessage) error {
 	if v.Schema != "kei.policy-set/v2" || v.MatchSemantics != "kei.match/v2" || v.Evaluation.Checks != "per_capability_first_match_and" || v.Evaluation.Default != "deny" {
 		return ErrBundleUnsupported
 	}
+	var set v2PolicySet
+	if err := strictJSON(raw, &set); err != nil {
+		return ErrBundleUnsupported
+	}
+	for _, tool := range set.Tools {
+		if tool.Route.ConnectorBinding != nil && len(tool.Plan) > 0 {
+			if err := ValidateV2Plan(tool); err != nil {
+				return ErrBundleUnsupported
+			}
+		}
+	}
 	return nil
 }
 

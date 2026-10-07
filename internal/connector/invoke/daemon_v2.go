@@ -8,6 +8,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
@@ -28,7 +29,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 		d.Env.emitAudit(plan, nil, out, time.Since(started))
 		return out
 	}
-	if dr.PreflightHandle == "" || d.PlanV2 == nil || d.ValidateV2 == nil || d.ConsumeV2 == nil || d.Authorize == nil || d.UseCredential == nil {
+	if dr.PreflightHandle == "" || d.PlanV2 == nil || d.ValidateV2 == nil || d.ConsumeV2Plan == nil || d.Authorize == nil || d.UseCredential == nil {
 		return finish(deny("preflight_required", "v2 tool calls require a valid preflight handle"))
 	}
 	grant, err := d.Authorize(ctx, DaemonCall{AgentID: dr.AgentID, ToolName: dr.ToolName})
@@ -45,7 +46,19 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 		return finish(deny("subject_unlinked", "the session subject is not linked"))
 	}
 	agentID := grant.AgentID
-	ops, err := d.PlanV2(ctx, dr.ToolName, agentID, append([]byte(nil), canonical...), dr.ParentSpan, dr.DelegationDepth)
+	contextRaw := []byte(dr.Context)
+	if len(contextRaw) == 0 {
+		contextRaw = []byte("{}")
+	}
+	if policybundle.RejectDuplicateJSON(contextRaw) != nil { return finish(deny("input_invalid", "tool context contains ambiguous JSON")) }
+	if len(contextRaw) > policybundle.MaxPlanDataBytes {
+		return finish(deny("input_invalid", "context exceeds the v2 tool context size limit"))
+	}
+	canonicalContext, _, contextErr := input.Canonicalize(contextRaw)
+	if contextErr != nil || len(canonicalContext) > policybundle.MaxPlanDataBytes {
+		return finish(deny("input_invalid", "context must be one JSON object of at most 64 KiB"))
+	}
+	ops, err := d.PlanV2(ctx, dr.ToolName, agentID, append([]byte(nil), canonical...), append([]byte(nil), canonicalContext...), dr.ParentSpan, dr.DelegationDepth)
 	if err != nil || len(ops) == 0 {
 		return finish(deny("operation_plan_invalid", "the complete trusted operation plan is unavailable"))
 	}
@@ -54,7 +67,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	// operation. The only plan source is the runtime's registered planner.
 	prepared := make([]preparedOperation, 0, len(ops))
 	for _, op := range ops {
-		if op.ConnectorID != grant.ConnectorID || op.Capability == "" || op.Action == "" || !contains(grant.Capabilities, op.Capability) || op.InputDigest != plan.req.InputDigest {
+		if op.ConnectorID != grant.ConnectorID || op.Capability == "" || op.Action == "" || !contains(grant.Capabilities, op.Capability) || op.InputDigest != sha256Digest(op.ProviderInput) {
 			return finish(deny("operation_plan_invalid", "the operation does not match the registered tool"))
 		}
 		opReq := dr
@@ -70,7 +83,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 		if denied != nil {
 			return finish(denied)
 		}
-		conn, decoded, denied := d.Env.prepare(operationRequest, canonical, meta, inv)
+		conn, decoded, denied := d.Env.prepare(operationRequest, op.ProviderInput, meta, inv)
 		if denied != nil {
 			return finish(denied)
 		}
@@ -79,15 +92,15 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 
 	// Confirm the caller did not substitute, omit, or add a plan item before
 	// any provider side effect. Consumption remains immediately before each op.
-	if err := d.ValidateV2(ctx, dr.PreflightHandle, dr.ToolName, agentID, ops, dr.ParentSpan, dr.DelegationDepth); err != nil {
+	if err := d.ValidateV2(ctx, dr.PreflightHandle, dr.ToolName, agentID, canonical, canonicalContext, ops, dr.ParentSpan, dr.DelegationDepth); err != nil {
+		return finish(deny("authorization_invalid", "the v2 operation plan is invalid or expired"))
+	}
+	if err := d.ConsumeV2Plan(ctx, dr.PreflightHandle, dr.ToolName, agentID, canonical, canonicalContext, ops, dr.ParentSpan, dr.DelegationDepth); err != nil {
 		return finish(deny("authorization_invalid", "the v2 operation plan is invalid or expired"))
 	}
 	results := make([]json.RawMessage, 0, len(prepared))
 	var lastExec *execution
 	for _, item := range prepared {
-		if err := d.ConsumeV2(ctx, dr.PreflightHandle, dr.ToolName, agentID, item.operation, dr.ParentSpan, dr.DelegationDepth); err != nil {
-			return finish(deny("authorization_invalid", "the v2 operation authorization is invalid or expired"))
-		}
 		exec := &execution{provider: item.meta.Provider, meta: &item.meta, invocation: &item.inv, credentialSubject: contract.CredentialSubject(item.meta, item.inv)}
 		var runDenial *denial
 		err := d.UseCredential(ctx, grant.Subject, string(item.meta.Provider), func(token string) error {
