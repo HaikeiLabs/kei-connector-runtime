@@ -260,7 +260,7 @@ func TestSyncToolsAcceptsNegotiatedV3(t *testing.T) {
 
 func TestSyncToolsRejectsUnsupportedLocalProtocol(t *testing.T) {
 	client := NewRuntimeClient("http://unused", time.Second)
-	if err := client.SyncTools(context.Background(), "token", &ToolManifest{Schema: "kei.tool-manifest/v4"}); err == nil {
+	if err := client.SyncTools(context.Background(), "token", &ToolManifest{Schema: "kei.tool-manifest/v5"}); err == nil {
 		t.Fatal("unsupported local protocol was sent")
 	}
 }
