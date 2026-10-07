@@ -40,13 +40,14 @@ func TestHookReportGoldenFixtures(t *testing.T) {
 			var raw struct {
 				ToolName  string          `json:"tool_name"`
 				ToolInput json.RawMessage `json:"tool_input"`
+				SessionID string          `json:"session_id"`
 			}
 			if err := json.Unmarshal(input, &raw); err != nil {
 				t.Fatal(err)
 			}
 			canonical := CanonicalJSON(raw.ToolInput)
 			digest := sha256.Sum256(canonical)
-			if got.Schema != "kei.harness-tool-event/v1" || got.HarnessID != "harness-123" || got.HarnessKind != harness {
+			if got.Schema != "kei.harness-tool-event/v1" || got.HarnessID != "harness-123" || got.HarnessKind != harness || got.HarnessSessionID != raw.SessionID {
 				t.Fatalf("identity/schema = %+v", got)
 			}
 			wantTool := raw.ToolName
@@ -103,7 +104,13 @@ func TestRunAcceptsRenderedContract(t *testing.T) {
 			if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Schema != "kei.harness-tool-event/v1" || got.HarnessID != "h-abc123" || got.HarnessKind != harness.kind {
+			var raw struct {
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(input, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if got.Schema != "kei.harness-tool-event/v1" || got.HarnessID != "h-abc123" || got.HarnessKind != harness.kind || got.HarnessSessionID != raw.SessionID {
 				t.Fatalf("identity/schema = %+v", got)
 			}
 			if got.NativeDecision == "" {
@@ -140,6 +147,52 @@ func TestRunBackwardCompat(t *testing.T) {
 	}
 	if got.HarnessKind != "claude" || got.HarnessID != "h-legacy" {
 		t.Fatalf("event = %+v", got)
+	}
+}
+
+func TestRunWithoutHarnessID(t *testing.T) {
+	for _, harness := range []struct {
+		kind    string
+		fixture string
+	}{{"claude", "claude.json"}, {"codex", "codex.json"}, {"opencode", "opencode.json"}} {
+		t.Run(harness.kind, func(t *testing.T) {
+			input, err := os.ReadFile(filepath.Join("testdata", "hooks", harness.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var spoolBuf bytes.Buffer
+			cfg := Config{AppendAudit: func(record []byte) error {
+				spoolBuf.Write(record)
+				spoolBuf.WriteByte('\n')
+				return nil
+			}}
+			var stdout, stderr bytes.Buffer
+			// No --harness flag: the hook must still succeed and carry the kind + session_id.
+			args := []string{harness.kind}
+			if code := Run(args, bytes.NewReader(input), &stdout, &stderr, cfg); code != 0 {
+				t.Fatalf("Run(%v) exit = %d, stderr=%q", args, code, stderr.String())
+			}
+			var got permissionEvent
+			line, err := spoolBuf.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.HarnessID != "" {
+				t.Fatalf("HarnessID = %q, want empty (no --harness flag)", got.HarnessID)
+			}
+			if got.HarnessKind != harness.kind {
+				t.Fatalf("HarnessKind = %q, want %q", got.HarnessKind, harness.kind)
+			}
+			if got.HarnessSessionID == "" {
+				t.Fatal("HarnessSessionID is empty, want a value from stdin or fallback")
+			}
+			if got.NativeDecision == "" {
+				t.Fatal("native decision missing")
+			}
+		})
 	}
 }
 

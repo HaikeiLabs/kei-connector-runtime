@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,12 +73,15 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 	flags.SetOutput(io.Discard)
 	harnessID := flags.String("harness", "", "registered harness id")
 	sessionID := flags.String("session", session.IDFromEnv(), "kei-proxy daemon session id (default $KEI_SESSION_ID)")
-	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *harnessID == "" {
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
 		return 0
 	}
 	in, err := ReadInput(stdin)
 	if err != nil {
 		return 0
+	}
+	if in.SessionID == "" {
+		in.SessionID = strconv.Itoa(os.Getppid())
 	}
 	canonical := CanonicalJSON(in.ToolInput)
 	var argsDigest, digestKeyID string
