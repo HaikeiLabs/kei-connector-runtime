@@ -28,6 +28,7 @@ type executionRecord struct {
 	PolicyReason     *string   `json:"policy_reason,omitempty"`
 	OrgID            *string   `json:"org_id,omitempty"`
 	WorkspaceID      *string   `json:"workspace_id,omitempty"`
+	SessionID        string    `json:"session_id,omitempty"`
 
 	ConnectorID         string `json:"connector_id"`
 	Provider            string `json:"provider,omitempty"`
@@ -64,7 +65,7 @@ func (env Env) emitAudit(plan connectorInvokePlan, exec *execution, out output, 
 		ResourcesTouched: []string{req.Resource}, Decision: out.Decision, PolicyReason: &reason,
 		ConnectorID: req.ConnectorID, Capability: req.Capability,
 		ReasonCode: out.ReasonCode, DurationMS: elapsed.Milliseconds(),
-		IdempotencyKey: req.IdempotencyKey,
+		IdempotencyKey: req.IdempotencyKey, SessionID: plan.session,
 	}
 	if req.InputDigest != "" {
 		digest := req.InputDigest

@@ -34,6 +34,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 const (
@@ -58,9 +59,10 @@ type Daemon struct {
 	// Authorize decides one credential reference with the local PDP and the
 	// session subject.
 	Authorize func(context.Context, invoke.DaemonCall) (invoke.Grant, error)
-	// UseCredential runs fn with the session credential subject holds for
-	// provider (credrelease.Store.Use).
-	UseCredential func(ctx context.Context, subject, provider string, fn func(token string) error) error
+	// UseCredential runs fn with the credential the named session holds for
+	// subject and provider (credrelease.Store.Use); a session reaches only its
+	// own credentials.
+	UseCredential func(ctx context.Context, session, subject, provider string, fn func(token string) error) error
 	AppendAudit   func([]byte) error
 	AuditCrypto   *auditcrypto.Provider
 }
@@ -148,7 +150,7 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	frames := &frameWriter{enc: json.NewEncoder(w), rc: rc}
-	done := d.run(r.Context(), req, frames)
+	done := d.run(r.Context(), session.FromRequest(r), req, frames)
 	done.Schema = daemonStreamSchema
 	_ = frames.write(runFrame{Done: &done})
 }
@@ -160,8 +162,8 @@ type resolvedRef struct {
 	provider string
 }
 
-func (d *Daemon) run(ctx context.Context, req daemonRunRequest, frames *frameWriter) runDone {
-	cfg := Config{AppendAudit: d.AppendAudit, AuditCrypto: d.AuditCrypto}
+func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest, frames *frameWriter) runDone {
+	cfg := Config{AppendAudit: d.AppendAudit, AuditCrypto: d.AuditCrypto, SessionID: sessionID}
 	argv := req.Argv
 	deny := func(code, reason string, exitCode int, connectorIDs, fields []string) runDone {
 		appendRunAudit(io.Discard, cfg, connectorIDs, fields, argv[0], argv, code, exitCode)
@@ -195,12 +197,15 @@ func (d *Daemon) run(ctx context.Context, req daemonRunRequest, frames *frameWri
 	for i := range refs {
 		ref := refs[i].ref
 		grant, err := d.Authorize(ctx, invoke.DaemonCall{
+			Session:     sessionID,
 			ConnectorID: ref.connectorID, Capability: runCapability, AgentID: req.AgentID,
 			Resource: "kei://connectors/" + ref.connectorID + "/" + ref.field,
 		})
 		switch {
 		case err != nil:
 			return deny("request_canceled", "request canceled", 1, connectorIDs, fields)
+		case grant.ReasonCode == invoke.ReasonSessionNotFound:
+			return deny(invoke.ReasonSessionNotFound, "the session does not exist or has ended", 1, connectorIDs, fields)
 		case !grant.HasSession:
 			return deny("no_session", "no active session: start one with PUT /v1/session", 1, connectorIDs, fields)
 		case !grant.Allow:
@@ -219,7 +224,7 @@ func (d *Daemon) run(ctx context.Context, req daemonRunRequest, frames *frameWri
 
 	var exitCode int
 	var spawnErr error
-	err := d.withCredentials(ctx, subject, refs, plain, func(env []string, secrets []string) {
+	err := d.withCredentials(ctx, sessionID, subject, refs, plain, func(env []string, secrets []string) {
 		exitCode, spawnErr = spawn(ctx, argv, env, req.Dir, frames, secrets)
 	})
 	if err != nil {
@@ -241,14 +246,14 @@ func (d *Daemon) run(ctx context.Context, req daemonRunRequest, frames *frameWri
 
 // withCredentials enters one credential store Use per reference, so every
 // resolved value is in scope while fn runs the child, and none after.
-func (d *Daemon) withCredentials(ctx context.Context, subject string, refs []resolvedRef, env []string, fn func(env, secrets []string)) error {
+func (d *Daemon) withCredentials(ctx context.Context, sessionID, subject string, refs []resolvedRef, env []string, fn func(env, secrets []string)) error {
 	var enter func(i int, env, secrets []string) error
 	enter = func(i int, env, secrets []string) error {
 		if i == len(refs) {
 			fn(env, secrets)
 			return nil
 		}
-		return d.UseCredential(ctx, subject, refs[i].provider, func(token string) error {
+		return d.UseCredential(ctx, sessionID, subject, refs[i].provider, func(token string) error {
 			return enter(i+1, append(env, refs[i].key+"="+token), append(secrets, token))
 		})
 	}

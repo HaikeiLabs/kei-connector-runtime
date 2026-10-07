@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 )
 
@@ -21,7 +23,10 @@ const (
 	authorizeRequestSchema  = "kei.authorize-request/v1"
 	authorizeResponseSchema = "kei.authorize-response/v1"
 	sessionSchema           = "kei.session/v1"
-	maxSocketRequest        = 64 << 10
+	// sessionSchemaV2 creates a named session (multi-session socket API,
+	// docs/unix-socket.md): many agents in parallel on one daemon.
+	sessionSchemaV2  = "kei.session/v2"
+	maxSocketRequest = 64 << 10
 )
 
 type socketAuthorizeRequest struct {
@@ -91,6 +96,7 @@ type socketDecisionEvent struct {
 	WorkspaceID         *string  `json:"workspace_id,omitempty"`
 	ParentSpan          *string  `json:"parent_span,omitempty"`
 	ToolArgsDigest      *string  `json:"tool_args_digest,omitempty"`
+	SessionID           *string  `json:"session_id,omitempty"`
 }
 
 // SessionKeychain provides CLI login token storage and verification.
@@ -109,13 +115,62 @@ type LocalPDP struct {
 	identity  atomic.Pointer[Identity]
 	emit      EmitAuditFunc
 	keychain  SessionKeychain
-	creds     *credrelease.Store
-	invoker   http.Handler
-	runner    http.Handler
+	// creds is the legacy default session's credential store; each named
+	// session has its own in sessionCreds (id -> *credrelease.Store).
+	creds        *credrelease.Store
+	sessionCreds sync.Map
+	invoker      http.Handler
+	runner       http.Handler
+	// deprecated records the routes already warned about the default session.
+	deprecated sync.Map
+	stopSweep  chan struct{}
+	closeOnce  sync.Once
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
-	return &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit}
+	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, stopSweep: make(chan struct{})}
+	// A named session's credentials go with it, however it ends.
+	l.Sessions.OnEnd(l.dropSessionCredentials)
+	return l
+}
+
+// SetSessionIdleTTL sets how long a named session lives without use
+// (KEI_SESSION_IDLE_TTL). The default session never expires.
+func (l *LocalPDP) SetSessionIdleTTL(d time.Duration) { l.Sessions.SetIdleTTL(d) }
+
+// SweepSessions ends idle named sessions until ctx is done or Close. The
+// serve daemon runs it; idle sessions also end when next used.
+func (l *LocalPDP) SweepSessions(ctx context.Context) {
+	every := min(l.Sessions.IdleTTL()/2, time.Minute)
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-l.stopSweep:
+			return
+		case <-t.C:
+			if ended := l.Sessions.Sweep(); len(ended) > 0 {
+				slog.Info("sessions_expired", "count", len(ended))
+			}
+		}
+	}
+}
+
+// idleTTLSeconds is the idle TTL in whole seconds, rounded up so it is
+// never reported as zero.
+func (l *LocalPDP) idleTTLSeconds() int64 {
+	return int64((l.Sessions.IdleTTL() + time.Second - 1) / time.Second)
+}
+
+// deprecate warns once per process per route that a request used the legacy
+// default session.
+func (l *LocalPDP) deprecate(route string) {
+	if _, warned := l.deprecated.LoadOrStore(route, struct{}{}); !warned {
+		slog.Warn("default_session_deprecated", "route", route,
+			"detail", "name a session: PUT /v1/session with "+sessionSchemaV2+", then send "+session.Header+" (or KEI_SESSION_ID)")
+	}
 }
 
 func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
@@ -129,14 +184,49 @@ func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = stor
 // errCredentialReleaseOff is returned by UseCredential in legacy mode.
 var errCredentialReleaseOff = errors.New("session credential release is not enabled")
 
-// UseCredential runs fn with the credential for provider held for the session
-// of subject (a user id), inside the daemon (ADR-034 option A). It is the only way to reach a held
-// credential; no socket route returns one. See credrelease.Store.Use.
-func (l *LocalPDP) UseCredential(ctx context.Context, subject, provider string, fn func(token string) error) error {
+// UseCredential runs fn with the credential for provider held by session id
+// (DefaultSession for the legacy default session) for subject (a user id),
+// inside the daemon (ADR-034 option A). It is the only way to reach a held
+// credential; no socket route returns one, and a session can reach only its
+// own. See credrelease.Store.Use.
+func (l *LocalPDP) UseCredential(ctx context.Context, id, subject, provider string, fn func(token string) error) error {
 	if l.creds == nil {
 		return errCredentialReleaseOff
 	}
-	return l.creds.Use(ctx, subject, provider, fn)
+	store := l.credentialStore(id)
+	if store == nil {
+		return &credrelease.DeniedError{Provider: provider, Reason: credrelease.ReasonNoSession}
+	}
+	return store.Use(ctx, subject, provider, fn)
+}
+
+// credentialStore is session id's credential store, or nil.
+func (l *LocalPDP) credentialStore(id string) *credrelease.Store {
+	if id == pdp.DefaultSession {
+		return l.creds
+	}
+	if v, ok := l.sessionCreds.Load(id); ok {
+		return v.(*credrelease.Store)
+	}
+	return nil
+}
+
+// flushSession zeroes session id's credentials; a named session's store is
+// also dropped.
+func (l *LocalPDP) flushSession(id string) {
+	if id == pdp.DefaultSession {
+		if l.creds != nil {
+			l.creds.Flush()
+		}
+		return
+	}
+	l.dropSessionCredentials(id)
+}
+
+func (l *LocalPDP) dropSessionCredentials(id string) {
+	if v, ok := l.sessionCreds.LoadAndDelete(id); ok {
+		v.(*credrelease.Store).Flush()
+	}
 }
 
 // SetConnectorInvoker serves POST /v1/connectors:invoke with h (HAI-346 L3b):
@@ -161,8 +251,11 @@ func (l *LocalPDP) SetCommandRunner(h http.Handler) { l.runner = h }
 func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp.ConnectorGrant, *Identity, error) {
 	e, id := l.evaluator.Load(), l.identity.Load()
 	if e == nil || id == nil {
+		if req.Session != pdp.DefaultSession && !l.Sessions.Exists(req.Session) {
+			return pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}}, nil, ctx.Err()
+		}
 		g := pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}}
-		if sub, ok := l.Sessions.Current(); ok {
+		if sub, ok := l.Sessions.Get(req.Session); ok {
 			sub.Token, sub.Enrollment = "", nil
 			g.Subject, g.HasSession = sub, true
 		}
@@ -172,15 +265,22 @@ func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp
 	return g, id, err
 }
 
-// Close flushes held session credentials. The serve daemon calls it on exit.
+// Close stops the session sweeper and flushes every held session
+// credential. The serve daemon calls it on exit.
 func (l *LocalPDP) Close() {
+	l.closeOnce.Do(func() { close(l.stopSweep) })
 	l.flushCredentials()
 }
 
+// flushCredentials flushes every session's credentials.
 func (l *LocalPDP) flushCredentials() {
 	if l.creds != nil {
 		l.creds.Flush()
 	}
+	l.sessionCreds.Range(func(k, _ any) bool {
+		l.dropSessionCredentials(k.(string))
+		return true
+	})
 }
 
 func (l *LocalPDP) SetIdentity(identity *Identity) {
@@ -203,15 +303,19 @@ func (l *LocalPDP) AfterSync(err error) {
 			e.RevokeSession()
 		} else {
 			l.Sessions.End()
+			l.Sessions.RevokeAll()
 		}
 		l.flushCredentials()
 		return
 	}
 	if e != nil {
-		e.ReconcileSession()
+		// Each session is reconciled on its own; only revoked ones flush.
+		for _, id := range e.ReconcileSessions() {
+			l.flushSession(id)
+		}
 	}
 	if sub, ok := l.Sessions.Current(); !ok || sub.Status != pdp.StatusLinked {
-		l.flushCredentials()
+		l.flushSession(pdp.DefaultSession)
 	}
 }
 
@@ -234,6 +338,9 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 			writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
 			return
 		}
+		if session.FromRequest(r) == pdp.DefaultSession && r.Method != http.MethodPut {
+			l.deprecate(r.Method + " " + r.URL.Path)
+		}
 		switch {
 		case r.URL.Path == "/v1/authorize":
 			l.handleAuthorize(w, r)
@@ -254,19 +361,42 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		case r.Method == http.MethodGet:
 			l.handleSessionGet(w, r)
 		default:
-			l.Sessions.End()
-			l.flushCredentials()
-			w.WriteHeader(http.StatusNoContent)
+			l.handleSessionEnd(w, r)
 		}
 	})
 }
 
+// handleSessionEnd serves DELETE /v1/session: it ends the named session (or
+// the default one) and flushes only that session's credentials.
+func (l *LocalPDP) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
+	id := session.FromRequest(r)
+	if id == pdp.DefaultSession {
+		l.Sessions.End()
+		l.flushSession(pdp.DefaultSession)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !l.Sessions.EndID(id) {
+		writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSessionStart serves PUT /v1/session. A kei.session/v2 body creates a
+// new named session and answers 201 with its id; a kei.session/v1 body
+// replaces the legacy default session (deprecated) and answers 204.
 func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
-	// Any PUT ends the previous session's credentials, even one rejected below.
-	l.flushCredentials()
 	var req socketSessionRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != sessionSchema {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchema+" object with no unknown fields")
+	err := decodeSocketJSON(w, r, &req)
+	legacy := req.Schema == sessionSchema
+	if legacy {
+		// A v1 PUT ends the default session's credentials, even one rejected below.
+		l.flushSession(pdp.DefaultSession)
+		l.deprecate("PUT /v1/session " + sessionSchema)
+	}
+	if err != nil || (!legacy && req.Schema != sessionSchemaV2) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" (or legacy "+sessionSchema+") object with no unknown fields")
 		return
 	}
 	if req.UserID != "" || req.Email != "" || req.Status != "" {
@@ -307,28 +437,54 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			sub = resolveBundleSubject(e, req.Source, req.ExternalID)
 		}
 	}
-	if err := l.Sessions.Start(sub); err != nil {
+	if legacy {
+		if err := l.Sessions.Start(sub); err != nil {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
+			return
+		}
+		l.loadCredentials(r.Context(), pdp.DefaultSession, sub)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	id, err := l.Sessions.Create(sub)
+	if err != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
 		return
 	}
-	l.loadCredentials(r.Context(), sub)
-	w.WriteHeader(http.StatusNoContent)
+	if l.creds != nil {
+		l.sessionCreds.Store(id, l.creds.NewSession())
+		if !l.Sessions.Exists(id) {
+			// Ended before its store was attached: drop the orphan.
+			l.dropSessionCredentials(id)
+		}
+	}
+	l.loadCredentials(r.Context(), id, sub)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(socketSessionResponse{
+		Schema: sessionSchemaV2, SessionID: id, UserID: sub.UserID, Status: string(sub.Status),
+		IdleTTLSeconds: l.idleTTLSeconds(),
+	})
 }
 
 // loadCredentials makes the session's one I11 call for a linked subject. A
 // failure leaves the session without credentials (every use denies) but does
 // not fail the session itself; only the error class is logged.
-func (l *LocalPDP) loadCredentials(ctx context.Context, sub pdp.Subject) {
-	if l.creds == nil || sub.Status != pdp.StatusLinked || sub.Token == "" {
+func (l *LocalPDP) loadCredentials(ctx context.Context, id string, sub pdp.Subject) {
+	store := l.credentialStore(id)
+	if store == nil || sub.Status != pdp.StatusLinked || sub.Token == "" {
 		return
 	}
-	if err := l.creds.Load(ctx, sub.UserID, sub.Token); err != nil {
+	if err := store.Load(ctx, sub.UserID, sub.Token); err != nil {
 		slog.Warn("session_credentials_unavailable", "error", err)
 		return
 	}
 	// A DELETE or another PUT that landed before Load began must still win.
-	if cur, ok := l.Sessions.Current(); !ok || cur.Status != pdp.StatusLinked || cur.UserID != sub.UserID || cur.Token != sub.Token {
-		l.creds.Flush()
+	// A named session's end flushes its store, which discards this load.
+	if id == pdp.DefaultSession {
+		if cur, ok := l.Sessions.Current(); !ok || cur.Status != pdp.StatusLinked || cur.UserID != sub.UserID || cur.Token != sub.Token {
+			store.Flush()
+		}
 	}
 }
 
@@ -356,14 +512,21 @@ func resolveBundleSubject(e *pdp.Evaluator, source, externalID string) pdp.Subje
 }
 
 type socketSessionResponse struct {
-	Schema string `json:"schema"`
-	UserID string `json:"user_id"`
-	Status string `json:"status"`
+	Schema         string `json:"schema"`
+	SessionID      string `json:"session_id,omitempty"`
+	UserID         string `json:"user_id"`
+	Status         string `json:"status"`
+	IdleTTLSeconds int64  `json:"idle_ttl_seconds,omitempty"`
 }
 
 func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
-	subject, ok := l.Sessions.Current()
+	id := session.FromRequest(r)
+	subject, ok := l.Sessions.Get(id)
 	if !ok {
+		if id != pdp.DefaultSession {
+			writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
+			return
+		}
 		writeRuntimeError(w, http.StatusNotFound, "no_session", "no active session")
 		return
 	}
@@ -371,6 +534,9 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		Schema: sessionSchema,
 		UserID: subject.UserID,
 		Status: string(subject.Status),
+	}
+	if id != pdp.DefaultSession {
+		resp.Schema, resp.SessionID, resp.IdleTTLSeconds = sessionSchemaV2, id, l.idleTTLSeconds()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -387,12 +553,15 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs exactly one of tool or connector{connector_id, capability}")
 		return
 	}
-	preq := pdp.Request{Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
+	sessionID := session.FromRequest(r)
+	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
 	if req.Connector != nil {
 		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
 	d := pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
-	if e := l.evaluator.Load(); e != nil {
+	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
+		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
+	} else if e := l.evaluator.Load(); e != nil {
 		var err error
 		if d, err = e.Evaluate(r.Context(), preq); err != nil {
 			writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
@@ -407,14 +576,14 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		resp.PolicyBundleVersion, resp.PolicyBundleDigest, resp.PolicyRevision = &d.BundleVersion, d.BundleDigest, &d.PolicyRevision
 	}
 	if l.emit != nil {
-		data := l.decisionEventJSON(req, d)
+		data := l.decisionEventJSON(req, sessionID, d)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, d pdp.Decision) json.RawMessage {
+func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision) json.RawMessage {
 	spanID := req.SpanID
 	if spanID == "" {
 		spanID = uuid.NewString()
@@ -431,8 +600,11 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, d pdp.Decision)
 	if d.Allow {
 		e.Decision = "allow"
 	}
-	if subject, ok := l.Sessions.Current(); ok {
+	if subject, ok := l.Sessions.Get(sessionID); ok {
 		e.InvokingSubject = subject.UserID
+	}
+	if sessionID != pdp.DefaultSession {
+		e.SessionID = &sessionID
 	}
 	if req.Resource != "" {
 		e.ResourcesTouched = []string{req.Resource}

@@ -22,6 +22,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -66,6 +67,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	defer local.Close()
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	go local.SweepSessions(ctx)
 	unixListener, err := socket.Listen(socketPath)
 	if err != nil {
 		slog.Error("runtime_unix_listener_failed", "path", socketPath, "error", err)
@@ -185,6 +187,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		_ = keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
+	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
 	if creds != nil {
 		local.SetCredentialStore(creds)
 		local.SetConnectorInvoker(&invoke.Daemon{
@@ -217,6 +220,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invoke.DaemonCall) (invoke.Grant, error) {
 	return func(ctx context.Context, c invoke.DaemonCall) (invoke.Grant, error) {
 		g, id, err := local.AuthorizeConnector(ctx, pdp.Request{
+			Session:  c.Session,
 			Resource: c.Resource, AgentID: c.AgentID,
 			Connector: &pdp.ConnectorTarget{ConnectorID: c.ConnectorID, Capability: c.Capability},
 		})
@@ -427,7 +431,13 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 
 	invokingSubject := ""
 	if h.sessions != nil {
-		if sub, ok := h.sessions.Current(); ok {
+		id := session.FromRequest(r)
+		sub, ok := h.sessions.Get(id)
+		if !ok && id != pdp.DefaultSession {
+			writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
+			return
+		}
+		if ok {
 			invokingSubject = sub.UserID
 		}
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/google/uuid"
 )
 
@@ -68,10 +69,16 @@ type Grant struct {
 	WorkspaceID  string
 }
 
-// DaemonCall is what the daemon asks its PDP to decide.
+// DaemonCall is what the daemon asks its PDP to decide. Session is the id of
+// the session the call runs in ("" for the legacy default session).
 type DaemonCall struct {
+	Session                                    string
 	ConnectorID, Capability, Resource, AgentID string
 }
+
+// ReasonSessionNotFound is the PDP's deny reason for a session id that is
+// not live (pdp.ReasonSessionNotFound).
+const ReasonSessionNotFound = "session_not_found"
 
 // Daemon serves POST /v1/connectors:invoke inside the serve daemon. The
 // caller authenticates the request before ServeHTTP.
@@ -81,9 +88,10 @@ type Daemon struct {
 	Env Env
 	// Authorize decides a call with the local PDP and the session subject.
 	Authorize func(context.Context, DaemonCall) (Grant, error)
-	// UseCredential runs fn with the session credential subject holds for
-	// provider (credrelease.Store.Use).
-	UseCredential func(ctx context.Context, subject, provider string, fn func(token string) error) error
+	// UseCredential runs fn with the credential the named session holds for
+	// subject and provider (credrelease.Store.Use); a session reaches only its
+	// own credentials.
+	UseCredential func(ctx context.Context, session, subject, provider string, fn func(token string) error) error
 }
 
 // daemonRequest is the route's body. It names the call only: the subject
@@ -123,19 +131,20 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if req.TraceID == "" {
 		req.TraceID = uuid.NewString()
 	}
-	out := d.invoke(r.Context(), req)
+	out := d.invoke(r.Context(), session.FromRequest(r), req)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(daemonResponse{Schema: daemonResponseSchema, output: out})
 }
 
-// invoke decides, runs and audits one call and returns what the caller sees.
-func (d *Daemon) invoke(ctx context.Context, dr daemonRequest) output {
+// invoke decides, runs and audits one call in session sessionID and returns
+// what the caller sees.
+func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest) output {
 	started := time.Now()
 	plan := connectorInvokePlan{req: Request{
 		AgentID: dr.AgentID, ConnectorID: dr.ConnectorID, Capability: dr.Capability, Action: dr.Action,
 		Resource: dr.Resource, TraceID: dr.TraceID, IdempotencyKey: dr.IdempotencyKey, Framework: dr.Framework,
-	}}
+	}, session: sessionID}
 	out := output{TraceID: dr.TraceID, ConnectorID: dr.ConnectorID, Capability: dr.Capability}
 	var exec *execution
 	finish := func(dn *denial) output {
@@ -157,11 +166,14 @@ func (d *Daemon) invoke(ctx context.Context, dr daemonRequest) output {
 	plan.req.InputDigest = digest
 	out.Audit = &outputAudit{InputDigest: digest}
 
-	grant, err := d.Authorize(ctx, DaemonCall{ConnectorID: dr.ConnectorID, Capability: dr.Capability, Resource: dr.Resource, AgentID: dr.AgentID})
+	grant, err := d.Authorize(ctx, DaemonCall{Session: sessionID, ConnectorID: dr.ConnectorID, Capability: dr.Capability, Resource: dr.Resource, AgentID: dr.AgentID})
 	if err != nil {
 		return finish(deny("request_canceled", "request canceled"))
 	}
 	plan.req.InvokingSubject = grant.Subject
+	if grant.ReasonCode == ReasonSessionNotFound {
+		return finish(deny(ReasonSessionNotFound, "the session does not exist or has ended"))
+	}
 	if !grant.HasSession {
 		return finish(deny("no_session", "no active session: start one with PUT /v1/session"))
 	}
@@ -188,7 +200,7 @@ func (d *Daemon) invoke(ctx context.Context, dr daemonRequest) output {
 	}
 	exec.credentialSubject = contract.CredentialSubject(meta, inv)
 
-	err = d.UseCredential(ctx, grant.Subject, string(meta.Provider), func(token string) error {
+	err = d.UseCredential(ctx, sessionID, grant.Subject, string(meta.Provider), func(token string) error {
 		status, runDenial := d.Env.run(ctx, conn, meta, inv, in, token, exec)
 		dn = runDenial
 		if runDenial != nil && status == http.StatusUnauthorized {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 // maxDaemonResponseBytes bounds the daemon's answer; a result is at most
@@ -63,6 +64,7 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 	}
 	req.Header.Set("Authorization", "Bearer "+env.RuntimeToken)
 	req.Header.Set("Content-Type", "application/json")
+	session.SetHeader(req, plan.session)
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", env.DaemonSocket)

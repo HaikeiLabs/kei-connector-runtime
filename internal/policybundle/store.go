@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,7 +41,12 @@ type diskState struct {
 }
 type Store struct {
 	dir, statePath, bundlePath string
-	state                      diskState
+	// mu orders this process's goroutines around the state file lock: flock
+	// excludes other processes but is not synchronization in the Go memory
+	// model, and the daemon checks the bundle from concurrent requests. It is
+	// held only for the file read and check, never around a governed call.
+	mu    sync.Mutex
+	state diskState
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -96,6 +102,8 @@ func (s *Store) heldByOtherAudience(want Audience) bool {
 }
 
 func (s *Store) withLock(fn func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := os.OpenFile(filepath.Join(s.dir, "state.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return fmt.Errorf("open policy state lock: %w", err)

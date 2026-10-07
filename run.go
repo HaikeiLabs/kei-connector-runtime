@@ -223,6 +223,9 @@ Environment:
                             $KEI_RUNTIME_STATE_DIR/audit/harness-tool.jsonl)
   KEI_PROXY_AUDIT_MAX_BYTES total audit spool cap in bytes (default 104857600, 100 MiB)
   KEI_RUNTIME_SOCKET_PATH   local HTTP Unix socket (serve; default platform-dependent, see docs/unix-socket.md)
+  KEI_SESSION_ID            daemon session id from PUT /v1/session (kei.session/v2); authorize,
+                            connector invoke, run and hook send it as X-Kei-Session (--session)
+  KEI_SESSION_IDLE_TTL      serve: idle lifetime of a named session (Go duration, default 30m)
   KEI_RUNTIME_STATE_DIR     protected policy bundle state directory (default: macOS
                             $HOME/Library/Application Support/kei-proxy; Linux root
                             /var/lib/kei-proxy; Linux non-root $XDG_STATE_HOME/kei-proxy

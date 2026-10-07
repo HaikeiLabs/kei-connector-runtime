@@ -57,6 +57,7 @@ func runAuthorize(args []string) int {
 
 	userID := fs.String("user-id", "", "user_id to authorize as (alias for --user)")
 	invokingSubjectFlag := fs.String("invoking-subject", "", "canonical invoking subject for audit identity propagation")
+	sessionID := fs.String("session", session.IDFromEnv(), "kei-proxy daemon session id from PUT /v1/session (default $KEI_SESSION_ID; empty = the deprecated default session)")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -153,7 +154,7 @@ func runAuthorize(args []string) int {
 	}
 	invokingSubject := *invokingSubjectFlag
 	if invokingSubject == "" && cfg.IsRuntime() {
-		if s, err := session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken).Subject(context.Background()); err == nil {
+		if s, err := session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken).Subject(session.WithID(context.Background(), *sessionID)); err == nil {
 			invokingSubject = s
 		}
 	}
