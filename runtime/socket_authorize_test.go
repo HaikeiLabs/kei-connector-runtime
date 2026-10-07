@@ -696,6 +696,90 @@ func TestSocketSessionAuthorizeAfterUnlinkedSession(t *testing.T) {
 	}
 }
 
+func TestSocketSessionStartResolvesOpenWebUILinkedIdentity(t *testing.T) {
+	ids := []policybundle.Identity{
+		{Source: "openwebui", ExternalID: "550e8400-e29b-41d4-a716-446655440000", UserID: "u-owui", Status: "linked", Groups: []string{"members"}},
+	}
+	bundle := bundleWithIdentities(t, ids)
+	dir := t.TempDir()
+	activateBundle(t, dir, bundle)
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: "https://kei.example",
+		RuntimeStateDir:        dir,
+	}, nil)
+	l.SetIdentity(&keiruntime.Identity{
+		ID:          "inst-fixture-0001",
+		OrgID:       "org-fixture-0001",
+		WorkspaceID: strPtr("ws-fixture-0001"),
+	})
+	h := sessionHandler(t, l)
+
+	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"openwebui","external_id":"550e8400-e29b-41d4-a716-446655440000"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	gre := getSession(t, h)
+	if gre.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
+	}
+	var keys struct {
+		Schema string `json:"schema"`
+		UserID string `json:"user_id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(gre.Body.Bytes(), &keys); err != nil {
+		t.Fatal(err)
+	}
+	if keys.UserID != "u-owui" || keys.Status != "linked" {
+		t.Fatalf("session = %+v", keys)
+	}
+}
+
+func TestSocketSessionStartOpenWebUIUnknownIdentity(t *testing.T) {
+	ids := []policybundle.Identity{
+		{Source: "openwebui", ExternalID: "550e8400-e29b-41d4-a716-446655440000", UserID: "u-owui", Status: "linked"},
+	}
+	bundle := bundleWithIdentities(t, ids)
+	dir := t.TempDir()
+	activateBundle(t, dir, bundle)
+
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: "https://kei.example",
+		RuntimeStateDir:        dir,
+	}, nil)
+	l.SetIdentity(&keiruntime.Identity{
+		ID:          "inst-fixture-0001",
+		OrgID:       "org-fixture-0001",
+		WorkspaceID: strPtr("ws-fixture-0001"),
+	})
+	h := sessionHandler(t, l)
+
+	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"openwebui","external_id":"00000000-0000-0000-0000-000000000000"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	gre := getSession(t, h)
+	if gre.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
+	}
+	var keys struct {
+		Schema string `json:"schema"`
+		UserID string `json:"user_id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(gre.Body.Bytes(), &keys); err != nil {
+		t.Fatal(err)
+	}
+	if keys.Status != "unlinked" {
+		t.Fatalf("session = %+v", keys)
+	}
+}
+
 func TestSocketAuthorizeDeniesBeforeIdentityResolves(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{
 		RuntimeToken:           policyTestToken,
