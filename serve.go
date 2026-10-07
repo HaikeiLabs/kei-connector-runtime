@@ -96,33 +96,24 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	server := newServer(tcpHandler)
 	socketServer := newServer(socketHandler)
 
-	refresherDone := make(chan struct{})
-	if cfg.IsRuntime() {
-		refresher := keiruntime.NewPolicyRefresher(cfg,
-			func() (*keiruntime.Identity, error) {
-				id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
-				if err != nil {
-					return nil, err
-				}
-				return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
-			},
-			func(identity *keiruntime.Identity) error {
-				return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
-					ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
-				}, 10*time.Second)
-			},
-			IsRuntimeRevocation,
-			func() { RevokePolicyState(cfg) },
-		)
-		refresher.OnIdentity = local.SetIdentity
-		refresher.AfterSync = local.AfterSync
-		go func() {
-			defer close(refresherDone)
-			refresher.Run(ctx)
-		}()
-	} else {
-		close(refresherDone)
-	}
+	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg,
+		func() (*keiruntime.Identity, error) {
+			id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+			if err != nil {
+				return nil, err
+			}
+			return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
+		},
+		func(identity *keiruntime.Identity) error {
+			return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
+				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+			}, 10*time.Second)
+		},
+		IsRuntimeRevocation,
+		func() { RevokePolicyState(cfg) },
+		local.SetIdentity,
+		local.AfterSync,
+	)
 	slog.Info("runtime_http_listener_started", "addr", addr)
 	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")
 	serveErrors := make(chan error, 2)
@@ -139,9 +130,9 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			exitCode = 1
 		}
 	}
+	stopRefresher()
 	stopCollector()
 	stop()
-	<-refresherDone
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
 	defer cancel()
 	for _, srv := range []*http.Server{server, socketServer} {

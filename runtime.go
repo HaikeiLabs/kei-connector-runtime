@@ -141,9 +141,6 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	if code := writeRuntimeBootstrapOutput(stdout, identity, stderr); code != 0 {
 		return code
 	}
-	if err := SyncPolicyBundle(ctx, cfg, identity, *timeout); err != nil {
-		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
-	}
 	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
 	loop := &keiruntime.HeartbeatLoop{
 		Client:   newClient(cfg.RuntimeControlPlaneURL, *timeout),
@@ -160,6 +157,16 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
 	defer stopCollector()
+	whoami := func() (*keiruntime.Identity, error) {
+		return identityFromRoot(identity), nil
+	}
+	syncBundle := func(id *keiruntime.Identity) error {
+		return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
+			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID,
+		}, *timeout)
+	}
+	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil)
+	defer stopRefresher()
 	if err := loop.Run(ctx, false); err != nil {
 		if IsRuntimeRevocation(err) {
 			RevokePolicyState(cfg)
@@ -228,14 +235,21 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 		}
 		return code
 	}
-	if err := SyncPolicyBundle(ctx, cfg, identity, timeout); err != nil {
-		fmt.Fprintf(stderr, "runtime policy bundle refresh failed (denying without a valid bundle): %v\n", err)
-	}
 	loop.PolicyBundle = func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) }
 	events.Identity(toHeartbeatIdentity(identity), version)
 	// The first beat is sent at once and stands in for bootstrap's heartbeat.
 	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
 	defer stopCollector()
+	whoami := func() (*keiruntime.Identity, error) {
+		return identityFromRoot(identity), nil
+	}
+	syncBundle := func(id *keiruntime.Identity) error {
+		return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
+			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID,
+		}, timeout)
+	}
+	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil)
+	defer stopRefresher()
 	err := loop.Run(ctx, true)
 	if IsRuntimeRevocation(err) {
 		RevokePolicyState(cfg)
