@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +32,30 @@ func (c testPolicyConfig) PolicyAuditMaxBytes() int64 { return 0 }
 
 func strPtr(s string) *string { return &s }
 
-func TestSyncPolicyBundleAcceptsUnsignedJSONWithRuntimeTokenAndDigest(t *testing.T) {
+func unsignedV2ExampleBundle(t *testing.T, now time.Time) []byte {
+	t.Helper()
+	bundle, err := json.Marshal(map[string]any{
+		"schema": "kei.policy-bundle/v2", "bundle_id": "bundle-v2-client-test", "bundle_version": 43, "policy_revision": 7,
+		"issuer":    policybundle.Issuer,
+		"audience":  map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"},
+		"issued_at": now.Format(time.RFC3339Nano), "not_after": now.Add(time.Hour).Format(time.RFC3339Nano),
+		"refresh":            map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300},
+		"subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 30},
+		"policy_set": map[string]any{
+			"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2",
+			"evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
+			"tools":      []any{}, "checks": []any{}, "tool_policies": []any{},
+		},
+		"agent_connector_bindings": []any{},
+		"identities":               []any{map[string]any{"source": "discord", "external_id": "ext-v2-client-test", "user_id": "u-v2-client-test", "status": "linked", "groups": []string{"members"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle
+}
+
+func TestSyncPolicyBundleFallsBackToV1WithOrderedV2FirstAccept(t *testing.T) {
 	now := time.Now().UTC()
 	raw := unsignedExampleBundle(t, now)
 	digest := fmt.Sprintf(`"sha256:%x"`, sha256.Sum256(raw))
@@ -43,7 +67,7 @@ func TestSyncPolicyBundleAcceptsUnsignedJSONWithRuntimeTokenAndDigest(t *testing
 		}
 		switch r.URL.Path {
 		case "/api/v1/runtime/policy-bundles/current":
-			if r.Header.Get("Accept") != policybundle.ContentType {
+			if r.Header.Get("Accept") != policyBundleAccept {
 				t.Errorf("Accept=%q", r.Header.Get("Accept"))
 			}
 			w.Header().Set("Content-Type", policybundle.ContentType)
@@ -78,6 +102,54 @@ func TestSyncPolicyBundleAcceptsUnsignedJSONWithRuntimeTokenAndDigest(t *testing
 	}
 }
 
+func TestSyncPolicyBundleAcceptsV2AndValidatesItsNotModifiedETagAndVersion(t *testing.T) {
+	now := time.Now().UTC()
+	raw := unsignedV2ExampleBundle(t, now)
+	etag := fmt.Sprintf(`"sha256:%x"`, sha256.Sum256(raw))
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if got := r.Header.Get("Accept"); got != policyBundleAccept {
+			t.Errorf("Accept=%q want %q", got, policyBundleAccept)
+		}
+		if calls > 1 {
+			if got := r.Header.Get("If-None-Match"); got != etag {
+				t.Errorf("If-None-Match=%q want %q", got, etag)
+			}
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Kei-Policy-Bundle-Version", "43")
+			w.Header().Set("Content-Type", policybundle.ContentTypeV2)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Content-Type", policybundle.ContentTypeV2)
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Kei-Policy-Bundle-Version", "43")
+		_, _ = w.Write(raw)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	cfg := testPolicyConfig{token: "kh_live_runtime_test_token_1234567890", controlPlaneURL: server.URL, policyStateDir: dir}
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
+		t.Fatalf("sync v2 bundle: %v", err)
+	}
+	store, err := policybundle.OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, state, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC())
+	if err != nil || state != policybundle.Active || active == nil || active.Payload.Schema != "kei.policy-bundle/v2" || active.Payload.BundleVersion != 43 {
+		t.Fatalf("v2 bundle=%v state=%s err=%v", active, state, err)
+	}
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
+		t.Fatalf("sync unchanged v2 bundle: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("bundle calls=%d want 2", calls)
+	}
+}
+
 func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 	now := time.Now().UTC()
 	raw := unsignedExampleBundle(t, now)
@@ -87,6 +159,9 @@ func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 		calls++
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Kei-Policy-Bundle-Version", "42")
+		if r.Header.Get("Accept") != policyBundleAccept {
+			t.Errorf("Accept=%q want %q", r.Header.Get("Accept"), policyBundleAccept)
+		}
 		if calls > 1 {
 			if r.Header.Get("If-None-Match") != etag {
 				t.Errorf("If-None-Match=%q want %q", r.Header.Get("If-None-Match"), etag)
@@ -113,7 +188,7 @@ func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 }
 
 func TestSyncPolicyBundleFailsClosedOnIntegrityHeaderMismatch(t *testing.T) {
-	for _, tc := range []struct{ name, contentType, etag, version string }{{"etag", "application/vnd.kei.policy-bundle.v1+json", `"sha256:wrong"`, "42"}, {"version", "application/vnd.kei.policy-bundle.v1+json", "", "43"}, {"media type", "application/json", "", "42"}} {
+	for _, tc := range []struct{ name, contentType, etag, version string }{{"etag", "application/vnd.kei.policy-bundle.v1+json", `"sha256:wrong"`, "42"}, {"version", "application/vnd.kei.policy-bundle.v1+json", "", "43"}, {"media type", "application/json", "", "42"}, {"schema-media mismatch", policybundle.ContentTypeV2, "", "42"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now().UTC()
 			raw := unsignedExampleBundle(t, now)
