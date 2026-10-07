@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
@@ -127,19 +126,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	serveErrors := make(chan error, 2)
 	go func() { serveErrors <- server.Serve(tcpListener) }()
 	go func() { serveErrors <- socketServer.Serve(unixListener) }()
-	stopCollector := func() {}
-	if auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir); auditPath != "" {
-		audit := keiruntime.NewCollector(auditPath, keiruntime.NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
-		audit.LifecycleClient = keiruntime.NewLifecycleFlushClientFromConfig(cfg, shutdownFlushTimeout)
-		audit.HarnessToolClient = keiruntime.NewHarnessToolFlushClientFromConfig(cfg, shutdownFlushTimeout)
-		audit.HarnessAuditClient = keiruntime.NewHarnessAuditFlushClientFromConfig(cfg, shutdownFlushTimeout)
-		stopCollector = collector.Service{
-			Flusher:           audit,
-			Path:              auditPath,
-			PollInterval:      collectorPollInterval,
-			FinalFlushTimeout: shutdownFlushTimeout,
-		}.Start(ctx)
-	}
+	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
 
 	exitCode := 0
 	select {

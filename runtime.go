@@ -158,6 +158,8 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 		},
 		PolicyBundle: func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) },
 	}
+	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
+	defer stopCollector()
 	if err := loop.Run(ctx, false); err != nil {
 		if IsRuntimeRevocation(err) {
 			RevokePolicyState(cfg)
@@ -232,6 +234,8 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 	loop.PolicyBundle = func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) }
 	events.Identity(toHeartbeatIdentity(identity), version)
 	// The first beat is sent at once and stands in for bootstrap's heartbeat.
+	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
+	defer stopCollector()
 	err := loop.Run(ctx, true)
 	if IsRuntimeRevocation(err) {
 		RevokePolicyState(cfg)
