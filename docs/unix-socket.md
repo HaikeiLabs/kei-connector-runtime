@@ -67,6 +67,51 @@ catalog. The socket route proposed in the closed PR #65 was rejected because
 it called the catalog authorize endpoint per request and did not authenticate
 the caller.
 
+### Sessions: many in parallel on one daemon
+
+One daemon serves many concurrent sessions, one per agent or user (owner
+decision 2026-10-06, kei-openwebui gap K10; wiki "IDN contract_change: kei-proxy
+multi-session socket API (session ids)"). Each session has its own subject and
+its own connector credentials, and nothing it holds is visible to another.
+
+- **Create:** `PUT /v1/session` with
+  `{"schema":"kei.session/v2","source":"discord","external_id":"..."}` (or
+  `"source":"cli"`) answers `201`:
+
+  ```json
+  {"schema":"kei.session/v2","session_id":"ks_…","user_id":"u-…","status":"linked","idle_ttl_seconds":1800}
+  ```
+
+  `session_id` is opaque and unguessable (`ks_` + 32 random bytes,
+  base64url), held in daemon memory only.
+- **Use:** send `X-Kei-Session: <session_id>` on `POST /v1/authorize`,
+  `/v1/connectors:invoke`, `/v1/commands:run`, `/v1/chat/completions` and
+  `GET`/`DELETE /v1/session`. A decision uses only that session's subject and
+  credentials. A header, not a body field, so one mechanism works on every
+  route (the bodies reject unknown fields).
+- **Fail closed:** an id that was never created, has ended or expired denies
+  `session_not_found`: a `deny` decision on `/v1/authorize`, a deny on
+  `connectors:invoke` and `commands:run`, `404` on `GET`/`DELETE`.
+- **End:** `DELETE /v1/session` with the header ends that session and flushes
+  only its credentials. A session unused for `KEI_SESSION_IDLE_TTL` (Go
+  duration, default `30m`) ends too; each use restarts the clock. Policy
+  refresh revokes only the sessions whose subject the bundle no longer grants;
+  installation revocation revokes all of them.
+- **No cap:** sessions are served concurrently with no global lock on the
+  request path, so a slow call in one session never waits on another; the
+  limit is the host.
+- **Not bound to the connection:** HTTP clients pool and reuse socket
+  connections, so the id, not the connection, names the session.
+- **CLI and hooks:** `kei-proxy authorize`, `connector invoke`, `run` and
+  `hook` take `--session` (default `$KEI_SESSION_ID`) and send the header.
+  Audit records (decision, connector execution, command run, harness hook)
+  carry `session_id`.
+
+**Deprecated, for one release:** a `kei.session/v1` PUT (answers `204`) and
+any request without `X-Kei-Session` use the single default session, exactly as
+before: a v1 PUT replaces it, and it has no idle TTL. The daemon logs
+`default_session_deprecated` once per route.
+
 ### Session credentials (`KEI_CREDENTIAL_RELEASE=identity`)
 
 With `KEI_CREDENTIAL_RELEASE=identity` (default `legacy`, which changes
@@ -75,8 +120,9 @@ the identity service's `POST /api/v1/connectorCredentials:resolve` (ADR-032 I11)
 with the runtime token and the subject's token in `X-Kei-Subject-Token`. The
 call goes to `KEI_CREDENTIAL_RELEASE_URL`, or to the runtime control plane when
 that is unset. The connector credentials it returns live only in the daemon's
-memory (ADR-034, owner option A). Every PUT, `DELETE /v1/session`, a revocation
-and daemon exit zero and drop them. A provider 401 triggers one single-provider
+memory (ADR-034, owner option A), in a store of the session's own. Ending a
+session (`DELETE /v1/session`, idle expiry, a v1 PUT for the default session),
+a revocation and daemon exit zero and drop that session's credentials. A provider 401 triggers one single-provider
 re-fetch and one retry, and after that the call is denied. The daemon sets
 `RLIMIT_CORE=0` so it never core-dumps them.
 

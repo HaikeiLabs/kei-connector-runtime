@@ -50,6 +50,9 @@ type Config struct {
 	// socket: the daemon resolves the references and spawns the child, and
 	// this process never holds a credential.
 	DaemonSocket string
+	// SessionID names the daemon session (X-Kei-Session, --session or
+	// $KEI_SESSION_ID); "" uses the legacy default session.
+	SessionID string
 }
 
 type catalogRunAuthorization struct{ cfg Config }
@@ -187,12 +190,14 @@ type runAuditEvent struct {
 	RecipientKeyIDs []string  `json:"recipient_key_ids,omitempty"`
 	Outcome         string    `json:"outcome"`
 	ExitCode        int       `json:"exit_code"`
+	SessionID       string    `json:"session_id,omitempty"`
 }
 
 func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv []string, resolver runCredentialResolver, execFn func(string, []string, []string) int) int {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	connectorID := flags.String("connector", "", "connector id for resolved credentials")
+	sessionID := flags.String("session", session.IDFromEnv(), "kei-proxy daemon session id (default $KEI_SESSION_ID)")
 	sep := -1
 	for i, arg := range args {
 		if arg == "--" {
@@ -209,6 +214,7 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 		fmt.Fprintln(stderr, "run command is required")
 		return 2
 	}
+	cfg.SessionID = *sessionID
 	if resolver == nil {
 		fmt.Fprintln(stderr, "run credential resolver is unavailable")
 		return 1
@@ -234,7 +240,7 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 			appendRunAudit(stderr, cfg, connectorIDs, fields, "", childArgs, "credential_reference_mismatch", 1)
 			return 1
 		}
-		secret, connectURL, err := resolver.Resolve(context.Background(), ref.connectorID, ref.field)
+		secret, connectURL, err := resolver.Resolve(session.WithID(context.Background(), cfg.SessionID), ref.connectorID, ref.field)
 		if err != nil || secret == "" {
 			if connectURL != "" {
 				fmt.Fprintf(stderr, "Connector credential %s/%s is not connected. Open this link privately: %s\n", ref.connectorID, ref.field, connectURL)
@@ -331,7 +337,7 @@ func appendRunAudit(stderr io.Writer, cfg Config, connectorIDs, fields []string,
 		sum := sha256.Sum256(argvBytes)
 		argsDigest = "sha256:" + hex.EncodeToString(sum[:])
 	}
-	event, err := json.Marshal(runAuditEvent{Schema: "kei.proxy-run-event/v1", EventClass: "credential", ObservedAt: time.Now().UTC(), ConnectorIDs: connectorIDs, Fields: fields, Command: command, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, Outcome: outcome, ExitCode: exitCode})
+	event, err := json.Marshal(runAuditEvent{Schema: "kei.proxy-run-event/v1", EventClass: "credential", ObservedAt: time.Now().UTC(), ConnectorIDs: connectorIDs, Fields: fields, Command: command, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, Outcome: outcome, ExitCode: exitCode, SessionID: cfg.SessionID})
 	if err != nil {
 		fmt.Fprintf(stderr, "audit: failed to marshal run audit event: %v\n", err)
 		return

@@ -33,13 +33,14 @@ func TestDaemonClientCarriesPreflightHandleToInvokePEP(t *testing.T) {
 			preflightCalls++
 			var req struct {
 				Schema    string         `json:"schema"`
+				SessionID string         `json:"session_id"`
 				Tool      string         `json:"tool"`
 				Arguments map[string]any `json:"arguments"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Error(err)
 			}
-			if req.Schema != "kei.preflight-request/v1" || req.Tool != "github.review_pr" || req.Arguments["id"] != "42" {
+			if req.Schema != "kei.preflight-request/v1" || req.SessionID != "ks_named" || req.Tool != "github.review_pr" || req.Arguments["id"] != "42" {
 				t.Errorf("preflight request=%+v", req)
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -50,7 +51,7 @@ func TestDaemonClientCarriesPreflightHandleToInvokePEP(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Error(err)
 			}
-			if req.ToolName != "github.review_pr" || req.PreflightHandle != "opaque-preflight-handle" || req.ConnectorID != "" || req.Capability != "" {
+			if req.SessionID != "ks_named" || req.ToolName != "github.review_pr" || req.PreflightHandle != "opaque-preflight-handle" || req.ConnectorID != "" || req.Capability != "" {
 				t.Errorf("invoke request not bound to preflight: %+v", req)
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -62,7 +63,7 @@ func TestDaemonClientCarriesPreflightHandleToInvokePEP(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	defer server.Close()
 	var stdout, stderr strings.Builder
-	code := Run([]string{"--tool", "github.review_pr", "--agent-id", execAgent, "--input", `{"id":"42"}`}, Env{RuntimeToken: "runtime-test-token", DaemonSocket: socketPath}, &stdout, &stderr)
+	code := Run([]string{"--tool", "github.review_pr", "--session", "ks_named", "--agent-id", execAgent, "--input", `{"id":"42"}`}, Env{RuntimeToken: "runtime-test-token", DaemonSocket: socketPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("Run code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}

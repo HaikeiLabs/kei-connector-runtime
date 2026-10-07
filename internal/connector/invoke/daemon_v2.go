@@ -32,9 +32,12 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	if dr.PreflightHandle == "" || d.PlanV2 == nil || d.ValidateV2 == nil || d.ConsumeV2Plan == nil || d.Authorize == nil || d.UseCredential == nil {
 		return finish(deny("preflight_required", "v2 tool calls require a valid preflight handle"))
 	}
-	grant, err := d.Authorize(ctx, DaemonCall{AgentID: dr.AgentID, ToolName: dr.ToolName})
+	grant, err := d.Authorize(ctx, DaemonCall{Session: dr.SessionID, AgentID: dr.AgentID, ToolName: dr.ToolName})
 	if err != nil {
 		return finish(deny("request_canceled", "request canceled"))
+	}
+	if grant.ReasonCode == ReasonSessionNotFound {
+		return finish(deny(ReasonSessionNotFound, "the session does not exist or has ended"))
 	}
 	if !grant.HasSession {
 		return finish(deny("no_session", "no active session"))
@@ -50,7 +53,9 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	if len(contextRaw) == 0 {
 		contextRaw = []byte("{}")
 	}
-	if policybundle.RejectDuplicateJSON(contextRaw) != nil { return finish(deny("input_invalid", "tool context contains ambiguous JSON")) }
+	if policybundle.RejectDuplicateJSON(contextRaw) != nil {
+		return finish(deny("input_invalid", "tool context contains ambiguous JSON"))
+	}
 	if len(contextRaw) > policybundle.MaxPlanDataBytes {
 		return finish(deny("input_invalid", "context exceeds the v2 tool context size limit"))
 	}
@@ -58,7 +63,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	if contextErr != nil || len(canonicalContext) > policybundle.MaxPlanDataBytes {
 		return finish(deny("input_invalid", "context must be one JSON object of at most 64 KiB"))
 	}
-	ops, err := d.PlanV2(ctx, dr.ToolName, agentID, append([]byte(nil), canonical...), append([]byte(nil), canonicalContext...), dr.ParentSpan, dr.DelegationDepth)
+	ops, err := d.PlanV2(ctx, dr.SessionID, dr.ToolName, agentID, append([]byte(nil), canonical...), append([]byte(nil), canonicalContext...), dr.ParentSpan, dr.DelegationDepth)
 	if err != nil || len(ops) == 0 {
 		return finish(deny("operation_plan_invalid", "the complete trusted operation plan is unavailable"))
 	}
@@ -92,10 +97,10 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 
 	// Confirm the caller did not substitute, omit, or add a plan item before
 	// any provider side effect. Consumption remains immediately before each op.
-	if err := d.ValidateV2(ctx, dr.PreflightHandle, dr.ToolName, agentID, canonical, canonicalContext, ops, dr.ParentSpan, dr.DelegationDepth); err != nil {
+	if err := d.ValidateV2(ctx, dr.PreflightHandle, dr.SessionID, dr.ToolName, agentID, canonical, canonicalContext, ops, dr.ParentSpan, dr.DelegationDepth); err != nil {
 		return finish(deny("authorization_invalid", "the v2 operation plan is invalid or expired"))
 	}
-	if err := d.ConsumeV2Plan(ctx, dr.PreflightHandle, dr.ToolName, agentID, canonical, canonicalContext, ops, dr.ParentSpan, dr.DelegationDepth); err != nil {
+	if err := d.ConsumeV2Plan(ctx, dr.PreflightHandle, dr.SessionID, dr.ToolName, agentID, canonical, canonicalContext, ops, dr.ParentSpan, dr.DelegationDepth); err != nil {
 		return finish(deny("authorization_invalid", "the v2 operation plan is invalid or expired"))
 	}
 	results := make([]json.RawMessage, 0, len(prepared))
@@ -103,7 +108,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	for _, item := range prepared {
 		exec := &execution{provider: item.meta.Provider, meta: &item.meta, invocation: &item.inv, credentialSubject: contract.CredentialSubject(item.meta, item.inv)}
 		var runDenial *denial
-		err := d.UseCredential(ctx, grant.Subject, string(item.meta.Provider), func(token string) error {
+		err := d.UseCredential(ctx, dr.SessionID, grant.Subject, string(item.meta.Provider), func(token string) error {
 			status, denied := d.Env.run(ctx, item.conn, item.meta, item.inv, item.input, token, exec)
 			runDenial = denied
 			if denied != nil && status == http.StatusUnauthorized {

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
-	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -92,15 +92,17 @@ func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 	}
 	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
 	put := httptest.NewRecorder()
-	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v1","source":"discord","external_id":"discord-user-1"}`)))
-	if put.Code != http.StatusNoContent {
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil || sessionResponse.SessionID == "" {
 		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
 	}
+	sessionID := sessionResponse.SessionID
 	args := json.RawMessage(`{}`)
 	contextMap := json.RawMessage(`{"repository":"acme/kei"}`)
-	preflightBody, _ := json.Marshal(socketPreflightRequest{Schema: "kei.preflight-request/v1", Tool: "github.read_repo", AgentID: "agent-fixture-0001", Arguments: args, Context: contextMap})
+	preflightBody, _ := json.Marshal(socketPreflightRequest{Schema: "kei.preflight-request/v1", Tool: "github.read_repo", SessionID: sessionID, AgentID: "agent-fixture-0001", Arguments: args, Context: contextMap})
 	pre := httptest.NewRecorder()
-	h.ServeHTTP(pre, httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preflightBody))))
+	h.ServeHTTP(pre, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preflightBody))), sessionID))
 	if pre.Code != http.StatusOK {
 		t.Fatalf("preflight status=%d body=%s", pre.Code, pre.Body.String())
 	}
@@ -108,11 +110,11 @@ func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 	if err := json.Unmarshal(pre.Body.Bytes(), &grant); err != nil || grant.Handle == "" {
 		t.Fatalf("preflight response=%s err=%v", pre.Body.String(), err)
 	}
-	binding, _, _, _, bindErr := local.preflightBinding("github.read_repo", "agent-fixture-0001", args, contextMap, "", 0)
+	binding, _, _, _, bindErr := local.preflightBinding(sessionID, "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0)
 	if bindErr != nil {
 		t.Fatalf("preflight binding unavailable: %v", bindErr)
 	}
-	_, ops, planErr := local.PlanV2(context.Background(), "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0)
+	_, ops, planErr := local.PlanV2(context.Background(), sessionID, "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0)
 	if planErr != nil || len(ops) != 1 {
 		t.Fatalf("bundle plan=%+v err=%v", ops, planErr)
 	}
@@ -121,9 +123,9 @@ func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 		t.Fatalf("plan authorizer allowed=%v version=%d err=%v", allowed, gotVersion, authErr)
 	}
 	consume := func(handle string) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(socketConsumeRequest{Schema: "kei.consume-request/v1", Handle: handle, Tool: "github.read_repo", AgentID: "agent-fixture-0001", Arguments: args, Context: contextMap, Operation: socketConsumeOperation{ID: ops[0].ID, ConnectorID: ops[0].ConnectorID, Capability: ops[0].Capability, Action: ops[0].Action, Resource: ops[0].Resource, ResourceType: ops[0].ResourceType, ResourceID: ops[0].ResourceID, InputDigest: ops[0].InputDigest}})
+		body, _ := json.Marshal(socketConsumeRequest{Schema: "kei.consume-request/v1", Handle: handle, Tool: "github.read_repo", SessionID: sessionID, AgentID: "agent-fixture-0001", Arguments: args, Context: contextMap, Operation: socketConsumeOperation{ID: ops[0].ID, ConnectorID: ops[0].ConnectorID, Capability: ops[0].Capability, Action: ops[0].Action, Resource: ops[0].Resource, ResourceType: ops[0].ResourceType, ResourceID: ops[0].ResourceID, InputDigest: ops[0].InputDigest}})
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/consume", strings.NewReader(string(body))))
+		h.ServeHTTP(rec, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/consume", strings.NewReader(string(body))), sessionID))
 		return rec
 	}
 	if rec := consume(grant.Handle); rec.Code != http.StatusNoContent {
@@ -133,11 +135,11 @@ func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 		t.Fatalf("replay=%d", rec.Code)
 	}
 	pre = httptest.NewRecorder()
-	h.ServeHTTP(pre, httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preflightBody))))
+	h.ServeHTTP(pre, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preflightBody))), sessionID))
 	if pre.Code != http.StatusOK {
 		t.Fatalf("second preflight status=%d", pre.Code)
 	}
-	second, err := local.PreflightV2(context.Background(), "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0, 10*time.Second)
+	second, err := local.PreflightV2(context.Background(), sessionID, "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +161,7 @@ func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	local.AfterSync(nil)
-	if _, err := local.PreflightV2(context.Background(), "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0, 10*time.Second); err == nil {
+	if _, err := local.PreflightV2(context.Background(), sessionID, "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0, 10*time.Second); err == nil {
 		t.Fatal("stale snapshot passed preflight")
 	}
 }
@@ -178,14 +180,17 @@ func TestPlanContextChangeInvalidatesPreflight(t *testing.T) {
 	if _, err = store.Activate(v2PreflightBundle(t, now), identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := local.Sessions.Start(pdp.Subject{UserID: "user-alice", Source: "discord", ExternalID: "discord-user-1", Status: pdp.StatusLinked}); err != nil {
-		t.Fatal(err)
-	}
-	grant, err := local.PreflightV2(context.Background(), "github.read_repo", "agent-fixture-0001", []byte(`{}`), []byte(`{"repository":"acme/kei"}`), "", 0, 10*time.Second)
+	sessionID, err := local.Sessions.Create(resolveBundleSubject(local.evaluator.Load(), "discord", "discord-user-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := local.ValidateV2Plan(context.Background(), grant.Handle, "github.read_repo", "agent-fixture-0001", []byte(`{}`), []byte(`{"repository":"acme/other"}`), nil, "", 0); err == nil {
+	grant, err := local.PreflightV2(context.Background(), sessionID, "github.read_repo", "agent-fixture-0001", []byte(`{}`), []byte(`{"repository":"acme/kei"}`), "", 0, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.ValidateV2Plan(context.Background(), grant.Handle, sessionID, "github.read_repo", "agent-fixture-0001", []byte(`{}`), []byte(`{"repository":"acme/other"}`), nil, "", 0); err == nil {
 		t.Fatal("context substitution accepted")
 	}
 }
+
+func withSessionHeader(r *http.Request, id string) *http.Request { session.SetHeader(r, id); return r }

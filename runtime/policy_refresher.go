@@ -135,3 +135,38 @@ func PolicyJitter(d time.Duration) time.Duration {
 	spread := int64(d) / 10
 	return d - time.Duration(spread) + time.Duration(rand.Int64N(2*spread+1))
 }
+
+// StartPolicyRefresher starts the policy-bundle refresh loop in a background
+// goroutine. It is a no-op when IsRuntime() is false. The returned stop
+// function blocks until the refresher has shut down.
+//
+// This follows the same pattern as StartCollector so callers (serve.go and
+// runtime.go) have a uniform way to start background runtime loops.
+func StartPolicyRefresher(
+	ctx context.Context,
+	cfg PolicyConfig,
+	whoami IdentityFunc,
+	sync SyncBundleFunc,
+	checkRevocation func(error) bool,
+	revokeState func(),
+	onIdentity func(*Identity),
+	afterSync func(error),
+) (stop func()) {
+	if !cfg.IsRuntime() {
+		return func() {}
+	}
+	refresher := NewPolicyRefresher(cfg, whoami, sync, checkRevocation, revokeState)
+	refresher.OnIdentity = onIdentity
+	refresher.AfterSync = afterSync
+
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		refresher.Run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}

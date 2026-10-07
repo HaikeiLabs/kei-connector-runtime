@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 func TestDaemonV2ConsumesExactArgsContextAndProviderPlanBeforeProvider(t *testing.T) {
@@ -48,19 +49,19 @@ func TestDaemonV2ConsumesExactArgsContextAndProviderPlanBeforeProvider(t *testin
 				Authorize: func(context.Context, DaemonCall) (Grant, error) {
 					return Grant{V2Tool: true, HasSession: true, Subject: execUser, AgentID: execAgent, Provider: "github", ConnectorID: execConnector, Capabilities: []string{"repository.read"}, TenantID: execTenant, WorkspaceID: execWorkspace}, nil
 				},
-				PlanV2: func(_ context.Context, tool, agent string, args, contextValues []byte, _ string, _ int) ([]policybundle.Operation, error) {
+				PlanV2: func(_ context.Context, sessionID, tool, agent string, args, contextValues []byte, _ string, _ int) ([]policybundle.Operation, error) {
 					if tool != "github.get_issue" || agent != execAgent || len(args) == 0 || len(contextValues) == 0 {
 						return nil, errors.New("untrusted route or missing separated context")
 					}
 					return []policybundle.Operation{expected}, nil
 				},
-				ValidateV2: func(_ context.Context, handle, tool, agent string, args, contextValues []byte, ops []policybundle.Operation, _ string, _ int) error {
+				ValidateV2: func(_ context.Context, handle, sessionID, tool, agent string, args, contextValues []byte, ops []policybundle.Operation, _ string, _ int) error {
 					if handle != tc.handle || tc.expired || !tc.allow || tool != "github.get_issue" || agent != execAgent || string(args) != tc.approvedArgs || string(contextValues) != tc.approvedContext || !sameTestOps(ops, []policybundle.Operation{expected}) {
 						return errors.New("plan mismatch")
 					}
 					return nil
 				},
-				ConsumeV2Plan: func(_ context.Context, handle, tool, agent string, args, contextValues []byte, ops []policybundle.Operation, _ string, _ int) error {
+				ConsumeV2Plan: func(_ context.Context, handle, sessionID, tool, agent string, args, contextValues []byte, ops []policybundle.Operation, _ string, _ int) error {
 					consumeCalls++
 					if handle != tc.handle || tc.expired || !tc.allow || string(args) != tc.approvedArgs || string(contextValues) != tc.approvedContext || !sameTestOps(ops, []policybundle.Operation{expected}) {
 						return errors.New("authorization mismatch")
@@ -71,7 +72,7 @@ func TestDaemonV2ConsumesExactArgsContextAndProviderPlanBeforeProvider(t *testin
 					used = true
 					return nil
 				},
-				UseCredential: func(_ context.Context, subject, provider string, fn func(string) error) error {
+				UseCredential: func(_ context.Context, sessionID, subject, provider string, fn func(string) error) error {
 					if subject != execUser || provider != "github" {
 						t.Errorf("credential subject/provider=%q/%q", subject, provider)
 					}
@@ -83,9 +84,11 @@ func TestDaemonV2ConsumesExactArgsContextAndProviderPlanBeforeProvider(t *testin
 				runs = 2
 			}
 			for attempt := 0; attempt < runs; attempt++ {
-				body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, ToolName: "github.get_issue", PreflightHandle: tc.handle, AgentID: execAgent, Input: json.RawMessage(tc.args), Context: json.RawMessage(tc.context), TraceID: "v4-trace"})
+				body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, SessionID: "ks_test", ToolName: "github.get_issue", PreflightHandle: tc.handle, AgentID: execAgent, Input: json.RawMessage(tc.args), Context: json.RawMessage(tc.context), TraceID: "v4-trace"})
 				rec := httptest.NewRecorder()
-				d.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DaemonInvokePath, bytes.NewReader(body)))
+				req := httptest.NewRequest(http.MethodPost, DaemonInvokePath, bytes.NewReader(body))
+				session.SetHeader(req, "ks_test")
+				d.ServeHTTP(rec, req)
 				if tc.name == "missing handle" {
 					if rec.Code != http.StatusBadRequest {
 						t.Fatalf("missing handle status=%d", rec.Code)
@@ -135,7 +138,7 @@ func sameTestOps(a, b []policybundle.Operation) bool {
 func TestDaemonV2RejectsMixedCallerOperationFields(t *testing.T) {
 	providerCalls := 0
 	d := &Daemon{Env: Env{ProviderTransport: roundTripFunc(func(*http.Request) (*http.Response, error) { providerCalls++; return nil, nil })}}
-	body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, ToolName: "github.get_issue", PreflightHandle: "opaque", ConnectorID: execConnector, Capability: "repository.read", Action: "read", Resource: "repos/acme/kei"})
+	body, _ := json.Marshal(daemonRequest{Schema: daemonRequestSchema, SessionID: "ks_test", ToolName: "github.get_issue", PreflightHandle: "opaque", ConnectorID: execConnector, Capability: "repository.read", Action: "read", Resource: "repos/acme/kei"})
 	rec := httptest.NewRecorder()
 	d.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DaemonInvokePath, bytes.NewReader(body)))
 	if rec.Code != http.StatusBadRequest || providerCalls != 0 {

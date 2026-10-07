@@ -180,7 +180,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 
 			// The credential is held: in-daemon use sees it.
 			held := false
-			if err := local.UseCredential(context.Background(), "u-canary", "github", func(token string) error {
+			if err := local.UseCredential(context.Background(), "", "u-canary", "github", func(token string) error {
 				held = token == credentialCanary
 				return nil
 			}); err != nil || !held {
@@ -188,7 +188,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 			}
 			// Callback failures and denials, including the 401 path.
 			for _, provider := range []string{"github", "linear", "slack"} {
-				err := local.UseCredential(context.Background(), "u-canary", provider, func(token string) error {
+				err := local.UseCredential(context.Background(), "", "u-canary", provider, func(token string) error {
 					return fmt.Errorf("provider said 401: %w", credrelease.ErrProviderUnauthorized)
 				})
 				if err == nil {

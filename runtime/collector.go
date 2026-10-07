@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 )
 
 type ABACFlushClient interface {
@@ -986,4 +988,20 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return 0
 	}
 	return 0
+}
+
+func StartCollector(ctx context.Context, cfg CollectorConfig, auditPath string, pollInterval, finalFlushTimeout time.Duration) (stop func()) {
+	if auditPath == "" {
+		return func() {}
+	}
+	audit := NewCollector(auditPath, NewABACFlushClientFromConfig(cfg, finalFlushTimeout), 100)
+	audit.LifecycleClient = NewLifecycleFlushClientFromConfig(cfg, finalFlushTimeout)
+	audit.HarnessToolClient = NewHarnessToolFlushClientFromConfig(cfg, finalFlushTimeout)
+	audit.HarnessAuditClient = NewHarnessAuditFlushClientFromConfig(cfg, finalFlushTimeout)
+	return collector.Service{
+		Flusher:           audit,
+		Path:              auditPath,
+		PollInterval:      pollInterval,
+		FinalFlushTimeout: finalFlushTimeout,
+	}.Start(ctx)
 }

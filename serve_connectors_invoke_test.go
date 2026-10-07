@@ -540,10 +540,10 @@ func TestProductionServeInterpretsCachedPlanWithoutPlannerRegistration(t *testin
 	}
 	// newInvokeRig uses production newServeLocalPDP/newServeHandlers wiring;
 	// no per-tool planner is registered anywhere in serve.
-	rig.startSession(t)
+	sessionID := rig.startNamedSession(t)
 	args := `{"note":"model-visible"}`
 	contextMap := `{"repository":"acme/kei"}`
-	preflight := socketDo(t, rig.client, http.MethodPost, "/v1/preflight", `{"schema":"kei.preflight-request/v1","tool":"github.repository_read","agent_id":"agent-fixture-0001","arguments":`+args+`,"context":`+contextMap+`}`)
+	preflight := socketDoSession(t, rig.client, http.MethodPost, "/v1/preflight", sessionID, `{"schema":"kei.preflight-request/v1","session_id":"`+sessionID+`","tool":"github.repository_read","agent_id":"agent-fixture-0001","arguments":`+args+`,"context":`+contextMap+`}`)
 	if preflight.code != http.StatusOK {
 		t.Fatalf("catalog-plan preflight status=%d body=%s", preflight.code, preflight.dump)
 	}
@@ -557,8 +557,8 @@ func TestProductionServeInterpretsCachedPlanWithoutPlannerRegistration(t *testin
 	if err := json.Unmarshal([]byte(preflight.dump[bodyStart:]), &grant); err != nil || grant.Handle == "" {
 		t.Fatalf("preflight response=%s err=%v", preflight.dump, err)
 	}
-	invokeBody, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.repository_read", "preflight_handle": grant.Handle, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-generic-plan"})
-	response := socketDo(t, rig.client, http.MethodPost, "/v1/connectors:invoke", string(invokeBody))
+	invokeBody, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.repository_read", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-generic-plan"})
+	response := socketDoSession(t, rig.client, http.MethodPost, "/v1/connectors:invoke", sessionID, string(invokeBody))
 	if response.code != http.StatusOK || !strings.Contains(response.dump, `"decision":"allow"`) {
 		t.Fatalf("generic bundle plan invoke=%d %s", response.code, response.dump)
 	}

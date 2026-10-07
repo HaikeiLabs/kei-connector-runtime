@@ -831,3 +831,107 @@ func TestHarnessToolFlushClientNilWithoutToken(t *testing.T) {
 		t.Fatal("expected a nil client without a token")
 	}
 }
+
+func TestStartCollectorEmptyPathReturnsNoop(t *testing.T) {
+	stop := StartCollector(context.Background(), fakeCollectorConfig{}, "", time.Minute, time.Second)
+	stop()
+	stop()
+}
+
+func TestStartCollectorFlushesRecords(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		flushed  bool
+		flushedC = make(chan struct{})
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		flushed = true
+		mu.Unlock()
+		select {
+		case flushedC <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"upserted":1}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	writeJSONL(t, path, []DecisionEvent{ev("s1")})
+
+	cfg := fakeCollectorConfig{
+		isRuntime:    true,
+		token:        "test-token",
+		controlPlane: server.URL,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := StartCollector(ctx, cfg, path, time.Hour, time.Second)
+	defer stop()
+
+	select {
+	case <-flushedC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("collector did not flush before timeout")
+	}
+
+	mu.Lock()
+	if !flushed {
+		t.Fatal("collector did not flush any records")
+	}
+	mu.Unlock()
+}
+
+func TestStartCollectorFlushesOnStop(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		flushed  int
+		flushedC = make(chan struct{}, 2)
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		flushed++
+		mu.Unlock()
+		flushedC <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"upserted":1}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	writeJSONL(t, path, []DecisionEvent{ev("s1")})
+
+	cfg := fakeCollectorConfig{
+		isRuntime:    true,
+		token:        "test-token",
+		controlPlane: server.URL,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := StartCollector(ctx, cfg, path, time.Hour, 50*time.Millisecond)
+
+	// Wait for the first poll flush.
+	<-flushedC
+
+	// Write another record and stop; the final flush should ship it.
+	writeJSONL(t, path, []DecisionEvent{ev("s2")})
+
+	stop()
+
+	select {
+	case <-flushedC:
+	case <-time.After(time.Second):
+		t.Fatal("collector did not flush the final batch before stop deadline")
+	}
+
+	mu.Lock()
+	if flushed < 2 {
+		t.Fatalf("collector flushed %d time(s), want at least 2", flushed)
+	}
+	mu.Unlock()
+}

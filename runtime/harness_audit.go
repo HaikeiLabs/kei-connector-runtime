@@ -89,7 +89,7 @@ func harnessAuditRecordFrom(raw json.RawMessage) (harnessAuditRecord, bool) {
 	default:
 		return harnessAuditRecord{}, false
 	}
-	if rec.HarnessID == "" || rec.Tool == "" || rec.Phase == "" || rec.NativeDecision == "" || rec.ArgsDigest == "" || rec.ObservedAt == "" {
+	if rec.Tool == "" || rec.Phase == "" || rec.NativeDecision == "" || rec.ArgsDigest == "" || rec.ObservedAt == "" {
 		return harnessAuditRecord{}, false
 	}
 	return harnessAuditRecord{

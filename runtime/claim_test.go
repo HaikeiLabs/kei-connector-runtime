@@ -135,6 +135,48 @@ func TestRuntimeClientRejectsWhatsAppWithTenant(t *testing.T) {
 	}
 }
 
+func TestRuntimeClientStartsOpenWebUIIdentityClaim(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input IdentityClaimStartRequest
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Platform != "openwebui" || input.TenantID != "" || input.PlatformUserID != "550e8400-e29b-41d4-a716-446655440000" {
+			t.Fatalf("request identity = %#v", input)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"claim_url":"https://kei.example/claim#claim=opaque","expires_at":"2030-01-01T00:00:00Z"}`)
+	}))
+	defer server.Close()
+	_, err := NewRuntimeClient(server.URL, time.Second).(*runtimeClient).StartIdentityClaim(context.Background(), "runtime-token", IdentityClaimStartRequest{
+		Platform: "openwebui", PlatformUserID: "550e8400-e29b-41d4-a716-446655440000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeClientRejectsOpenWebUIWithTenant(t *testing.T) {
+	_, err := NewRuntimeClient("http://127.0.0.1:1", time.Second).(*runtimeClient).StartIdentityClaim(context.Background(), "token", IdentityClaimStartRequest{
+		Platform: "openwebui", TenantID: "some-tenant", PlatformUserID: "550e8400-e29b-41d4-a716-446655440000",
+	})
+	if err == nil || !strings.Contains(err.Error(), "empty tenant") {
+		t.Fatalf("expected tenant rejection, got %v", err)
+	}
+}
+
+func TestRuntimeClientRejectsInvalidOpenWebUIIdentity(t *testing.T) {
+	for _, req := range []IdentityClaimStartRequest{
+		{Platform: "openwebui", PlatformUserID: "not-a-uuid"},
+		{Platform: "openwebui", PlatformUserID: ""},
+		{Platform: "openwebui", PlatformUserID: "123"},
+	} {
+		if _, err := NewRuntimeClient("http://127.0.0.1:1", time.Second).(*runtimeClient).StartIdentityClaim(context.Background(), "token", req); err == nil {
+			t.Fatalf("expected rejection for %#v", req)
+		}
+	}
+}
+
 func TestRuntimeClientRejectsInvalidWhatsAppIdentity(t *testing.T) {
 	for _, req := range []IdentityClaimStartRequest{
 		{Platform: "whatsapp", PlatformUserID: "15555550100"},

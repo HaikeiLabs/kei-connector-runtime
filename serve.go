@@ -17,11 +17,11 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -66,6 +66,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	defer local.Close()
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	go local.SweepSessions(ctx)
 	unixListener, err := socket.Listen(socketPath)
 	if err != nil {
 		slog.Error("runtime_unix_listener_failed", "path", socketPath, "error", err)
@@ -95,51 +96,30 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	server := newServer(tcpHandler)
 	socketServer := newServer(socketHandler)
 
-	refresherDone := make(chan struct{})
-	if cfg.IsRuntime() {
-		refresher := keiruntime.NewPolicyRefresher(cfg,
-			func() (*keiruntime.Identity, error) {
-				id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
-				if err != nil {
-					return nil, err
-				}
-				return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
-			},
-			func(identity *keiruntime.Identity) error {
-				return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
-					ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
-				}, 10*time.Second)
-			},
-			IsRuntimeRevocation,
-			func() { RevokePolicyState(cfg) },
-		)
-		refresher.OnIdentity = local.SetIdentity
-		refresher.AfterSync = local.AfterSync
-		go func() {
-			defer close(refresherDone)
-			refresher.Run(ctx)
-		}()
-	} else {
-		close(refresherDone)
-	}
+	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg,
+		func() (*keiruntime.Identity, error) {
+			id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+			if err != nil {
+				return nil, err
+			}
+			return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
+		},
+		func(identity *keiruntime.Identity) error {
+			return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
+				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+			}, 10*time.Second)
+		},
+		IsRuntimeRevocation,
+		func() { RevokePolicyState(cfg) },
+		local.SetIdentity,
+		local.AfterSync,
+	)
 	slog.Info("runtime_http_listener_started", "addr", addr)
 	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")
 	serveErrors := make(chan error, 2)
 	go func() { serveErrors <- server.Serve(tcpListener) }()
 	go func() { serveErrors <- socketServer.Serve(unixListener) }()
-	stopCollector := func() {}
-	if auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir); auditPath != "" {
-		audit := keiruntime.NewCollector(auditPath, keiruntime.NewABACFlushClientFromConfig(cfg, shutdownFlushTimeout), 100)
-		audit.LifecycleClient = keiruntime.NewLifecycleFlushClientFromConfig(cfg, shutdownFlushTimeout)
-		audit.HarnessToolClient = keiruntime.NewHarnessToolFlushClientFromConfig(cfg, shutdownFlushTimeout)
-		audit.HarnessAuditClient = keiruntime.NewHarnessAuditFlushClientFromConfig(cfg, shutdownFlushTimeout)
-		stopCollector = collector.Service{
-			Flusher:           audit,
-			Path:              auditPath,
-			PollInterval:      collectorPollInterval,
-			FinalFlushTimeout: shutdownFlushTimeout,
-		}.Start(ctx)
-	}
+	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
 
 	exitCode := 0
 	select {
@@ -150,9 +130,9 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			exitCode = 1
 		}
 	}
+	stopRefresher()
 	stopCollector()
 	stop()
-	<-refresherDone
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
 	defer cancel()
 	for _, srv := range []*http.Server{server, socketServer} {
@@ -185,6 +165,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		_ = keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
+	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
 	if creds != nil {
 		local.SetCredentialStore(creds)
 		local.SetConnectorInvoker(&invoke.Daemon{
@@ -197,8 +178,8 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 				},
 			},
 			Authorize: connectorAuthorizer(local),
-			PlanV2: func(ctx context.Context, tool, agent string, args, contextValues []byte, parent string, depth int) ([]policybundle.Operation, error) {
-				_, ops, err := local.PlanV2(ctx, tool, agent, args, contextValues, parent, depth)
+			PlanV2: func(ctx context.Context, sessionID, tool, agent string, args, contextValues []byte, parent string, depth int) ([]policybundle.Operation, error) {
+				_, ops, err := local.PlanV2(ctx, sessionID, tool, agent, args, contextValues, parent, depth)
 				return ops, err
 			},
 			ValidateV2:    local.ValidateV2Plan,
@@ -223,13 +204,18 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invoke.DaemonCall) (invoke.Grant, error) {
 	return func(ctx context.Context, c invoke.DaemonCall) (invoke.Grant, error) {
 		if c.ToolName != "" {
-			if _, hasSession := local.Sessions.Current(); !hasSession {
-				return invoke.Grant{}, nil
+			subjectSnapshot, hasSession := local.Sessions.Get(c.Session)
+			if !hasSession {
+				return invoke.Grant{ReasonCode: pdp.ReasonSessionNotFound}, nil
 			}
-			provider, connectorID, capabilities, subject, agentID, tenantID, workspaceID, ok := local.DescribeV2Tool(c.ToolName, c.AgentID)
+			provider, connectorID, capabilities, subject, agentID, tenantID, workspaceID, ok := local.DescribeV2Tool(c.Session, c.ToolName, c.AgentID)
+			if subject != subjectSnapshot.UserID {
+				ok = false
+			}
 			return invoke.Grant{V2Tool: ok, HasSession: true, Subject: subject, AgentID: agentID, Provider: provider, ConnectorID: connectorID, Capabilities: capabilities, TenantID: tenantID, WorkspaceID: workspaceID}, nil
 		}
 		g, id, err := local.AuthorizeConnector(ctx, pdp.Request{
+			Session:  c.Session,
 			Resource: c.Resource, AgentID: c.AgentID,
 			Connector: &pdp.ConnectorTarget{ConnectorID: c.ConnectorID, Capability: c.Capability},
 		})
@@ -440,7 +426,13 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 
 	invokingSubject := ""
 	if h.sessions != nil {
-		if sub, ok := h.sessions.Current(); ok {
+		id := session.FromRequest(r)
+		sub, ok := h.sessions.Get(id)
+		if !ok && id != pdp.DefaultSession {
+			writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
+			return
+		}
+		if ok {
 			invokingSubject = sub.UserID
 		}
 	}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 // maxDaemonResponseBytes bounds the daemon's answer; a result is at most
@@ -82,16 +83,20 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", env.DaemonSocket)
 		},
 	}}
+	if plan.toolName != "" && plan.session == "" {
+		return fail("session_required", "v2 tool calls require a named session", "set KEI_SESSION_ID from the runtime session response")
+	}
 	if plan.toolName != "" && plan.req.PreflightHandle == "" {
 		preflightBody, marshalErr := json.Marshal(struct {
 			Schema          string          `json:"schema"`
+			SessionID       string          `json:"session_id"`
 			Tool            string          `json:"tool"`
 			AgentID         string          `json:"agent_id,omitempty"`
 			Arguments       json.RawMessage `json:"arguments"`
 			Context         json.RawMessage `json:"context"`
 			ParentSpan      string          `json:"parent_span,omitempty"`
 			DelegationDepth int             `json:"delegation_depth,omitempty"`
-		}{"kei.preflight-request/v1", plan.toolName, plan.req.AgentID, canonical, canonicalContext, plan.parentSpan, plan.delegationDepth})
+		}{Schema: "kei.preflight-request/v1", SessionID: plan.session, Tool: plan.toolName, AgentID: plan.req.AgentID, Arguments: canonical, Context: canonicalContext, ParentSpan: plan.parentSpan, DelegationDepth: plan.delegationDepth})
 		if marshalErr != nil {
 			return fail("preflight_denied", "the tool call could not be preflighted", "local tool preflight failed closed")
 		}
@@ -101,6 +106,7 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 		}
 		preq.Header.Set("Authorization", "Bearer "+env.RuntimeToken)
 		preq.Header.Set("Content-Type", "application/json")
+		session.SetHeader(preq, plan.session)
 		presp, doErr := client.Do(preq)
 		if doErr != nil {
 			return fail("daemon_unavailable", "the daemon did not preflight the tool call", "local tool preflight failed closed")
@@ -118,7 +124,7 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 		plan.req.PreflightHandle = preflightResp.Handle
 	}
 	body, err := json.Marshal(daemonRequest{
-		Schema: daemonRequestSchema, ToolName: plan.toolName, PreflightHandle: plan.req.PreflightHandle,
+		Schema: daemonRequestSchema, ToolName: plan.toolName, PreflightHandle: plan.req.PreflightHandle, SessionID: plan.session,
 		ParentSpan: plan.parentSpan, DelegationDepth: plan.delegationDepth,
 		ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability,
 		Action: plan.req.Action, Resource: plan.req.Resource, Input: canonical, TraceID: plan.req.TraceID,
@@ -133,6 +139,7 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 	}
 	req.Header.Set("Authorization", "Bearer "+env.RuntimeToken)
 	req.Header.Set("Content-Type", "application/json")
+	session.SetHeader(req, plan.session)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fail("daemon_unavailable", "the kei-proxy serve daemon is not reachable",

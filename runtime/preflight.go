@@ -25,6 +25,7 @@ func (ConnectorDispatch) isDispatchRoute() {}
 type Operation = policybundle.Operation
 
 type BindingContext struct {
+	SessionID         string
 	InstallationID    string
 	BundleVersion     int64
 	BundleDigest      string
@@ -230,7 +231,7 @@ func (s *AuthorizationStore) Invalidate() {
 }
 
 func validBinding(b BindingContext) bool {
-	if b.InstallationID == "" || b.BundleVersion < 1 || b.BundleDigest == "" || !validInputDigest(b.ArgsDigest) || !validInputDigest(b.ContextDigest) || b.Subject == "" || b.AgentID == "" || b.Tool == "" {
+	if b.SessionID == "" || b.InstallationID == "" || b.BundleVersion < 1 || b.BundleDigest == "" || !validInputDigest(b.ArgsDigest) || !validInputDigest(b.ContextDigest) || b.Subject == "" || b.AgentID == "" || b.Tool == "" {
 		return false
 	}
 	route, ok := b.Route.(ConnectorDispatch)
@@ -244,7 +245,7 @@ func (s *AuthorizationStore) purgeLocked(now time.Time) {
 	}
 }
 func sameBinding(a, b BindingContext) bool {
-	return a.InstallationID == b.InstallationID && a.BundleVersion == b.BundleVersion && a.BundleDigest == b.BundleDigest && a.ArgsDigest == b.ArgsDigest && a.ContextDigest == b.ContextDigest && a.Subject == b.Subject && a.SubjectSource == b.SubjectSource && a.SubjectExternalID == b.SubjectExternalID && a.AgentID == b.AgentID && a.Tool == b.Tool && a.ParentSpan == b.ParentSpan && a.DelegationDepth == b.DelegationDepth && routeEqual(a.Route, b.Route)
+	return a.SessionID == b.SessionID && a.InstallationID == b.InstallationID && a.BundleVersion == b.BundleVersion && a.BundleDigest == b.BundleDigest && a.ArgsDigest == b.ArgsDigest && a.ContextDigest == b.ContextDigest && a.Subject == b.Subject && a.SubjectSource == b.SubjectSource && a.SubjectExternalID == b.SubjectExternalID && a.AgentID == b.AgentID && a.Tool == b.Tool && a.ParentSpan == b.ParentSpan && a.DelegationDepth == b.DelegationDepth && routeEqual(a.Route, b.Route)
 }
 func routeEqual(a, b DispatchRoute) bool {
 	x, ok := a.(ConnectorDispatch)

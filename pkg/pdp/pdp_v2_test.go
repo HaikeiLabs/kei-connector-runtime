@@ -38,6 +38,10 @@ func TestStaleV2SnapshotHardDeniesEveryPDPEntryPoint(t *testing.T) {
 	ids := []map[string]any{{"source": "discord", "external_id": "discord-old", "user_id": "u-alice", "status": "linked"}}
 	bundle := v2SnapshotBundle(t, now, 42, ids)
 	sessions := NewSessions()
+	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-old", Status: StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := sessions.Start(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-old", Status: StatusLinked}); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +59,7 @@ func TestStaleV2SnapshotHardDeniesEveryPDPEntryPoint(t *testing.T) {
 	if err != nil || harness.Outcome != policybundle.HarnessNotRenderable {
 		t.Fatalf("harness=%+v err=%v", harness, err)
 	}
-	_, _, allowed, err := e.AuthorizeV2Plan(testInstallation, "u-alice", "discord", "discord-old", testAgent, "tool", []policybundle.Operation{{ConnectorID: "conn", Capability: "read", Action: "read"}})
+	_, _, allowed, err := e.AuthorizeV2Plan(sessionID, testInstallation, "u-alice", "discord", "discord-old", testAgent, "tool", []policybundle.Operation{{ConnectorID: "conn", Capability: "read", Action: "read"}})
 	if allowed || !errors.Is(err, policybundle.ErrSubjectSnapshotStale) {
 		t.Fatalf("preflight allowed=%v err=%v", allowed, err)
 	}
@@ -75,7 +79,12 @@ func TestV2RefreshDoesNotPreserveRemovedRemoteIdentityByUserMembership(t *testin
 	now := time.Now().UTC()
 	initial := v2SnapshotBundle(t, now, 42, []map[string]any{{"source": "discord", "external_id": "discord-old", "user_id": "u-alice", "status": "linked", "groups": []string{"members"}}, {"source": "slack", "external_id": "slack-still-linked", "user_id": "u-alice", "status": "linked", "groups": []string{"members"}}})
 	sessions := NewSessions()
-	if err := sessions.Start(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-old", Status: StatusLinked}); err != nil {
+	removed, err := sessions.Create(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-old", Status: StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := sessions.Create(Subject{UserID: "u-alice", Source: "slack", ExternalID: "slack-still-linked", Status: StatusLinked})
+	if err != nil {
 		t.Fatal(err)
 	}
 	e, store, _ := newTestEvaluator(t, now, initial, sessions)
@@ -84,8 +93,14 @@ func TestV2RefreshDoesNotPreserveRemovedRemoteIdentityByUserMembership(t *testin
 		t.Fatal(err)
 	}
 	e.now = func() time.Time { return now.Add(time.Second) }
-	e.ReconcileSession()
-	if got, _ := sessions.Current(); got.Status != StatusRevoked {
-		t.Fatalf("removed exact remote identity survived because user retained another membership: %+v", got)
+	revoked := e.ReconcileSessions()
+	if len(revoked) != 1 || revoked[0] != removed {
+		t.Fatalf("revoked session IDs=%v, want only %q", revoked, removed)
+	}
+	if got, ok := sessions.Get(removed); !ok || got.Status != StatusRevoked {
+		t.Fatalf("removed identity session=%+v exists=%v", got, ok)
+	}
+	if got, ok := sessions.Get(kept); !ok || got.Status != StatusLinked {
+		t.Fatalf("unrelated identity session=%+v exists=%v", got, ok)
 	}
 }

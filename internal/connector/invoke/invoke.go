@@ -31,21 +31,21 @@ import (
 // server-side from the harness token; the proxy only forwards the capability,
 // the resource, and the identity-propagation context.
 type Request struct {
-	HarnessToken    string          `json:"harness_token"`
+	HarnessToken    string `json:"harness_token"`
 	ToolName        string `json:"tool_name,omitempty"`
-	PreflightHandle string          `json:"preflight_handle,omitempty"`
-	ParentSpan      string          `json:"parent_span,omitempty"`
-	DelegationDepth int             `json:"delegation_depth,omitempty"`
-	AgentID         string          `json:"agent_id,omitempty"`
-	ConnectorID     string          `json:"connector_id"`
-	Capability      string          `json:"capability"`
-	Action          string          `json:"action"`
-	Resource        string          `json:"resource"`
-	TraceID         string          `json:"trace_id"`
-	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
-	InvokingSubject string          `json:"invoking_subject,omitempty"`
-	UserID          string          `json:"user_id,omitempty"`
-	Framework       string          `json:"framework,omitempty"`
+	PreflightHandle string `json:"preflight_handle,omitempty"`
+	ParentSpan      string `json:"parent_span,omitempty"`
+	DelegationDepth int    `json:"delegation_depth,omitempty"`
+	AgentID         string `json:"agent_id,omitempty"`
+	ConnectorID     string `json:"connector_id"`
+	Capability      string `json:"capability"`
+	Action          string `json:"action"`
+	Resource        string `json:"resource"`
+	TraceID         string `json:"trace_id"`
+	IdempotencyKey  string `json:"idempotency_key,omitempty"`
+	InvokingSubject string `json:"invoking_subject,omitempty"`
+	UserID          string `json:"user_id,omitempty"`
+	Framework       string `json:"framework,omitempty"`
 	// ProviderUserID is the chat-platform identity (e.g. a WhatsApp E.164
 	// number); the catalog resolves it to the invoking Kei user.
 	ProviderUserID string `json:"provider_user_id,omitempty"`
@@ -192,6 +192,7 @@ type connectorInvokeArgs struct {
 // should use, after applying CLI overrides and the runtime relay rules.
 type connectorInvokePlan struct {
 	req             Request
+	session         string
 	abacURL         string
 	abacSecret      string
 	timeout         time.Duration
@@ -229,6 +230,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	preflightHandle := fs.String("preflight-handle", "", "opaque preflight handle (normally obtained by daemon preflight)")
 	parentSpan := fs.String("parent-span", "", "parent span bound to preflight")
 	delegationDepth := fs.Int("delegation-depth", 0, "delegation depth bound to preflight")
+	sessionID := fs.String("session", session.IDFromEnv(), "kei-proxy daemon session id from PUT /v1/session")
 
 	if err := fs.Parse(args); err != nil {
 		return connectorInvokePlan{}, err
@@ -299,6 +301,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		context:    *contextArg,
 		toolName:   *toolName, preflightHandle: *preflightHandle, parentSpan: *parentSpan, delegationDepth: *delegationDepth,
 		explicitSubject: explicitSubject,
+		session:         *sessionID,
 	}, nil
 }
 
@@ -338,7 +341,7 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		return runViaDaemon(plan, env, stdout, stderr)
 	}
 	if env.SubjectSource != nil {
-		subject, subErr := env.SubjectSource.Subject(context.Background())
+		subject, subErr := env.SubjectSource.Subject(session.WithID(context.Background(), plan.session))
 		if subErr == nil && subject != "" {
 			plan.req.InvokingSubject = subject
 		}

@@ -7,30 +7,36 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 type permissionEvent struct {
-	Schema            string    `json:"schema"`
-	EventClass        string    `json:"event_class"`
-	HarnessID         string    `json:"harness_id"`
-	HarnessKind       string    `json:"harness_kind"`
-	HarnessRegistered bool      `json:"harness_registered"`
-	HarnessSessionID  string    `json:"harness_session_id,omitempty"`
-	ToolUseID         string    `json:"tool_use_id,omitempty"`
-	Phase             string    `json:"phase"`
-	Tool              string    `json:"tool"`
-	Skill             string    `json:"skill,omitempty"`
-	ArgsDigest        string    `json:"args_digest"`
-	DigestKeyID       string    `json:"digest_key_id,omitempty"`
-	ArgsCiphertext    string    `json:"args_ciphertext,omitempty"`
-	RecipientKeyIDs   []string  `json:"recipient_key_ids,omitempty"`
-	NativeDecision    string    `json:"native_decision"`
-	Argv0             string    `json:"argv0,omitempty"`
-	ObservedAt        time.Time `json:"observed_at"`
+	Schema            string `json:"schema"`
+	EventClass        string `json:"event_class"`
+	HarnessID         string `json:"harness_id"`
+	HarnessKind       string `json:"harness_kind"`
+	HarnessRegistered bool   `json:"harness_registered"`
+	HarnessSessionID  string `json:"harness_session_id,omitempty"`
+	// SessionID is the kei-proxy daemon session the harness runs in
+	// (--session or $KEI_SESSION_ID), not the harness's own session.
+	SessionID       string    `json:"session_id,omitempty"`
+	ToolUseID       string    `json:"tool_use_id,omitempty"`
+	Phase           string    `json:"phase"`
+	Tool            string    `json:"tool"`
+	Skill           string    `json:"skill,omitempty"`
+	ArgsDigest      string    `json:"args_digest"`
+	DigestKeyID     string    `json:"digest_key_id,omitempty"`
+	ArgsCiphertext  string    `json:"args_ciphertext,omitempty"`
+	RecipientKeyIDs []string  `json:"recipient_key_ids,omitempty"`
+	NativeDecision  string    `json:"native_decision"`
+	Argv0           string    `json:"argv0,omitempty"`
+	ObservedAt      time.Time `json:"observed_at"`
 }
 
 // Run dispatches the report-only permission hook CLI. Every harness-facing
@@ -66,12 +72,16 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 	flags := flag.NewFlagSet("hook report", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	harnessID := flags.String("harness", "", "registered harness id")
-	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *harnessID == "" {
+	sessionID := flags.String("session", session.IDFromEnv(), "kei-proxy daemon session id (default $KEI_SESSION_ID)")
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
 		return 0
 	}
 	in, err := ReadInput(stdin)
 	if err != nil {
 		return 0
+	}
+	if in.SessionID == "" {
+		in.SessionID = strconv.Itoa(os.Getppid())
 	}
 	canonical := CanonicalJSON(in.ToolInput)
 	var argsDigest, digestKeyID string
@@ -100,7 +110,7 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 	}
 	tool, argv0 := reportedTool(in.ToolName, in.ToolInput)
 	skill := activeSkillFor(kind, in.SessionID, in.ToolName, in.ToolInput, cfg.RuntimeStateDir)
-	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
+	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, SessionID: *sessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {
 		WriteAudit(cfg, data)

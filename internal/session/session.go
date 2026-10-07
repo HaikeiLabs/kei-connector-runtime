@@ -43,14 +43,16 @@ func NewSocketSubjectSource(socketPath, runtimeToken string) SubjectSource {
 }
 
 // Subject calls GET /v1/session on the serve daemon Unix socket and returns
-// the user_id of the current session subject. Returns empty string if there
-// is no active session (404) or the session subject is not linked.
+// the user_id of the session ctx names (WithID, else $KEI_SESSION_ID, else the
+// legacy default session). Returns empty string if there is no such session
+// (404) or its subject is not linked.
 func (s *socketSubjectSource) Subject(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/v1/session", nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.runtimeToken)
+	SetHeader(req, IDFrom(ctx))
 
 	resp, err := s.client.Do(req)
 	if err != nil {

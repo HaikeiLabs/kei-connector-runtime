@@ -38,9 +38,9 @@ func TestResourceLessPlanStillUsesLiteralProviderResourceAndPolicy(t *testing.T)
 			if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
 				t.Fatal(err)
 			}
-			rig.startSession(t)
+			sessionID := rig.startNamedSession(t)
 			args, contextMap := `{}`, `{}`
-			preflight := socketDo(t, rig.client, http.MethodPost, "/v1/preflight", `{"schema":"kei.preflight-request/v1","tool":"github.repository_read","agent_id":"agent-fixture-0001","arguments":{},"context":{}}`)
+			preflight := socketDoSession(t, rig.client, http.MethodPost, "/v1/preflight", sessionID, `{"schema":"kei.preflight-request/v1","session_id":"`+sessionID+`","tool":"github.repository_read","agent_id":"agent-fixture-0001","arguments":{},"context":{}}`)
 			if !tc.allow {
 				if preflight.code != http.StatusForbidden {
 					t.Fatalf("resource selector preflight=%d %s", preflight.code, preflight.dump)
@@ -61,8 +61,8 @@ func TestResourceLessPlanStillUsesLiteralProviderResourceAndPolicy(t *testing.T)
 			if start < 0 || json.Unmarshal([]byte(preflight.dump[start:]), &grant) != nil || grant.Handle == "" {
 				t.Fatalf("preflight response=%s", preflight.dump)
 			}
-			body, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.repository_read", "preflight_handle": grant.Handle, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-resource-less"})
-			response := socketDo(t, rig.client, http.MethodPost, "/v1/connectors:invoke", string(body))
+			body, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.repository_read", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-resource-less"})
+			response := socketDoSession(t, rig.client, http.MethodPost, "/v1/connectors:invoke", sessionID, string(body))
 			if response.code != http.StatusOK || !strings.Contains(response.dump, `"decision":"allow"`) {
 				t.Fatalf("resource-less invoke=%d %s", response.code, response.dump)
 			}

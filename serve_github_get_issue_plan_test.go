@@ -32,10 +32,10 @@ func TestGitHubGetIssuePlanPermitsOnlyExactRepositoryAndIssue(t *testing.T) {
 			if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
 				t.Fatal(err)
 			}
-			rig.startSession(t)
+			sessionID := rig.startNamedSession(t)
 			args := `{"issue_number":` + tc.number + `}`
 			contextMap := `{"repository":"` + tc.repository + `"}`
-			pre := socketDo(t, rig.client, http.MethodPost, "/v1/preflight", `{"schema":"kei.preflight-request/v1","tool":"github.get_issue","agent_id":"agent-fixture-0001","arguments":`+args+`,"context":`+contextMap+`}`)
+			pre := socketDoSession(t, rig.client, http.MethodPost, "/v1/preflight", sessionID, `{"schema":"kei.preflight-request/v1","session_id":"`+sessionID+`","tool":"github.get_issue","agent_id":"agent-fixture-0001","arguments":`+args+`,"context":`+contextMap+`}`)
 			if !tc.allow {
 				if pre.code != http.StatusForbidden {
 					t.Fatalf("wrong target preflight=%d %s", pre.code, pre.dump)
@@ -56,8 +56,8 @@ func TestGitHubGetIssuePlanPermitsOnlyExactRepositoryAndIssue(t *testing.T) {
 			if start < 0 || json.Unmarshal([]byte(pre.dump[start:]), &grant) != nil || grant.Handle == "" {
 				t.Fatalf("preflight response=%s", pre.dump)
 			}
-			body, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.get_issue", "preflight_handle": grant.Handle, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-get-issue"})
-			response := socketDo(t, rig.client, http.MethodPost, "/v1/connectors:invoke", string(body))
+			body, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.get_issue", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-get-issue"})
+			response := socketDoSession(t, rig.client, http.MethodPost, "/v1/connectors:invoke", sessionID, string(body))
 			if response.code != http.StatusOK || !strings.Contains(response.dump, `"decision":"allow"`) {
 				t.Fatalf("issue invoke=%d %s", response.code, response.dump)
 			}

@@ -83,7 +83,7 @@ func RunIdentityStatus(args []string, stdout, stderr io.Writer, cfg RuntimeConfi
 func runIdentityLink(args []string, stdout, stderr io.Writer, cfg RuntimeConfig, newClient RuntimeClientFactory) int {
 	flags := flag.NewFlagSet("identity link", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	platform := flags.String("platform", "", "chat platform (discord, slack, or teams)")
+	platform := flags.String("platform", "", "chat platform (discord, slack, teams, whatsapp, or openwebui)")
 	platformUserID := flags.String("platform-user-id", "", "stable user ID from the current platform interaction")
 	tenantID := flags.String("tenant-id", "", "platform tenant ID when the user ID is tenant-scoped")
 	// Leave room for CLI startup and output within Python harnesses' 10-second

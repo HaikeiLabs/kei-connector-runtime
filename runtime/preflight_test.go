@@ -23,7 +23,7 @@ func (f planAuthorizerFunc) AuthorizePlan(b BindingContext, ops []Operation) (st
 }
 
 func testBinding() BindingContext {
-	return BindingContext{InstallationID: "i", BundleVersion: 2, BundleDigest: "sha256:bundle", ArgsDigest: operationInputDigest([]byte(`{"id":"x"}`)), ContextDigest: operationInputDigest([]byte(`{}`)), Subject: "u", SubjectSource: "discord", SubjectExternalID: "ext", AgentID: "a", Tool: "t", Route: ConnectorDispatch{Provider: "github", ConnectorID: "c", RequiredCapabilities: []string{"read", "meta.read"}}}
+	return BindingContext{SessionID: "ks_test", InstallationID: "i", BundleVersion: 2, BundleDigest: "sha256:bundle", ArgsDigest: operationInputDigest([]byte(`{"id":"x"}`)), ContextDigest: operationInputDigest([]byte(`{}`)), Subject: "u", SubjectSource: "discord", SubjectExternalID: "ext", AgentID: "a", Tool: "t", Route: ConnectorDispatch{Provider: "github", ConnectorID: "c", RequiredCapabilities: []string{"read", "meta.read"}}}
 }
 func testInputDigest() string {
 	sum := sha256.Sum256([]byte(`{"id":"x"}`))
@@ -38,6 +38,23 @@ func testPreflightInput(allow bool) PreflightInput {
 	return PreflightInput{Binding: testBinding(), ValidatedArgs: []byte(`{"id":"x"}`), ValidatedContext: []byte(`{}`), Planner: plannerFunc(func([]byte, []byte, BindingContext) ([]Operation, error) { return testPlan(), nil }), Authorizer: planAuthorizerFunc(func(b BindingContext, ops []Operation) (string, int64, bool, error) {
 		return b.BundleDigest, b.BundleVersion, allow, nil
 	})}
+}
+
+func TestSessionSubstitutionCannotConsumePreflight(t *testing.T) {
+	store := NewAuthorizationStore()
+	in := testPreflightInput(true)
+	grant, err := store.Preflight(in, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := cloneBinding(in.Binding)
+	other.SessionID = "ks_other"
+	if err := store.ConsumePlan(grant.Handle, other, testPlan(), in.Authorizer); !errors.Is(err, ErrAuthorizationInvalid) {
+		t.Fatalf("cross-session consume err=%v", err)
+	}
+	if err := store.ConsumePlan(grant.Handle, in.Binding, testPlan(), in.Authorizer); err != nil {
+		t.Fatalf("original session could not consume after substitution denial: %v", err)
+	}
 }
 
 func TestPreflightAndConsumeEachPlanItemOnce(t *testing.T) {

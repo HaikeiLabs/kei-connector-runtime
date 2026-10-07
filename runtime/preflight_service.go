@@ -109,11 +109,11 @@ func (p bundlePlanInterpreter) Plan(argsRaw, contextRaw []byte, _ BindingContext
 	return ops, nil
 }
 
-func (l *LocalPDP) PreflightV2(ctx context.Context, toolName, agentID string, argsRaw, contextRaw []byte, parentSpan string, depth int, ttl time.Duration) (PreflightResult, error) {
+func (l *LocalPDP) PreflightV2(ctx context.Context, sessionID, toolName, agentID string, argsRaw, contextRaw []byte, parentSpan string, depth int, ttl time.Duration) (PreflightResult, error) {
 	if ctx.Err() != nil || l.preflight == nil {
 		return PreflightResult{}, ErrPreflightDenied
 	}
-	binding, tool, args, contextValues, err := l.preflightBinding(toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
+	binding, tool, args, contextValues, err := l.preflightBinding(sessionID, toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
 	if err != nil {
 		return PreflightResult{}, ErrPreflightDenied
 	}
@@ -124,11 +124,11 @@ func (l *LocalPDP) PreflightV2(ctx context.Context, toolName, agentID string, ar
 	return result, nil
 }
 
-func (l *LocalPDP) PlanV2(ctx context.Context, toolName, agentID string, argsRaw, contextRaw []byte, parentSpan string, depth int) (BindingContext, []Operation, error) {
+func (l *LocalPDP) PlanV2(ctx context.Context, sessionID, toolName, agentID string, argsRaw, contextRaw []byte, parentSpan string, depth int) (BindingContext, []Operation, error) {
 	if ctx.Err() != nil || l.preflight == nil {
 		return BindingContext{}, nil, ErrPreflightDenied
 	}
-	binding, tool, args, contextValues, err := l.preflightBinding(toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
+	binding, tool, args, contextValues, err := l.preflightBinding(sessionID, toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
 	if err != nil {
 		return BindingContext{}, nil, ErrPreflightDenied
 	}
@@ -139,40 +139,40 @@ func (l *LocalPDP) PlanV2(ctx context.Context, toolName, agentID string, argsRaw
 	return binding, cloneOperations(ops), nil
 }
 
-func (l *LocalPDP) ValidateV2Plan(ctx context.Context, handle, toolName, agentID string, argsRaw, contextRaw []byte, ops []Operation, parentSpan string, depth int) error {
+func (l *LocalPDP) ValidateV2Plan(ctx context.Context, handle, sessionID, toolName, agentID string, argsRaw, contextRaw []byte, ops []Operation, parentSpan string, depth int) error {
 	if ctx.Err() != nil || l.preflight == nil {
 		return ErrAuthorizationInvalid
 	}
-	binding, _, _, _, err := l.preflightBinding(toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
+	binding, _, _, _, err := l.preflightBinding(sessionID, toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
 	if err != nil {
 		return ErrAuthorizationInvalid
 	}
 	return l.preflight.store.ValidatePlan(handle, binding, ops, l)
 }
 
-func (l *LocalPDP) ConsumeV2(ctx context.Context, handle, toolName, agentID string, argsRaw, contextRaw []byte, op Operation, parentSpan string, depth int) error {
+func (l *LocalPDP) ConsumeV2(ctx context.Context, handle, sessionID, toolName, agentID string, argsRaw, contextRaw []byte, op Operation, parentSpan string, depth int) error {
 	if ctx.Err() != nil || l.preflight == nil {
 		return ErrAuthorizationInvalid
 	}
-	binding, _, _, _, err := l.preflightBinding(toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
+	binding, _, _, _, err := l.preflightBinding(sessionID, toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
 	if err != nil {
 		return ErrAuthorizationInvalid
 	}
 	return l.preflight.store.Consume(handle, binding, op, l)
 }
 
-func (l *LocalPDP) ConsumeV2Plan(ctx context.Context, handle, toolName, agentID string, argsRaw, contextRaw []byte, ops []Operation, parentSpan string, depth int) error {
+func (l *LocalPDP) ConsumeV2Plan(ctx context.Context, handle, sessionID, toolName, agentID string, argsRaw, contextRaw []byte, ops []Operation, parentSpan string, depth int) error {
 	if ctx.Err() != nil || l.preflight == nil {
 		return ErrAuthorizationInvalid
 	}
-	binding, _, _, _, err := l.preflightBinding(toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
+	binding, _, _, _, err := l.preflightBinding(sessionID, toolName, agentID, argsRaw, contextRaw, parentSpan, depth)
 	if err != nil {
 		return ErrAuthorizationInvalid
 	}
 	return l.preflight.store.ConsumePlan(handle, binding, ops, l)
 }
 
-func (l *LocalPDP) DescribeV2Tool(toolName, agentID string) (provider, connectorID string, capabilities []string, subject, trustedAgentID string, tenantID, workspaceID string, ok bool) {
+func (l *LocalPDP) DescribeV2Tool(sessionID, toolName, agentID string) (provider, connectorID string, capabilities []string, subject, trustedAgentID string, tenantID, workspaceID string, ok bool) {
 	e, identity := l.evaluator.Load(), l.identity.Load()
 	if e == nil || identity == nil || identity.WorkspaceID == nil || agentID == "" {
 		return "", "", nil, "", "", "", "", false
@@ -181,7 +181,7 @@ func (l *LocalPDP) DescribeV2Tool(toolName, agentID string) (provider, connector
 	if !found || ctx.Tool.Route.ConnectorBinding == nil {
 		return "", "", nil, "", "", "", "", false
 	}
-	session, found := l.Sessions.Current()
+	session, found := l.Sessions.Get(sessionID)
 	if !found || session.Status != pdp.StatusLinked || session.UserID == "" {
 		return "", "", nil, "", "", "", "", false
 	}
@@ -197,10 +197,10 @@ func (l *LocalPDP) AuthorizePlan(binding BindingContext, ops []Operation) (strin
 	if !ok || !bundleToolMatchesBinding(ctx.Tool, binding) {
 		return "", 0, false, nil
 	}
-	return e.AuthorizeV2Plan(binding.InstallationID, binding.Subject, binding.SubjectSource, binding.SubjectExternalID, binding.AgentID, binding.Tool, ops)
+	return e.AuthorizeV2Plan(binding.SessionID, binding.InstallationID, binding.Subject, binding.SubjectSource, binding.SubjectExternalID, binding.AgentID, binding.Tool, ops)
 }
 
-func (l *LocalPDP) preflightBinding(toolName, agentID string, argsRaw, contextRaw []byte, parentSpan string, depth int) (BindingContext, policybundle.V2Tool, []byte, []byte, error) {
+func (l *LocalPDP) preflightBinding(sessionID, toolName, agentID string, argsRaw, contextRaw []byte, parentSpan string, depth int) (BindingContext, policybundle.V2Tool, []byte, []byte, error) {
 	e, identity := l.evaluator.Load(), l.identity.Load()
 	if e == nil || identity == nil || identity.WorkspaceID == nil {
 		return BindingContext{}, policybundle.V2Tool{}, nil, nil, ErrPreflightDenied
@@ -216,14 +216,17 @@ func (l *LocalPDP) preflightBinding(toolName, agentID string, argsRaw, contextRa
 	if err != nil {
 		return BindingContext{}, policybundle.V2Tool{}, nil, nil, ErrPlanInvalid
 	}
-	subject, ok := l.Sessions.Current()
+	if sessionID == "" {
+		return BindingContext{}, policybundle.V2Tool{}, nil, nil, ErrPreflightDenied
+	}
+	subject, ok := l.Sessions.Get(sessionID)
 	if !ok || subject.Status != pdp.StatusLinked || subject.UserID == "" {
 		return BindingContext{}, policybundle.V2Tool{}, nil, nil, ErrPreflightDenied
 	}
 	connectorID := planContext.Tool.Route.ConnectorBinding.ConnectorID
 	caps := append([]string(nil), planContext.Tool.RequiredCapabilities...)
 	binding := BindingContext{
-		InstallationID: identity.ID, BundleVersion: planContext.BundleVersion, BundleDigest: planContext.BundleDigest,
+		SessionID: sessionID, InstallationID: identity.ID, BundleVersion: planContext.BundleVersion, BundleDigest: planContext.BundleDigest,
 		ArgsDigest: operationInputDigest(args), ContextDigest: operationInputDigest(contextValues),
 		Subject: subject.UserID, SubjectSource: subject.Source, SubjectExternalID: subject.ExternalID,
 		AgentID: agentID, Tool: toolName, Route: ConnectorDispatch{Provider: planContext.Tool.Source, ConnectorID: connectorID, RequiredCapabilities: caps},
