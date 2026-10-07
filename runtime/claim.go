@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"uuid"
 )
 
 const identityClaimStartPath = "/api/identity/claims/start"
@@ -49,6 +50,14 @@ func (c *runtimeClient) StartIdentityClaim(ctx context.Context, token string, in
 			return nil, errors.New("whatsapp identity claim requires valid E.164 phone number")
 		}
 	}
+	if input.Platform == "openwebui" {
+		if input.TenantID != "" {
+			return nil, errors.New("openwebui identity claim requires empty tenant")
+		}
+		if _, err := uuid.Parse(input.PlatformUserID); err != nil {
+			return nil, errors.New("openwebui identity claim requires valid UUID")
+		}
+	}
 	body, err := json.Marshal(input)
 	if err != nil {
 		return nil, errors.New("encode identity claim request failed")
@@ -80,7 +89,7 @@ func (c *runtimeClient) StartIdentityClaim(ctx context.Context, token string, in
 
 func supportedClaimPlatform(platform string) bool {
 	switch platform {
-	case "discord", "slack", "teams", "whatsapp":
+	case "discord", "slack", "teams", "whatsapp", "openwebui":
 		return true
 	default:
 		return false
