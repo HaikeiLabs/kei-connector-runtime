@@ -6,9 +6,14 @@ path depends on the operating system: `/run/kei-proxy/runtime.sock` on Linux,
 Override with `KEI_RUNTIME_SOCKET_PATH`. The runtime creates the socket with
 mode `0600`, refuses to replace an active socket or a regular file, replaces a
 stale socket left behind by a crash, and removes the socket on graceful
-shutdown. Requests over the socket still go through bearer authentication and
-model authorization. The socket changes how the harness reaches the proxy, not
-what the harness is allowed to do.
+shutdown. Requests over the socket use the runtime bearer token except for
+`POST /v1/authorize`: that policy-only route trusts the mode-0600 socket's
+same-UID boundary so harness adapters need not inherit `KEI_RUNTIME_TOKEN`.
+Session management and model routes remain token-authenticated. The TCP
+listener does not expose the local PDP routes. Unauthenticated authorize
+responses omit enrollment claim URLs. Runtimes built before this change still
+require the bearer token on `/v1/authorize` and will reject an unauthenticated
+adapter request.
 
 There are three reasons for this design.
 
@@ -56,9 +61,13 @@ This daemon-socket model brings three benefits:
 The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/models`,
 `POST /v1/chat/completions`, `POST /v1/authorize`, and
 `PUT/DELETE/GET /v1/session`. Governed tool authorization — the PEP — uses
-the local PDP on the socket (PRs #78, #79, #80 merged). The legacy
-`kei-proxy authorize` CLI subprocess is deprecated; it delegates PDP to the
-remote catalog and is retained for harnesses that have not yet migrated.
+the local PDP on the socket (PRs #78, #79, #80 merged). `POST /v1/authorize`
+is the only route that does not require a bearer token on the Unix socket;
+mode `0600` limits access to processes running as the proxy's OS user.
+Unauthenticated responses never include enrollment claim URLs. This exception
+is not enabled on TCP. The legacy `kei-proxy authorize` CLI
+subprocess is deprecated; it delegates PDP to the remote catalog and is
+retained for harnesses that have not yet migrated.
 
 Both the PEP and the PDP run in the same daemon process. The PDP evaluates
 policy locally from an unsigned canonical JSON bundle (ADR-026), and the PEP
@@ -126,9 +135,11 @@ a revocation and daemon exit zero and drop that session's credentials. A provide
 re-fetch and one retry, and after that the call is denied. The daemon sets
 `RLIMIT_CORE=0` so it never core-dumps them.
 
-**No socket route returns a credential.** The harness holds the same runtime
-token as any socket client, so anything on the socket reaches the harness.
-Credentialed work runs inside the daemon instead, through the two routes below.
+**No socket route returns a credential.** Any process running as the proxy's
+OS user can reach the owner-only socket. Only `POST /v1/authorize` uses that
+same-UID boundary without a bearer token; session, credential, model, and
+connector routes remain authenticated or governed. Credentialed work runs
+inside the daemon instead, through the two routes below.
 
 ### `POST /v1/connectors:invoke` (`KEI_CREDENTIAL_RELEASE=identity`)
 
@@ -292,9 +303,11 @@ req, err := http.NewRequestWithContext(ctx, http.MethodGet,
     "http://localhost/readyz", nil)
 ```
 
-Add the runtime token using the same bearer-auth mechanism as the TCP client.
-Do not put the token in the URL or log it. A socket connection alone does not
-replace runtime authentication or policy authorization.
+For model, session, and other authenticated routes, add the runtime token using
+the same bearer-auth mechanism as the TCP client. Do not put the token in the
+URL or log it. Do not pass the runtime token to a harness solely for
+`POST /v1/authorize`; the owner-only socket is the caller boundary for that
+policy-only route.
 
 ### Rollout checklist
 
@@ -306,7 +319,8 @@ replace runtime authentication or policy authorization.
    containers and run them with the same UID.
 3. Update the harness client to dial `KEI_RUNTIME_SOCKET_PATH` (default
    `/run/kei-proxy/runtime.sock`) and confirm `GET /readyz` succeeds through
-   that client. Ensure the request still includes the runtime bearer token.
+   that client. Keep bearer authentication for model and session routes; the
+   local `POST /v1/authorize` route is the sole socket-only exception.
 4. Keep Docker/OpenWebUI clients on `http://connector-runtime:8085/v1` during
    rollout. Once a deployment no longer needs TCP, bind it to loopback with
    `KEI_PROXY_LISTEN_ADDR=127.0.0.1:8085` and avoid publishing the port.

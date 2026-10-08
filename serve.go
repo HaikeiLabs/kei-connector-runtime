@@ -240,10 +240,12 @@ func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invok
 }
 
 // newServeHandlers builds the TCP handler and the Unix socket handler (the
-// TCP routes plus the local PDP's authorize and session routes).
+// TCP routes plus the local PDP's authorize and session routes). The owner-only
+// Unix socket is the caller boundary for local authorize requests; all session
+// routes still require the runtime token. The TCP handler exposes no PDP route.
 func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Handler) {
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
-	return base, local.NewHandler(base, base.runtimeConfigError, base.authorized)
+	return base, local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
 }
 
 const (
