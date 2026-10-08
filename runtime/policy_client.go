@@ -22,7 +22,10 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-const policyBundleAccept = policybundle.ContentTypeV2 + ", " + policybundle.ContentType
+const (
+	policyBundleAcceptV1 = policybundle.ContentType
+	policyBundleAcceptV2 = policybundle.ContentTypeV2 + ", " + policybundle.ContentType
+)
 
 var (
 	ErrPolicyInstallationRevoked = errors.New("runtime installation is revoked or inactive")
@@ -103,13 +106,21 @@ func (c *policyControlClient) request(ctx context.Context, method, path string, 
 }
 
 func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
+	return c.fetchBundle(ctx, etag, false)
+}
+
+func (c *policyControlClient) fetchBundle(ctx context.Context, etag string, v2Ready bool) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
 	req, e := c.newRequest(ctx, http.MethodGet, "/api/v1/runtime/policy-bundles/current", nil)
 	if e != nil {
 		err = e
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", policyBundleAccept)
+	accept := policyBundleAcceptV1
+	if v2Ready {
+		accept = policyBundleAcceptV2
+	}
+	req.Header.Set("Accept", accept)
 	req.Header.Set("Accept-Encoding", "identity")
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
@@ -263,6 +274,16 @@ func (c *policyControlClient) ResolveSubject(ctx context.Context, req SubjectRes
 // SyncPolicyBundle fetches an unsigned canonical bundle only over a validated
 // HTTPS control-plane channel authenticated by the installation runtime token.
 func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration) error {
+	return syncPolicyBundle(ctx, cfg, identity, timeout, false)
+}
+
+// SyncPolicyBundleV2Ready requests v2 for an installation whose running serve daemon
+// supports v2 tool authorization. Other sync paths must use SyncPolicyBundle.
+func SyncPolicyBundleV2Ready(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration) error {
+	return syncPolicyBundle(ctx, cfg, identity, timeout, true)
+}
+
+func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration, v2Ready bool) error {
 	if identity == nil || identity.WorkspaceID == nil {
 		return errors.New("runtime identity has no workspace audience")
 	}
@@ -275,7 +296,7 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 	if active, _, checkErr := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); checkErr == nil && active != nil {
 		etag = active.Digest
 	}
-	body, bundleETag, contentType, headerVersion, unchanged, err := client.FetchBundle(ctx, etag)
+	body, bundleETag, contentType, headerVersion, unchanged, err := client.fetchBundle(ctx, etag, v2Ready)
 	if errors.Is(err, ErrPolicyBundleNotReady) {
 		return store.RefreshFailed(time.Now().UTC())
 	}

@@ -33,6 +33,8 @@ type Config struct {
 	ABACSecret                    string
 	Env                           string
 	ToolManifestPath              string
+	// PolicyBundleV2Ready is the explicit KEI_POLICY_BUNDLE_V2=1 readiness opt-in.
+	PolicyBundleV2Ready bool
 	// CredentialRelease is KEI_CREDENTIAL_RELEASE: "legacy" (default) or
 	// "identity", where the serve daemon holds session credentials from I11.
 	CredentialRelease    string
@@ -101,6 +103,7 @@ func configFromEnv() Config {
 		ABACSecret:                    strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 		Env:                           os.Getenv("ENV"),
 		ToolManifestPath:              os.Getenv("KEI_TOOL_MANIFEST"),
+		PolicyBundleV2Ready:           os.Getenv("KEI_POLICY_BUNDLE_V2") == "1",
 		CredentialRelease:             envOr("KEI_CREDENTIAL_RELEASE", CredentialReleaseLegacy),
 		CredentialReleaseURL:          os.Getenv("KEI_CREDENTIAL_RELEASE_URL"),
 		SessionIdleTTL:                sessionIdleTTLFromEnv(),
