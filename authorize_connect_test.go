@@ -116,6 +116,67 @@ func TestAuthorizeResolvesSubjectAtCatalogNotControlPlane(t *testing.T) {
 	}
 }
 
+// A runtime deployed without ABAC_URL (the Discord chart) must resolve
+// subjects at the control plane, not the localhost ABAC default.
+func TestAuthorizeResolvesSubjectAtControlPlaneWithoutABACURL(t *testing.T) {
+	stateDir := t.TempDir()
+	mustActivateTestBundle(t, stateDir, time.Now().UTC())
+	workspace := "ws-fixture-0001"
+	subjectCalls := 0
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runtime/whoami":
+			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace, Platform: "discord", Status: "active", BindingStatus: "verified"})
+		case "/api/v1/runtime:heartbeat":
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/v1/runtime/subject-attributes:resolve":
+			subjectCalls++
+			if got := r.Header.Get("Authorization"); got != "Bearer kh_live_runtime_test_token_1234567890" {
+				t.Errorf("control-plane authorization header missing installation token")
+			}
+			_ = json.NewEncoder(w).Encode(policybundle.Subject{Status: "linked_approved", UserID: "user-member-0001", EffectiveGroups: []string{"members"}, OrgRoles: []string{"member"}, MaxAgeSeconds: 60})
+		default:
+			t.Errorf("unexpected control-plane request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer controlPlane.Close()
+
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
+	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", controlPlane.URL)
+	t.Setenv("ABAC_URL", "")
+	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
+	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
+	var code int
+	stdout := captureStdout(func() {
+		code = runAuthorize([]string{"--tool", "web_search", "--provider-user", "discord-member-0001"})
+	})
+	if code != 0 {
+		t.Fatalf("local web_search denied: exit=%d stdout=%s", code, stdout)
+	}
+	if subjectCalls != 1 {
+		t.Fatalf("control-plane subject resolutions=%d; want 1", subjectCalls)
+	}
+}
+
+func TestConfigSubjectResolutionURL(t *testing.T) {
+	const controlPlane = "https://app.example.test"
+	for _, tc := range []struct {
+		name, abacURL, want string
+	}{
+		{"unset", "", controlPlane},
+		{"localhost default", defaultABACURL, controlPlane},
+		{"explicit catalog", "http://kei-policy-catalog.kei.svc.cluster.local", "http://kei-policy-catalog.kei.svc.cluster.local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Config{ABACURL: tc.abacURL, RuntimeControlPlaneURL: controlPlane}.SubjectResolutionURL()
+			if got != tc.want {
+				t.Fatalf("SubjectResolutionURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunAuthorizeAcceptsInvokingSubjectFlag(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
