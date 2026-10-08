@@ -13,6 +13,9 @@ import (
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
+// defaultABACURL is the legacy local catalog address used when ABAC_URL is unset.
+const defaultABACURL = "http://localhost:8080"
+
 type Config struct {
 	ABACURL                       string
 	RuntimeControlPlaneURL        string
@@ -82,7 +85,7 @@ func sessionIdleTTLFromEnv() time.Duration {
 
 func configFromEnv() Config {
 	return Config{
-		ABACURL:                       envOr("ABAC_URL", "http://localhost:8080"),
+		ABACURL:                       envOr("ABAC_URL", defaultABACURL),
 		RuntimeControlPlaneURL:        os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
 		RuntimeToken:                  os.Getenv("KEI_RUNTIME_TOKEN"),
 		RuntimeStateDir:               envOr("KEI_RUNTIME_STATE_DIR", statedir.DefaultPathOS()),
@@ -113,6 +116,17 @@ func (c Config) FlushURL() string           { return c.ABACURL }
 func (c Config) FlushSecret() string        { return c.ABACSecret }
 func (c Config) SyncKeyID() string          { return c.CredentialSyncKeyID }
 func (c Config) SyncPrivateKey() string     { return c.CredentialSyncPrivateKey }
+
+// SubjectResolutionURL is where runtime subject lookups are sent: a catalog
+// configured through ABAC_URL, otherwise the runtime control plane, which
+// serves the same route. The localhost ABAC default is never used for this,
+// because production rejects it and every runtime-mode lookup would deny.
+func (c Config) SubjectResolutionURL() string {
+	if c.ABACURL == "" || c.ABACURL == defaultABACURL {
+		return c.RuntimeControlPlaneURL
+	}
+	return c.ABACURL
+}
 
 // IsRuntime identifies the customer-hosted installation path.
 func (c Config) IsRuntime() bool {

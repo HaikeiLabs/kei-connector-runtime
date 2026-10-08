@@ -165,7 +165,7 @@ func runAuthorize(args []string) int {
 	subjectProviderID := cfg.ProviderUserID
 	var subject *policybundle.Subject
 	if *user != "" || subjectProviderID != "" {
-		control := keiruntime.NewPolicyControlClient(cfg.ABACURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
+		control := keiruntime.NewPolicyControlClient(cfg.SubjectResolutionURL(), cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
 		req := keiruntime.SubjectResolveRequest{}
 		if *user != "" {
 			req.UserID = *user
