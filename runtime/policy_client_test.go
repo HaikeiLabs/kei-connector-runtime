@@ -55,7 +55,7 @@ func unsignedV2ExampleBundle(t *testing.T, now time.Time) []byte {
 	return bundle
 }
 
-func TestSyncPolicyBundleFallsBackToV1WithOrderedV2FirstAccept(t *testing.T) {
+func TestSyncPolicyBundleRequestsV1ByDefault(t *testing.T) {
 	now := time.Now().UTC()
 	raw := unsignedExampleBundle(t, now)
 	digest := fmt.Sprintf(`"sha256:%x"`, sha256.Sum256(raw))
@@ -67,7 +67,7 @@ func TestSyncPolicyBundleFallsBackToV1WithOrderedV2FirstAccept(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/v1/runtime/policy-bundles/current":
-			if r.Header.Get("Accept") != policyBundleAccept {
+			if r.Header.Get("Accept") != policyBundleAcceptV1 {
 				t.Errorf("Accept=%q", r.Header.Get("Accept"))
 			}
 			w.Header().Set("Content-Type", policybundle.ContentType)
@@ -109,8 +109,8 @@ func TestSyncPolicyBundleAcceptsV2AndValidatesItsNotModifiedETagAndVersion(t *te
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if got := r.Header.Get("Accept"); got != policyBundleAccept {
-			t.Errorf("Accept=%q want %q", got, policyBundleAccept)
+		if got := r.Header.Get("Accept"); got != policyBundleAcceptV2 {
+			t.Errorf("Accept=%q want %q", got, policyBundleAcceptV2)
 		}
 		if calls > 1 {
 			if got := r.Header.Get("If-None-Match"); got != etag {
@@ -131,7 +131,7 @@ func TestSyncPolicyBundleAcceptsV2AndValidatesItsNotModifiedETagAndVersion(t *te
 	dir := t.TempDir()
 	cfg := testPolicyConfig{token: "kh_live_runtime_test_token_1234567890", controlPlaneURL: server.URL, policyStateDir: dir}
 	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
-	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
+	if err := SyncPolicyBundleV2Ready(context.Background(), cfg, identity, time.Second); err != nil {
 		t.Fatalf("sync v2 bundle: %v", err)
 	}
 	store, err := policybundle.OpenStore(dir)
@@ -142,7 +142,7 @@ func TestSyncPolicyBundleAcceptsV2AndValidatesItsNotModifiedETagAndVersion(t *te
 	if err != nil || state != policybundle.Active || active == nil || active.Payload.Schema != "kei.policy-bundle/v2" || active.Payload.BundleVersion != 43 {
 		t.Fatalf("v2 bundle=%v state=%s err=%v", active, state, err)
 	}
-	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
+	if err := SyncPolicyBundleV2Ready(context.Background(), cfg, identity, time.Second); err != nil {
 		t.Fatalf("sync unchanged v2 bundle: %v", err)
 	}
 	if calls != 2 {
@@ -159,8 +159,8 @@ func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 		calls++
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Kei-Policy-Bundle-Version", "42")
-		if r.Header.Get("Accept") != policyBundleAccept {
-			t.Errorf("Accept=%q want %q", r.Header.Get("Accept"), policyBundleAccept)
+		if r.Header.Get("Accept") != policyBundleAcceptV1 {
+			t.Errorf("Accept=%q want %q", r.Header.Get("Accept"), policyBundleAcceptV1)
 		}
 		if calls > 1 {
 			if r.Header.Get("If-None-Match") != etag {
