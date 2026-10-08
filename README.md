@@ -45,7 +45,11 @@ identity and grant APIs remain separate session-setup operations.
 **Status.** Local bundle evaluation is implemented on `main` (PRs #78, #79,
 #80 merged). The `serve` daemon's Unix socket serves `POST /v1/authorize`
 for local PDP evaluation and `PUT/DELETE/GET /v1/session` for session
-identity. The legacy `kei-proxy authorize` CLI subprocess is deprecated and
+identity. On the owner-only (0600) Unix socket, only `POST /v1/authorize`
+trusts the same-UID boundary instead of requiring the runtime bearer token;
+TCP does not expose this local PDP route and session/model routes still
+require the token. Unauthenticated local decisions omit enrollment claim URLs.
+The legacy `kei-proxy authorize` CLI subprocess is deprecated and
 continues to delegate to the remote catalog; it will be removed once all
 harnesses have migrated to the socket path. The bundle contract is defined by
 ADR-026 (G0 decisions accepted in Kei #681, #682, #693): unsigned canonical

@@ -108,6 +108,21 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 	}
 }
 
+func TestGenericLocalPDPHandlerStillRequiresRuntimeTokenForAuthorize(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: "https://kei.example",
+	}, nil)
+	next := http.NotFoundHandler()
+	handler := l.NewHandler(next, func() error { return nil }, func(*http.Request) bool { return false })
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"pi.read"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated authorize on generic handler status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestSocketSessionGetReturns401WithoutRuntimeToken(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{
 		RuntimeToken:           policyTestToken,

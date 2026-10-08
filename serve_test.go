@@ -103,6 +103,25 @@ func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated GET /v1/models status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
+
+	authorizeReq, err := http.NewRequest(http.MethodPost, "http://localhost/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"pi.read","resource":"/tmp/file.txt"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizeReq.Header.Set("Content-Type", "application/json")
+	resp, err = client.Do(authorizeReq)
+	if err != nil {
+		t.Fatalf("unauthenticated POST /v1/authorize over Unix socket: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read local authorize response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unauthenticated POST /v1/authorize status = %d, want %d: %s", resp.StatusCode, http.StatusOK, body)
+	}
+
 	transport.CloseIdleConnections()
 
 	cancel()
@@ -127,6 +146,49 @@ func shortSocketTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+func TestSocketAuthorizeUsesOwnerOnlySocketWithoutRuntimeToken(t *testing.T) {
+	cfg := Config{
+		RuntimeToken:           "kh_live_12345678901234567890",
+		RuntimeControlPlaneURL: "http://127.0.0.1:1",
+		RuntimeStateDir:        t.TempDir(),
+	}
+	local, err := newServeLocalPDP(cfg, serveSeams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	tcpHandler, socketHandler := newServeHandlers(cfg, local)
+	body := `{"schema":"kei.authorize-request/v1","tool":"pi.read","resource":"/tmp/file.txt"}`
+
+	socketResponse := httptest.NewRecorder()
+	socketHandler.ServeHTTP(socketResponse, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+	if socketResponse.Code != http.StatusOK {
+		t.Fatalf("unauthenticated local authorize status = %d, want %d: %s", socketResponse.Code, http.StatusOK, socketResponse.Body.String())
+	}
+	var decision struct {
+		Schema   string `json:"schema"`
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(socketResponse.Body.Bytes(), &decision); err != nil {
+		t.Fatalf("decode local authorize response: %v", err)
+	}
+	if decision.Schema != "kei.authorize-response/v1" || decision.Decision != "deny" {
+		t.Fatalf("cold PDP response = %#v, want versioned explicit deny", decision)
+	}
+
+	tcpResponse := httptest.NewRecorder()
+	tcpHandler.ServeHTTP(tcpResponse, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+	if tcpResponse.Code != http.StatusNotFound {
+		t.Fatalf("TCP authorize route status = %d, want %d", tcpResponse.Code, http.StatusNotFound)
+	}
+
+	sessionResponse := httptest.NewRecorder()
+	socketHandler.ServeHTTP(sessionResponse, httptest.NewRequest(http.MethodGet, "/v1/session", nil))
+	if sessionResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated socket session status = %d, want %d", sessionResponse.Code, http.StatusUnauthorized)
+	}
 }
 
 func TestRuntimeSocketPathDefaultAndOverride(t *testing.T) {

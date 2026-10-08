@@ -332,6 +332,17 @@ func (l *LocalPDP) AfterSync(err error) {
 }
 
 func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, checkAuth func(*http.Request) bool) http.Handler {
+	return l.newHandler(next, checkConfig, checkAuth, false)
+}
+
+// NewSocketHandler is for the owner-only Unix socket listener only. It allows
+// unauthenticated POST /v1/authorize requests, but never exposes enrollment
+// claim URLs to callers that did not authenticate with the runtime token.
+func (l *LocalPDP) NewSocketHandler(next http.Handler, checkConfig func() error, checkAuth func(*http.Request) bool) http.Handler {
+	return l.newHandler(next, checkConfig, checkAuth, true)
+}
+
+func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, checkAuth func(*http.Request) bool, allowUnauthenticatedAuthorize bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
@@ -348,7 +359,9 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 			writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
 			return
 		}
-		if !checkAuth(r) {
+		authenticated := checkAuth(r)
+		unauthenticatedAuthorize := allowUnauthenticatedAuthorize && r.Method == http.MethodPost && r.URL.Path == "/v1/authorize"
+		if !authenticated && !unauthenticatedAuthorize {
 			writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
 			return
 		}
@@ -357,7 +370,7 @@ func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, check
 		}
 		switch {
 		case r.URL.Path == "/v1/authorize":
-			l.handleAuthorize(w, r)
+			l.handleAuthorize(w, r, authenticated)
 		case r.URL.Path == "/v1/preflight":
 			l.handlePreflight(w, r)
 		case r.URL.Path == "/v1/consume":
@@ -632,7 +645,7 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, includeEnrollment bool) {
 	var req socketAuthorizeRequest
 	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != authorizeRequestSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+authorizeRequestSchema+" object with no unknown fields")
@@ -657,19 +670,31 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	resp := socketAuthorizeResponse{Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: d.ReasonCode, DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID, BundleState: d.BundleState, Enrollment: d.Enrollment}
-	if d.Allow {
-		resp.Decision = policybundle.DecisionPermit
-	}
-	if d.BundleVersion > 0 {
-		resp.PolicyBundleVersion, resp.PolicyBundleDigest, resp.PolicyRevision = &d.BundleVersion, d.BundleDigest, &d.PolicyRevision
-	}
+	resp := socketAuthorizeResponseForDecision(d, includeEnrollment)
 	if l.emit != nil {
 		data := l.decisionEventJSON(req, sessionID, d)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {
+	resp := socketAuthorizeResponse{
+		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: d.ReasonCode,
+		DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
+		BundleState: d.BundleState,
+	}
+	if d.Allow {
+		resp.Decision = policybundle.DecisionPermit
+	}
+	if includeEnrollment {
+		resp.Enrollment = d.Enrollment
+	}
+	if d.BundleVersion > 0 {
+		resp.PolicyBundleVersion, resp.PolicyBundleDigest, resp.PolicyRevision = &d.BundleVersion, d.BundleDigest, &d.PolicyRevision
+	}
+	return resp
 }
 
 func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision) json.RawMessage {
