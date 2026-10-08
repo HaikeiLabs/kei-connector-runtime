@@ -49,9 +49,10 @@ identity. On the owner-only (0600) Unix socket, only `POST /v1/authorize`
 trusts the same-UID boundary instead of requiring the runtime bearer token;
 TCP does not expose this local PDP route and session/model routes still
 require the token. Unauthenticated local decisions omit enrollment claim URLs.
-The legacy `kei-proxy authorize` CLI subprocess is deprecated and
-continues to delegate to the remote catalog; it will be removed once all
-harnesses have migrated to the socket path. The bundle contract is defined by
+The `kei-proxy authorize` CLI subprocess is deprecated; it evaluates the
+persisted local bundle and resolves the subject online only when the tool or a
+reached policy needs it (see `docs/policy-bundles.md`). It will be removed
+once all harnesses have migrated to the socket path. The bundle contract is defined by
 ADR-026 (G0 decisions accepted in Kei #681, #682, #693): unsigned canonical
 JSON over authenticated HTTPS; no bundle signing, key distribution, or
 encryption. The session subject is held in runtime memory; memberships, roles,

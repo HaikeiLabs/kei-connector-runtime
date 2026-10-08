@@ -145,7 +145,13 @@ func AuthorizeTool(p AuthorizeParams) (AuthorizeOutput, error) {
 		if p.PolicySubject != nil && p.PolicySubject.UserID != "" {
 			subjectID = p.PolicySubject.UserID
 		}
-		decision := p.PolicyBundle.Evaluate(policybundle.Call{Tool: p.Tool, Action: p.Action, Resource: resource, AgentID: p.AgentID, UserID: subjectID}, p.PolicySubject)
+		call := policybundle.Call{Tool: p.Tool, Action: p.Action, Resource: resource, AgentID: p.AgentID, UserID: subjectID}
+		if p.PolicySubject == nil && !AuthorizeNeedsSubject(p.PolicyBundle, p.Registry, p.Tool, p.Action, p.Resource, p.AgentID) {
+			// No credential, connector or subject-scoped policy: decide
+			// without a subject rather than denying for its absence.
+			call.UserID = ""
+		}
+		decision := p.PolicyBundle.Evaluate(call, p.PolicySubject)
 		localDecision = &decision
 		resp = &AuthorizeResponse{Decision: decision.Outcome, Reason: decision.Reason, PolicyID: decision.PolicyID, ReasonCode: decision.ReasonCode}
 		if p.PolicySubject != nil && len(p.PolicySubject.Enrollment) > 0 {
