@@ -430,7 +430,7 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		return
 	}
 
-	invokingSubject := ""
+	var invokingSubject pdp.Subject
 	if h.sessions != nil {
 		id := session.FromRequest(r)
 		sub, ok := h.sessions.Get(id)
@@ -439,7 +439,7 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 			return
 		}
 		if ok {
-			invokingSubject = sub.UserID
+			invokingSubject = sub
 		}
 	}
 
@@ -514,7 +514,25 @@ func rewriteProviderModel(body []byte, defaultModel string) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile, invokingSubject string) error {
+// modelSubjectRequest picks the subject identity the catalog accepts for the
+// session's source. A cli session resolves by its Kei user_id; a chat session
+// (openwebui, discord, ...) resolves by its platform_user_id, which the catalog
+// scopes to the installation's own platform, org and workspace. The catalog
+// rejects user_id from non-cli installations, so sending it for a chat session
+// would fail closed with every model call denied.
+func modelSubjectRequest(sub pdp.Subject, providerUserID, tenantID string) (keiruntime.SubjectResolveRequest, bool) {
+	switch {
+	case sub.UserID != "" && sub.Source != "" && sub.Source != "cli" && sub.ExternalID != "":
+		return keiruntime.SubjectResolveRequest{PlatformUserID: sub.ExternalID, TenantID: tenantID}, true
+	case sub.UserID != "":
+		return keiruntime.SubjectResolveRequest{UserID: sub.UserID}, true
+	case providerUserID != "":
+		return keiruntime.SubjectResolveRequest{PlatformUserID: providerUserID, TenantID: tenantID}, true
+	}
+	return keiruntime.SubjectResolveRequest{}, false
+}
+
+func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile, invokingSubject pdp.Subject) error {
 	identity, err := NewRuntimeClient(h.cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, h.cfg.RuntimeToken)
 	if err != nil {
 		return fmt.Errorf("resolve runtime identity for local policy: %w", err)
@@ -534,15 +552,8 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 		return errors.New("v2 model authorization is unsupported; refusing the legacy online subject path")
 	}
 	var attrs *policybundle.Subject
-	if invokingSubject != "" || h.cfg.ProviderUserID != "" {
+	if req, ok := modelSubjectRequest(invokingSubject, h.cfg.ProviderUserID, os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")); ok {
 		client := keiruntime.NewPolicyControlClient(h.cfg.SubjectResolutionURL(), h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
-		req := keiruntime.SubjectResolveRequest{}
-		if invokingSubject != "" {
-			req.UserID = invokingSubject
-		} else {
-			req.PlatformUserID = h.cfg.ProviderUserID
-			req.TenantID = os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")
-		}
 		resolved, e := client.ResolveSubject(ctx, req)
 		if errors.Is(e, ErrPolicyInstallationRevoked) {
 			_ = store.Revoke(time.Now().UTC())
