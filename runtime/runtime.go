@@ -18,8 +18,6 @@ type CollectorConfig interface {
 	IsRuntime() bool
 	Token() string
 	ControlPlaneURL() string
-	FlushURL() string
-	FlushSecret() string
 }
 
 // PolicyConfig is the subset of the root Config that the runtime policy
@@ -45,14 +43,13 @@ type Identity struct {
 // IdentityFunc is a function that resolves the runtime identity.
 type IdentityFunc func() (*Identity, error)
 
-// RuntimeConfig is the subset of the root Config that identity-link and org
-// CLI handlers need, abstracted so runtime/ never imports the root package.
+// RuntimeConfig is the subset of the root Config that identity-link CLI
+// handlers need, abstracted so runtime/ never imports the root package.
 type RuntimeConfig interface {
 	IsRuntime() bool
 	Validate() error
 	Token() string
 	ControlPlaneURL() string
-	FlushURL() string
 }
 
 // RuntimeClientFactory creates a RuntimeClient from a base URL and timeout.

@@ -75,8 +75,6 @@ type Response struct {
 type Env struct {
 	RuntimeToken           string
 	RuntimeControlPlaneURL string
-	ABACURL                string
-	ABACSecret             string
 	// ProviderUserID is the default --provider-user ($KEI_PROXY_PROVIDER_USER).
 	ProviderUserID string
 	// Stdin is read for --input -.
@@ -107,20 +105,16 @@ type Env struct {
 	Now               func() time.Time
 }
 
-// isRuntime reports customer-runtime mode, which the runtime token decides.
-func (e Env) isRuntime() bool { return e.RuntimeToken != "" }
-
 // Client calls the control plane's governed connector endpoint.
 type Client struct {
 	baseURL string
-	secret  string
 	client  *http.Client
 }
 
-// NewClient returns a Client for baseURL. secret is sent as X-KEI-API-Key when
-// set; customer runtimes never have one.
-func NewClient(baseURL, secret string, timeout time.Duration) *Client {
-	return &Client{baseURL: baseURL, secret: secret, client: &http.Client{Timeout: timeout}}
+// NewClient returns a Client for the control-plane baseURL. The request
+// authenticates itself with the runtime token it carries.
+func NewClient(baseURL string, timeout time.Duration) *Client {
+	return &Client{baseURL: baseURL, client: &http.Client{Timeout: timeout}}
 }
 
 func (c *Client) withTransport(t http.RoundTripper) *Client {
@@ -145,9 +139,6 @@ func (c *Client) Invoke(ctx context.Context, req Request) (*Response, error) {
 		return nil, fmt.Errorf("build connector invoke request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.secret != "" {
-		httpReq.Header.Set("X-KEI-API-Key", c.secret)
-	}
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
@@ -188,13 +179,12 @@ type connectorInvokeArgs struct {
 }
 
 // connectorInvokePlan is the resolved execution plan for `connector invoke`:
-// the request plus the ABAC endpoint, credential, and timeout the caller
-// should use, after applying CLI overrides and the runtime relay rules.
+// the request plus the control-plane endpoint and timeout the caller should
+// use, after applying CLI overrides.
 type connectorInvokePlan struct {
 	req             Request
 	session         string
-	abacURL         string
-	abacSecret      string
+	controlPlaneURL string
 	timeout         time.Duration
 	input           string
 	context         string
@@ -221,8 +211,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 	user := fs.String("user", "", "alias for --user-id")
 	agentID := fs.String("agent-id", envOr("KEI_PROXY_AGENT_ID", ""), "agent id making the call")
 	framework := fs.String("framework", envOr("KEI_PROXY_FRAMEWORK", ""), "agent framework (e.g. claude, codex)")
-	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
-	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
+	timeout := fs.Int("timeout", 30, "control-plane request timeout in seconds")
 	inputArg := fs.String("input", "", "capability input: a JSON object, @<file>, or - for stdin (default {})")
 	providerUser := fs.String("provider-user", "", "chat-platform identity, e.g. a WhatsApp E.164 number (default $KEI_PROXY_PROVIDER_USER)")
 	toolName := fs.String("tool", "", "registered v2 tool name; preflight is performed by the daemon")
@@ -241,9 +230,6 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		*userID = *user
 	}
 	cfg := env
-	if *abacURL != "" {
-		cfg.ABACURL = *abacURL
-	}
 
 	if *toolName == "" && (*connectorID == "" || *capability == "" || *action == "" || *resource == "") {
 		return connectorInvokePlan{}, fmt.Errorf("--connector, --capability, --action, and --resource are required without --tool")
@@ -271,14 +257,6 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 		*providerUser = env.ProviderUserID
 	}
 
-	// Customer runtimes relay the self-authenticating request through the
-	// public control-plane URL and never receive ABAC_API_SECRET.
-	abacURLValue, secret := cfg.ABACURL, cfg.ABACSecret
-	if cfg.isRuntime() {
-		abacURLValue = cfg.RuntimeControlPlaneURL
-		secret = ""
-	}
-
 	return connectorInvokePlan{
 		req: Request{
 			HarnessToken: cfg.RuntimeToken,
@@ -294,12 +272,11 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 			Framework:      *framework,
 			ProviderUserID: *providerUser,
 		},
-		abacURL:    abacURLValue,
-		abacSecret: secret,
-		timeout:    time.Duration(*timeout) * time.Second,
-		input:      *inputArg,
-		context:    *contextArg,
-		toolName:   *toolName, preflightHandle: *preflightHandle, parentSpan: *parentSpan, delegationDepth: *delegationDepth,
+		controlPlaneURL: cfg.RuntimeControlPlaneURL,
+		timeout:         time.Duration(*timeout) * time.Second,
+		input:           *inputArg,
+		context:         *contextArg,
+		toolName:        *toolName, preflightHandle: *preflightHandle, parentSpan: *parentSpan, delegationDepth: *delegationDepth,
 		explicitSubject: explicitSubject,
 		session:         *sessionID,
 	}, nil
@@ -381,7 +358,7 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 	out.Audit = &outputAudit{InputDigest: plan.req.InputDigest}
 
 	catalogCtx, cancelCatalog := context.WithTimeout(ctx, catalogTimeout)
-	resp, err := NewClient(plan.abacURL, plan.abacSecret, plan.timeout).withTransport(env.CatalogTransport).Invoke(catalogCtx, plan.req)
+	resp, err := NewClient(plan.controlPlaneURL, plan.timeout).withTransport(env.CatalogTransport).Invoke(catalogCtx, plan.req)
 	cancelCatalog()
 	if err != nil {
 		fmt.Fprintln(stderr, "Error: connector decision unavailable (fail closed)")
@@ -392,7 +369,7 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		return finish(deny(catalogReasonCode(resp), resp.Reason))
 	}
 
-	exec, d := env.execute(ctx, plan.req, canonical, resp, plan.abacURL)
+	exec, d := env.execute(ctx, plan.req, canonical, resp, plan.controlPlaneURL)
 	out.Provider = string(exec.provider)
 	if d != nil {
 		return finish(d)

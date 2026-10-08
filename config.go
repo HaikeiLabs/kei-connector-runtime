@@ -13,11 +13,7 @@ import (
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
-// defaultABACURL is the legacy local catalog address used when ABAC_URL is unset.
-const defaultABACURL = "http://localhost:8080"
-
 type Config struct {
-	ABACURL                       string
 	RuntimeControlPlaneURL        string
 	RuntimeToken                  string
 	RuntimeStateDir               string
@@ -26,11 +22,8 @@ type Config struct {
 	CredentialStoreInstallationID string
 	ProviderUserID                string
 	RegistryPath                  string
-	OIDCBridgeURL                 string
-	OIDCBridgeSecret              string
 	AuditPath                     string
 	AuditMaxBytes                 int64
-	ABACSecret                    string
 	Env                           string
 	ToolManifestPath              string
 	// CredentialRelease is KEI_CREDENTIAL_RELEASE: "legacy" (default) or
@@ -85,7 +78,6 @@ func sessionIdleTTLFromEnv() time.Duration {
 
 func configFromEnv() Config {
 	return Config{
-		ABACURL:                       envOr("ABAC_URL", defaultABACURL),
 		RuntimeControlPlaneURL:        os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
 		RuntimeToken:                  os.Getenv("KEI_RUNTIME_TOKEN"),
 		RuntimeStateDir:               envOr("KEI_RUNTIME_STATE_DIR", statedir.DefaultPathOS()),
@@ -94,11 +86,8 @@ func configFromEnv() Config {
 		CredentialStoreInstallationID: os.Getenv("KEI_CREDENTIAL_STORE_INSTALLATION_ID"),
 		ProviderUserID:                os.Getenv("KEI_PROXY_PROVIDER_USER"),
 		RegistryPath:                  envOr("KEI_PROXY_REGISTRY", "/data/config/tools.yaml"),
-		OIDCBridgeURL:                 envOr("OIDC_BRIDGE_URL", "http://oidc-bridge.kei.svc.cluster.local:8081"),
-		OIDCBridgeSecret:              envOr("OIDC_BRIDGE_SECRET", ""),
 		AuditPath:                     os.Getenv("KEI_PROXY_AUDIT"),
 		AuditMaxBytes:                 auditMaxBytesFromEnv(),
-		ABACSecret:                    strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 		Env:                           os.Getenv("ENV"),
 		ToolManifestPath:              os.Getenv("KEI_TOOL_MANIFEST"),
 		CredentialRelease:             envOr("KEI_CREDENTIAL_RELEASE", CredentialReleaseLegacy),
@@ -112,29 +101,16 @@ func (c Config) Token() string              { return c.RuntimeToken }
 func (c Config) ControlPlaneURL() string    { return c.RuntimeControlPlaneURL }
 func (c Config) PolicyAuditPath() string    { return c.AuditPath }
 func (c Config) PolicyAuditMaxBytes() int64 { return c.AuditMaxBytes }
-func (c Config) FlushURL() string           { return c.ABACURL }
-func (c Config) FlushSecret() string        { return c.ABACSecret }
 func (c Config) SyncKeyID() string          { return c.CredentialSyncKeyID }
 func (c Config) SyncPrivateKey() string     { return c.CredentialSyncPrivateKey }
-
-// SubjectResolutionURL is where runtime subject lookups are sent: a catalog
-// configured through ABAC_URL, otherwise the runtime control plane, which
-// serves the same route. The localhost ABAC default is never used for this,
-// because production rejects it and every runtime-mode lookup would deny.
-func (c Config) SubjectResolutionURL() string {
-	if c.ABACURL == "" || c.ABACURL == defaultABACURL {
-		return c.RuntimeControlPlaneURL
-	}
-	return c.ABACURL
-}
 
 // IsRuntime identifies the customer-hosted installation path.
 func (c Config) IsRuntime() bool {
 	return c.RuntimeToken != ""
 }
 
-// IsProduction reports whether the proxy runs in an environment where
-// unauthenticated calls to the ABAC engine must never be attempted.
+// IsProduction reports whether the proxy runs in an environment where the
+// control-plane URL must be HTTPS and non-loopback.
 func (c Config) IsProduction() bool {
 	switch strings.ToLower(c.Env) {
 	case "production", "prod", "staging":
@@ -150,26 +126,24 @@ func ValidateRuntimeTokenFormat(token string) error {
 	return keiruntime.ValidateRuntimeTokenFormat(token)
 }
 
-// Validate fails closed when required service-to-service authentication is
-// absent in an environment that requires it.
+// Validate fails closed when runtime-token configuration is malformed. The
+// legacy ABAC_URL/ABAC_API_SECRET mode is gone, so there is nothing to check
+// without KEI_RUNTIME_TOKEN; commands that need it say so themselves.
 func (c Config) Validate() error {
-	if c.IsRuntime() {
-		if _, present := os.LookupEnv("KEI_HARNESS_TOKEN"); present {
-			return errors.New("KEI_HARNESS_TOKEN is unsupported; use KEI_RUNTIME_TOKEN")
-		}
-		if err := ValidateRuntimeTokenFormat(c.RuntimeToken); err != nil {
-			return err
-		}
-		if c.RuntimeControlPlaneURL == "" {
-			return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required when KEI_RUNTIME_TOKEN is set")
-		}
-		if err := keiruntime.ValidatePolicyControlPlaneURL(c.RuntimeControlPlaneURL, !c.IsProduction()); err != nil {
-			return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
-		}
+	if !c.IsRuntime() {
 		return nil
 	}
-	if c.IsProduction() && c.ABACSecret == "" {
-		return errors.New("ABAC_API_SECRET is required when ENV is production or staging")
+	if _, present := os.LookupEnv("KEI_HARNESS_TOKEN"); present {
+		return errors.New("KEI_HARNESS_TOKEN is unsupported; use KEI_RUNTIME_TOKEN")
+	}
+	if err := ValidateRuntimeTokenFormat(c.RuntimeToken); err != nil {
+		return err
+	}
+	if c.RuntimeControlPlaneURL == "" {
+		return errors.New("KEI_RUNTIME_CONTROL_PLANE_URL is required when KEI_RUNTIME_TOKEN is set")
+	}
+	if err := keiruntime.ValidatePolicyControlPlaneURL(c.RuntimeControlPlaneURL, !c.IsProduction()); err != nil {
+		return fmt.Errorf("KEI_RUNTIME_CONTROL_PLANE_URL is invalid: %w", err)
 	}
 	return nil
 }

@@ -15,11 +15,8 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-// Error sentinels moved from root.
-var (
-	ErrEnrollmentRequired        = errors.New("enrollment required")
-	ErrCredentialBindingNotFound = errors.New("credential binding not found")
-)
+// ErrCredentialBindingNotFound is the sentinel moved from root.
+var ErrCredentialBindingNotFound = errors.New("credential binding not found")
 
 // CredentialResponse carries only the secret value.
 type CredentialResponse struct {
@@ -70,14 +67,6 @@ type CredentialDescriptor struct {
 	Metadata            map[string]any `json:"metadata,omitempty"`
 }
 
-// OAuthTokenResponse is the response from the OIDC bridge.
-type OAuthTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	Provider    string `json:"provider"`
-	Identity    string `json:"identity"`
-}
-
 // ToolRegistry is the subset of Registry needed for authorization.
 type ToolRegistry interface {
 	Service(tool string) string
@@ -86,11 +75,6 @@ type ToolRegistry interface {
 // CredentialResolver resolves credential bindings from the control plane.
 type CredentialResolver interface {
 	Resolve(ctx context.Context, runtimeToken, userID, service string) (*CredentialDescriptor, error)
-}
-
-// OIDCTokenProvider fetches OAuth tokens from the OIDC bridge.
-type OIDCTokenProvider interface {
-	GetOAuthToken(ctx context.Context, userID, provider string) (*OAuthTokenResponse, error)
 }
 
 // SecretGetter retrieves secret values from the customer's secret store.
@@ -123,7 +107,6 @@ type AuthorizeParams struct {
 	Registry          ToolRegistry
 	CredentialBinding CredentialResolver
 	SecretStore       SecretGetter
-	OIDCBridge        OIDCTokenProvider
 	PolicyBundle      *policybundle.Verified
 	PolicySubject     *policybundle.Subject
 	BundleState       string
@@ -186,24 +169,6 @@ func AuthorizeTool(p AuthorizeParams) (AuthorizeOutput, error) {
 		out.Decision = "allow"
 		if service == "" {
 			break
-		}
-
-		if p.OIDCBridge != nil {
-			oauthToken, err := p.OIDCBridge.GetOAuthToken(p.Ctx, p.User, service)
-			if err != nil {
-				if errors.Is(err, ErrEnrollmentRequired) {
-					slog.Info("OIDC bridge enrollment required", "user_id", p.User, "service", service, "error", err)
-					out.Decision = "enrollment_required"
-					out.Service = service
-					break
-				}
-				slog.Warn("OIDC bridge error", "user_id", p.User, "service", service, "error", err)
-			}
-			if oauthToken != nil {
-				out.Credential = &CredentialResponse{Value: oauthToken.AccessToken}
-				out.Service = service
-				break
-			}
 		}
 
 		var cred *string

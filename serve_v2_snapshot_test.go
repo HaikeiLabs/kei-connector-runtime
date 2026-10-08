@@ -54,7 +54,7 @@ func TestModelAuthorizationStopsAtStaleV2SnapshotBeforeSubjectResolution(t *test
 		}
 	}))
 	defer control.Close()
-	cfg := Config{RuntimeToken: "kh_live_model_test_token_123456", RuntimeControlPlaneURL: control.URL, ABACURL: control.URL, RuntimeStateDir: filepath.Clean(stateDir)}
+	cfg := Config{RuntimeToken: "kh_live_model_test_token_123456", RuntimeControlPlaneURL: control.URL, RuntimeStateDir: filepath.Clean(stateDir)}
 	handler := &runtimeHTTPHandler{cfg: cfg}
 	err = handler.authorizeModel(context.Background(), &ModelProfile{ProfileID: "model-v2"}, "user-alice")
 	if !errors.Is(err, policybundle.ErrSubjectSnapshotStale) {

@@ -87,8 +87,8 @@ service was renamed, the artifact was deliberately not. CI asserts the binary
 name.
 
 The same binary supports two modes. **CLI commands** (`authorize`, `connector`,
-`collector`, `credential`, `model`, `runtime`, `identity`, `init`, `org`) each
-perform one governed action and exit; the `authorize` and `connector invoke`
+`collector`, `credential`, `model`, `runtime`, `identity`) each perform one
+governed action and exit; the `authorize` and `connector invoke`
 commands act as the PEP, and the PDP runs locally in the same process.
 **`kei-proxy serve`** is a long-running daemon that exposes a local HTTP/1.1
 API on a Unix socket (default `/run/kei-proxy/runtime.sock`, mode `0600`) and
@@ -126,6 +126,16 @@ Per ADR-020 and HAI-119, `KEI_RUNTIME_TOKEN` is the only supported runtime insta
 credential input. Set it in the runtime environment alongside
 `KEI_RUNTIME_CONTROL_PLANE_URL`. Runtime CLI commands do not accept credential
 flags. The retired `--key` and `--harness-key` inputs are not supported.
+
+### Upgrading from the in-cluster relay modes
+
+`ABAC_URL`, `ABAC_API_SECRET` and `OIDC_BRIDGE_SECRET` are no longer read; set
+`KEI_RUNTIME_CONTROL_PLANE_URL` + `KEI_RUNTIME_TOKEN`. Every command now talks
+to the control plane's `/api/v1/runtime/...` routes with the installation
+credential (ADR-033: east-west `X-KEI-API-Key` stays inside the cluster). The
+`kei-proxy init` and `kei-proxy org` commands, the `--abac-url` flags and the
+`OIDC_BRIDGE_URL` relay in `authorize` are removed. See
+[CHANGELOG.md](CHANGELOG.md) for the full list and replacements.
 
 ## Local audit spool
 
@@ -572,7 +582,9 @@ required. Without `-d` it installs to `/usr/local/bin`.
 
 ## Audit collector
 
-The collector ships canonical `DecisionEvent` JSONL records in batches. During
+The collector ships canonical `DecisionEvent` JSONL records in batches to
+`KEI_RUNTIME_CONTROL_PLANE_URL` (override with `--control-plane-url`),
+authenticated with `KEI_RUNTIME_TOKEN`, which it requires. During
 the Pedro audit-spool migration it also accepts the earlier Agentware JSONL
 shape, converts it to the canonical catalog record, and hashes any stored tool
 arguments before upload. Both record shapes can therefore share the runtime's

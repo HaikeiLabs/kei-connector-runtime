@@ -90,8 +90,8 @@ Rules:
   (HAI-219).
 - The runtime holds a resolved credential only for the duration of one call.
   It is never written to stdout, logs, audit, the spool, or a cache. The
-  runtime does not call the bridge on this path, so the existing 5-minute
-  token cache in `oidc_bridge.go` is not involved.
+  runtime never calls the bridge (its legacy `OIDC_BRIDGE_SECRET` relay was
+  removed in GW Phase 5) and has no token cache.
 
 ### CLI surface (layer 2)
 

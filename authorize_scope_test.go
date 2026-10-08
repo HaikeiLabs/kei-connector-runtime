@@ -47,7 +47,6 @@ func TestRunAuthorizeNeverCallsCatalogDecisionEndpoint(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
 	t.Setenv("KEI_API_URL", catalog.URL)
-	t.Setenv("ABAC_URL", "")
 	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	t.Setenv("KEI_RUNTIME_STATE_DIR", t.TempDir())
 	out := captureStdout(func() {

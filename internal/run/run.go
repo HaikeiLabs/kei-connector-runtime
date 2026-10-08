@@ -41,10 +41,10 @@ type runAuthorization interface {
 // Config contains runtime values needed by the run wrapper. AppendAudit writes
 // one value-free run event into the shared runtime audit spool.
 type Config struct {
-	ABACURL, ABACSecret, RuntimeToken, RuntimeStateDir, ProviderUserID string
-	ControlPlaneURL, SocketPath                                        string
-	AppendAudit                                                        func([]byte) error
-	AuditCrypto                                                        *auditcrypto.Provider
+	RuntimeToken, RuntimeStateDir, ProviderUserID string
+	ControlPlaneURL, SocketPath                   string
+	AppendAudit                                   func([]byte) error
+	AuditCrypto                                   *auditcrypto.Provider
 	// DaemonSocket, when set (KEI_CREDENTIAL_RELEASE=identity), makes run a
 	// thin client of the serve daemon's POST /v1/commands:run on this Unix
 	// socket: the daemon resolves the references and spawns the child, and
@@ -58,7 +58,7 @@ type Config struct {
 type catalogRunAuthorization struct{ cfg Config }
 
 func (a catalogRunAuthorization) Authorize(ctx context.Context, connectorID, field, resource string) (*invoke.Response, error) {
-	client := invoke.NewClient(a.cfg.ABACURL, a.cfg.ABACSecret, 10*time.Second)
+	client := invoke.NewClient(a.cfg.ControlPlaneURL, 10*time.Second)
 	return client.Invoke(ctx, invoke.Request{HarnessToken: a.cfg.RuntimeToken, ConnectorID: connectorID, Capability: "credential", Action: "use", Resource: resource, TraceID: uuid.NewString(), AgentID: os.Getenv("KEI_PROXY_AGENT_ID"), Framework: "kei-proxy-run", ProviderUserID: a.cfg.ProviderUserID})
 }
 
