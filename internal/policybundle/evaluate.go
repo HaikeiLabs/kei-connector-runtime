@@ -84,6 +84,25 @@ func (v *Verified) Evaluate(call Call, subject *Subject) Decision {
 	return v.evaluateRegistered(call, subject, set, *reg)
 }
 
+// SubjectRequired reports whether deciding call needs online subject
+// attributes. Identity is only for credentials: it does when the tool is bound
+// to a connector capability, or when the catalog-ordered policy walk reaches a
+// policy whose src matches on subject attributes before a subject-free policy
+// decides. Otherwise the call is evaluated locally with no subject.
+func (v *Verified) SubjectRequired(call Call) bool {
+	set, err := v.decodePolicySet()
+	if err != nil {
+		return false // Evaluate denies an undecodable policy set.
+	}
+	for _, t := range set.Tools {
+		if t.Name == call.Tool && (t.ConnectorID != "" || t.Capability != "") {
+			return true
+		}
+	}
+	call.UserID, call.Email = "", ""
+	return v.Evaluate(call, nil).ReasonCode == "subject_resolution_unavailable"
+}
+
 // EvaluateConnector resolves a connector call through the tool registry's exact
 // connector/capability binding; it never trusts the caller's free-form action to
 // choose a policy target.

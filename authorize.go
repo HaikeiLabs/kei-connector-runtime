@@ -164,7 +164,9 @@ func runAuthorize(args []string) int {
 
 	subjectProviderID := cfg.ProviderUserID
 	var subject *policybundle.Subject
-	if *user != "" || subjectProviderID != "" {
+	// Identity is only for credentials: resolve the subject lazily, only when
+	// the tool or a reached policy needs it.
+	if (*user != "" || subjectProviderID != "") && keiruntime.AuthorizeNeedsSubject(activeBundle, reg, *tool, *action, *resource, *agentID) {
 		control := keiruntime.NewPolicyControlClient(cfg.SubjectResolutionURL(), cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
 		req := keiruntime.SubjectResolveRequest{}
 		if *user != "" {
