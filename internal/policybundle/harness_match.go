@@ -1,6 +1,7 @@
 package policybundle
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
@@ -40,8 +41,21 @@ func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID, reason str
 	if err != nil {
 		return HarnessNotRenderable, "", HarnessReasonBundleInvalid
 	}
-	policies := make([]harnessmatch.Policy, len(set.Policies))
-	for i, p := range set.Policies {
+	policyRows := set.Policies
+	if v.Payload.Schema == "kei.policy-bundle/v2" {
+		if v.Payload.HarnessMatchSemantics != "kei.harness-match/v1" {
+			return HarnessNotRenderable, "", HarnessReasonBundleInvalid
+		}
+		var harnessPolicies []policy
+		if len(v.Payload.HarnessPolicies) > 0 {
+			if err := json.Unmarshal(v.Payload.HarnessPolicies, &harnessPolicies); err != nil {
+				return HarnessNotRenderable, "", HarnessReasonBundleInvalid
+			}
+		}
+		policyRows = harnessPolicies
+	}
+	policies := make([]harnessmatch.Policy, len(policyRows))
+	for i, p := range policyRows {
 		policies[i] = harnessmatch.Policy{
 			ID:      p.ID,
 			Src:     p.Src,

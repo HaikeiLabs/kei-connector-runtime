@@ -52,6 +52,9 @@ func v2SchemaValidator(t *testing.T) func([]byte) error {
 	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v2.schema.json", load("policy-set-v2.schema.json")); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v1.schema.json", load("policy-set-v1.schema.json")); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json", load("policy-bundle-v2.schema.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +129,27 @@ func TestValidateV2ClosedBundleAndSnapshotFreshness(t *testing.T) {
 				t.Fatal("invalid v2 bundle accepted")
 			}
 		})
+	}
+}
+
+func TestEvaluateHarnessUsesV2HarnessPolicies(t *testing.T) {
+	previous := schemaValidatorV2
+	SetV2SchemaValidator(v2SchemaValidator(t))
+	t.Cleanup(func() { SetV2SchemaValidator(previous) })
+	now := time.Now().UTC()
+	doc := v2BundleDoc(now)
+	doc["harness_match_semantics"] = "kei.harness-match/v1"
+	doc["harness_policies"] = []any{map[string]any{
+		"id": "policy-shell-git", "src_pattern": "harness:codex", "dst_pattern": "shell:git", "action": "permit",
+		"scope": map[string]any{"org_id": v2Org, "workspace_id": v2Workspace},
+	}}
+	v, err := ValidateV2(mustJSON(t, doc), v2Installation, v2Org, v2Workspace, 1, now)
+	if err != nil {
+		t.Fatalf("ValidateV2 harness policies: %v", err)
+	}
+	outcome, id, reason := v.EvaluateHarness(HarnessCall{Kind: "codex", Argv: []string{"git", "status"}})
+	if outcome != HarnessPermit || id != "policy-shell-git" || reason != "" {
+		t.Fatalf("EvaluateHarness = %q, %q, %q", outcome, id, reason)
 	}
 }
 

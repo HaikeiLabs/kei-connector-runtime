@@ -70,6 +70,7 @@ type Payload struct {
 	AgentConnectorBindings json.RawMessage `json:"agent_connector_bindings"`
 	Identities             []Identity      `json:"identities,omitempty"`
 	Harnesses              []Harness       `json:"harnesses,omitempty"`
+	HarnessPolicies        json.RawMessage `json:"harness_policies,omitempty"`
 	HarnessMatchSemantics  string          `json:"harness_match_semantics,omitempty"`
 }
 

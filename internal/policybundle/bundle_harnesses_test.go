@@ -307,6 +307,10 @@ func TestBundleHarnessesContractParityKnownProperties(t *testing.T) {
 		}
 	}
 	for field := range goFields {
+		// harness_policies belongs to v2; Payload is shared by both versions.
+		if field == "harness_policies" {
+			continue
+		}
 		if !schemaProps[field] {
 			t.Errorf("Go struct has field %q not in schema properties", field)
 		}
