@@ -70,8 +70,19 @@ type Payload struct {
 	AgentConnectorBindings json.RawMessage `json:"agent_connector_bindings"`
 	Identities             []Identity      `json:"identities,omitempty"`
 	Harnesses              []Harness       `json:"harnesses,omitempty"`
-	HarnessPolicies        json.RawMessage `json:"harness_policies,omitempty"`
 	HarnessMatchSemantics  string          `json:"harness_match_semantics,omitempty"`
+	// Subject is the v2-only installation subject (HAI-433).
+	Subject *InstallationSubject `json:"subject,omitempty"`
+}
+
+// InstallationSubject is the installation's principal as the catalog resolved
+// it (HAI-433): the installation creator, their email, and their effective
+// group names. Only kei.policy-bundle/v2 carries it; harness renderers apply
+// user:, email: and group: harness_policies sources against it.
+type InstallationSubject struct {
+	UserID string   `json:"user_id"`
+	Email  string   `json:"email,omitempty"`
+	Groups []string `json:"groups"`
 }
 
 type Verified struct {

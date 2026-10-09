@@ -27,6 +27,7 @@ func v2BundleDoc(now time.Time) map[string]any {
 			"schema": "kei.policy-set/v2", "org_id": v2Org, "workspace_id": v2Workspace, "match_semantics": "kei.match/v2",
 			"evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
 			"tools":      []any{}, "checks": []any{}, "tool_policies": []any{},
+			"harness_match_semantics": "kei.harness-match/v1", "harness_policies": []any{},
 		},
 		"agent_connector_bindings": []any{},
 		"identities":               []any{map[string]any{"source": "discord", "external_id": "ext-alice", "user_id": "user-alice", "status": "linked", "groups": []string{"members"}}},
@@ -138,10 +139,9 @@ func TestEvaluateHarnessUsesV2HarnessPolicies(t *testing.T) {
 	t.Cleanup(func() { SetV2SchemaValidator(previous) })
 	now := time.Now().UTC()
 	doc := v2BundleDoc(now)
-	doc["harness_match_semantics"] = "kei.harness-match/v1"
-	doc["harness_policies"] = []any{map[string]any{
-		"id": "policy-shell-git", "src_pattern": "harness:codex", "dst_pattern": "shell:git", "action": "permit",
-		"scope": map[string]any{"org_id": v2Org, "workspace_id": v2Workspace},
+	doc["policy_set"].(map[string]any)["harness_policies"] = []any{map[string]any{
+		"policy_id": "policy-shell-git", "name": "allow git", "src_pattern": "harness:codex", "dst_pattern": "shell:git", "action": "permit", "priority": 100,
+		"scope": map[string]any{"org_id": v2Org, "workspace_id": v2Workspace, "agent_id": nil},
 	}}
 	v, err := ValidateV2(mustJSON(t, doc), v2Installation, v2Org, v2Workspace, 1, now)
 	if err != nil {

@@ -307,8 +307,8 @@ func TestBundleHarnessesContractParityKnownProperties(t *testing.T) {
 		}
 	}
 	for field := range goFields {
-		// harness_policies belongs to v2; Payload is shared by both versions.
-		if field == "harness_policies" {
+		// subject belongs to v2 (HAI-433); Payload is shared by both versions.
+		if field == "subject" {
 			continue
 		}
 		if !schemaProps[field] {

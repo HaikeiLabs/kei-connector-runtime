@@ -2,10 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json",
   "title": "kei.policy-bundle/v2",
+  "description": "The current policy bundle contract (ADR-035), served by kei-policy-catalog from GET /api/v1/runtime/policy-bundles/current for Accept: application/vnd.kei.policy-bundle.v2+json. It supersedes the deprecated, frozen kei.policy-bundle/v1. The catalog's pkg/database/testdata copy is the source this file was taken from. The optional subject (HAI-433) is the installation's server-resolved principal that harness renderers apply user:, email: and group: harness_policies sources against.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "bundle_id", "bundle_version", "policy_revision", "issuer", "audience", "issued_at", "not_after", "refresh", "subject_resolution", "policy_set", "agent_connector_bindings", "identities"],
-  "dependentRequired": {"harnesses": ["harness_match_semantics"], "harness_policies": ["harness_match_semantics"], "harness_match_semantics": ["harness_policies"]},
+  "dependentRequired": {"harnesses": ["harness_match_semantics"], "harness_match_semantics": ["harnesses"]},
   "properties": {
     "schema": {"const": "kei.policy-bundle/v2"},
     "bundle_id": {"$ref": "policy-set-v2.schema.json#/$defs/id"},
@@ -20,8 +21,8 @@
     "policy_set": {"$ref": "policy-set-v2.schema.json"},
     "agent_connector_bindings": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["agent_id", "connector_id", "capabilities"], "properties": {"agent_id": {"$ref": "policy-set-v2.schema.json#/$defs/id"}, "connector_id": {"$ref": "policy-set-v2.schema.json#/$defs/id"}, "capabilities": {"type": "array", "uniqueItems": true, "items": {"$ref": "policy-set-v2.schema.json#/$defs/capability"}}}}},
     "harnesses": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["agent_id", "kind"], "properties": {"agent_id": {"$ref": "policy-set-v2.schema.json#/$defs/id"}, "kind": {"enum": ["claude_code", "codex", "opencode", "custom"]}}}},
-    "harness_policies": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "src_pattern", "dst_pattern", "action", "scope"], "properties": {"id": {"type": "string", "minLength": 1}, "src_pattern": {"type": "string", "minLength": 1}, "dst_pattern": {"type": "string", "minLength": 1}, "action": {"enum": ["permit", "deny"]}, "scope": {"type": "object", "additionalProperties": false, "properties": {"org_id": {"type": ["string", "null"]}, "workspace_id": {"type": ["string", "null"]}, "agent_id": {"type": ["string", "null"]}}}}}},
     "harness_match_semantics": {"const": "kei.harness-match/v1"},
+    "subject": {"description": "The server-resolved principal of the installation this bundle is issued to (HAI-433): the installation creator (harness_keys.created_by_user_id), their email, and their effective group names in the workspace. Harness renderers apply user:, email: and group: harness_policies sources against it; absent means those sources are skipped.", "type": "object", "additionalProperties": false, "required": ["user_id", "groups"], "properties": {"user_id": {"$ref": "policy-set-v2.schema.json#/$defs/id"}, "email": {"type": "string", "minLength": 1}, "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}},
     "identities": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["source", "external_id", "user_id", "status"], "properties": {"source": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"}, "external_id": {"type": "string", "minLength": 1}, "user_id": {"$ref": "policy-set-v2.schema.json#/$defs/id"}, "status": {"enum": ["linked", "pending", "revoked", "cross_workspace"]}, "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "org_roles": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}, "subject_token": {"type": "string"}, "expire_time": {"type": "string", "format": "date-time"}}}}
   }
 }
