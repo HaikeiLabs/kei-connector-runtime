@@ -13,9 +13,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
@@ -58,15 +62,23 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		slog.Warn("runtime_core_limit_failed", "error", err)
 	}
+	// serve owns its state directory: it is the one process that refreshes
+	// policy, ships audit, and reports heartbeats for it (HAI-438). Claim it
+	// before any child starts, so a `runtime heartbeat` beside it can never
+	// win the refresher lock and leave the daemon without an identity.
+	releaseStateDir, err := keiruntime.ClaimStateDir(cfg.RuntimeStateDir)
+	if err != nil {
+		slog.Error("runtime_state_dir_unavailable", "dir", cfg.RuntimeStateDir, "error", err,
+			"hint", "kei-proxy serve runs the heartbeat, policy refresher and audit collector itself; stop any kei-proxy runtime heartbeat on this state directory")
+		return 1
+	}
+	defer releaseStateDir()
 	local, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		slog.Error("runtime_credential_release_invalid", "error", err)
 		return 1
 	}
 	defer local.Close()
-	ctx, stop := context.WithCancel(ctx)
-	defer stop()
-	go local.SweepSessions(ctx)
 	unixListener, err := socket.Listen(socketPath)
 	if err != nil {
 		slog.Error("runtime_unix_listener_failed", "path", socketPath, "error", err)
@@ -78,8 +90,6 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	}()
 	tcpListener, err := net.Listen("tcp", addr)
 	if err != nil {
-		_ = unixListener.Close()
-		_ = os.Remove(socketPath)
 		slog.Error("runtime_http_listener_failed", "addr", addr, "error", err)
 		return 1
 	}
@@ -93,56 +103,102 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		}
 	}
 	tcpHandler, socketHandler := newServeHandlers(cfg, local)
-	server := newServer(tcpHandler)
-	socketServer := newServer(socketHandler)
 
-	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg,
-		func() (*keiruntime.Identity, error) {
-			id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
-			if err != nil {
-				return nil, err
-			}
-			return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
-		},
-		func(identity *keiruntime.Identity) error {
-			return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
-				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
-			}, 10*time.Second)
-		},
-		IsRuntimeRevocation,
-		func() { RevokePolicyState(cfg) },
-		local.SetIdentity,
-		local.AfterSync,
-		keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, os.Getenv)),
-	)
+	// One supervisor owns every long-lived child. They share one context: a
+	// signal or any child's fatal error stops all of them, and the collector
+	// makes its final flush on the way out.
+	var identity atomic.Pointer[keiruntime.Identity]
+	children := keiruntime.NewSupervisor(ctx)
+	children.Go("http listener", func(ctx context.Context) error {
+		return keiruntime.ServeHTTP(ctx, newServer(tcpHandler), tcpListener, shutdownFlushTimeout)
+	})
+	children.Go("unix listener", func(ctx context.Context) error {
+		return keiruntime.ServeHTTP(ctx, newServer(socketHandler), unixListener, shutdownFlushTimeout)
+	})
+	children.Go("session sweeper", func(ctx context.Context) error {
+		local.SweepSessions(ctx)
+		return nil
+	})
+	children.GoService(func(ctx context.Context) func() {
+		return keiruntime.StartPolicyRefresher(ctx, cfg,
+			func() (*keiruntime.Identity, error) {
+				id, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+				if err != nil {
+					return nil, err
+				}
+				return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
+			},
+			func(identity *keiruntime.Identity) error {
+				return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
+					ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+				}, 10*time.Second)
+			},
+			IsRuntimeRevocation,
+			func() { RevokePolicyState(cfg) },
+			func(id *keiruntime.Identity) {
+				identity.Store(id)
+				local.SetIdentity(id)
+			},
+			local.AfterSync,
+			keiruntime.WithClaimedStateDir(),
+			keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, os.Getenv)),
+		)
+	})
+	children.GoService(func(ctx context.Context) func() {
+		return keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
+	})
+	if cfg.IsRuntime() {
+		children.Go("heartbeat", serveHeartbeat(cfg, NewRuntimeClient(cfg.RuntimeControlPlaneURL, 15*time.Second), identity.Load))
+	}
 	slog.Info("runtime_http_listener_started", "addr", addr)
 	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")
-	serveErrors := make(chan error, 2)
-	go func() { serveErrors <- server.Serve(tcpListener) }()
-	go func() { serveErrors <- socketServer.Serve(unixListener) }()
-	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
 
-	exitCode := 0
-	select {
-	case <-ctx.Done():
-	case err := <-serveErrors:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("runtime_http_listener_failed", "error", err)
-			exitCode = 1
-		}
+	if err := children.Wait(); err != nil {
+		slog.Error("runtime_serve_stopped", "error", err)
+		return 1
 	}
-	stopRefresher()
-	stopCollector()
-	stop()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownFlushTimeout)
-	defer cancel()
-	for _, srv := range []*http.Server{server, socketServer} {
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("runtime_http_shutdown_incomplete", "error", err)
-			_ = srv.Close()
+	return 0
+}
+
+// serveHeartbeat reports the daemon's liveness to the control plane with the
+// v2 body until ctx ends. Transient catalog failures are retried by the loop;
+// a rejected or revoked installation is fatal and stops the daemon.
+func serveHeartbeat(cfg Config, client keiruntime.HeartbeatClient, identity func() *keiruntime.Identity) func(context.Context) error {
+	return func(ctx context.Context) error {
+		runID, err := keiruntime.HeartbeatRunID(os.Getenv)
+		if err != nil {
+			slog.Warn("runtime_heartbeat_run_id_invalid", "error", err)
+			runID = uuid.NewString()
 		}
+		envelope, err := keiruntime.HarnessEnvelopeFromEnv(os.Getenv)
+		if err != nil {
+			slog.Warn("runtime_heartbeat_envelope_invalid", "error", err)
+			envelope = nil
+		}
+		interval := cfg.RuntimeHeartbeatInterval
+		if interval <= 0 {
+			interval = defaultRuntimeHeartbeatInterval
+		}
+		loop := newRuntimeHeartbeatLoop(cfg, client, interval)
+		loop.Report = versionedHeartbeatReport(runID, interval, time.Now(), envelope)
+		loop.Versioned = true
+		loop.Warn = os.Stderr
+		loop.PolicyBundle = func() *policybundlehealth.Health {
+			id := identity()
+			if id == nil {
+				return nil
+			}
+			return currentPolicyBundleHealth(cfg, &RuntimeIdentity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID})
+		}
+		slog.Info("runtime_heartbeat_started", "interval", interval.String(), "run_id", runID)
+		if err := loop.Run(ctx, true); err != nil {
+			if IsRuntimeRevocation(err) {
+				RevokePolicyState(cfg)
+			}
+			return fmt.Errorf("control plane rejected the runtime heartbeat: %w", err)
+		}
+		return nil
 	}
-	return exitCode
 }
 
 // serveSeams are test seams for the daemon; the zero value is production.

@@ -127,6 +127,11 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	if *output == "jsonl" {
 		return runRuntimeHeartbeatJSONL(ctx, cfg, getenv, stdout, stderr, *timeout, *interval, *parentStdin, newClient)
 	}
+	stateDir, owned := claimHeartbeatStateDir(cfg, stderr)
+	if owned {
+		return heartbeatExitTransient
+	}
+	defer stateDir.release()
 	identity, err := bootstrapRuntimeWithClient(ctx, cfg, *timeout, newClient)
 	if err != nil {
 		if IsRuntimeRevocation(err) {
@@ -141,20 +146,10 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	if code := writeRuntimeBootstrapOutput(stdout, identity, stderr); code != 0 {
 		return code
 	}
-	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
-	loop := &keiruntime.HeartbeatLoop{
-		Client:   newClient(cfg.RuntimeControlPlaneURL, *timeout),
-		Token:    cfg.RuntimeToken,
-		Report:   HeartbeatReport{RuntimeVersion: version},
-		Interval: *interval,
-		Warn:     stderr,
-		Now:      time.Now,
-		Jitter:   keiruntime.JitterInterval,
-		AppendLifecycle: func(e keiruntime.LifecycleEvent) error {
-			return appendLifecycleEvent(auditPath, auditMax, e)
-		},
-		PolicyBundle: func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) },
-	}
+	loop := newRuntimeHeartbeatLoop(cfg, newClient(cfg.RuntimeControlPlaneURL, *timeout), *interval)
+	loop.Report = HeartbeatReport{RuntimeVersion: version}
+	loop.Warn = stderr
+	loop.PolicyBundle = func() *policybundlehealth.Health { return currentPolicyBundleHealth(cfg, identity) }
 	stopCollector := keiruntime.StartCollector(ctx, cfg, keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir), collectorPollInterval, shutdownFlushTimeout)
 	defer stopCollector()
 	whoami := func() (*keiruntime.Identity, error) {
@@ -166,7 +161,7 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 		}, *timeout)
 	}
 	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil,
-		keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, getenv)))
+		append(stateDir.refresherOptions(), keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, getenv)))...)
 	defer stopRefresher()
 	if err := loop.Run(ctx, false); err != nil {
 		if IsRuntimeRevocation(err) {
@@ -200,6 +195,12 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 		fmt.Fprintf(stderr, "runtime heartbeat failed: %v\n", envErr)
 		return heartbeatExitConfig
 	}
+	stateDir, owned := claimHeartbeatStateDir(cfg, stderr)
+	if owned {
+		events.Terminal(keiruntime.ReasonConfigInvalid)
+		return heartbeatExitConfig
+	}
+	defer stateDir.release()
 	if attached {
 		if envelope == nil {
 			envelope = &keiruntime.HarnessEnvelope{}
@@ -207,28 +208,11 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 		envelope.Link = "attached"
 	}
 	client := newClient(cfg.RuntimeControlPlaneURL, timeout)
-	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
-	loop := &keiruntime.HeartbeatLoop{
-		Client: client,
-		Token:  cfg.RuntimeToken,
-		Report: keiruntime.HeartbeatReport{
-			RuntimeVersion:   version,
-			SchemaVersion:    2,
-			RunID:            runID,
-			IntervalSeconds:  int(interval / time.Second),
-			RuntimeStartedAt: started.UTC().Format(time.RFC3339),
-			Harness:          envelope,
-		},
-		Versioned: true,
-		Interval:  interval,
-		Events:    events,
-		Warn:      stderr,
-		Now:       time.Now,
-		Jitter:    keiruntime.JitterInterval,
-		AppendLifecycle: func(e keiruntime.LifecycleEvent) error {
-			return appendLifecycleEvent(auditPath, auditMax, e)
-		},
-	}
+	loop := newRuntimeHeartbeatLoop(cfg, client, interval)
+	loop.Report = versionedHeartbeatReport(runID, interval, started, envelope)
+	loop.Versioned = true
+	loop.Events = events
+	loop.Warn = stderr
 	identity, code := resolveIdentity(ctx, client, loop, cfg)
 	if identity == nil {
 		if code == heartbeatExitUnauthorized {
@@ -250,13 +234,74 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 		}, timeout)
 	}
 	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil,
-		keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, getenv)))
+		append(stateDir.refresherOptions(), keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, getenv)))...)
 	defer stopRefresher()
 	err := loop.Run(ctx, true)
 	if IsRuntimeRevocation(err) {
 		RevokePolicyState(cfg)
 	}
 	return heartbeatExitFor(err, events)
+}
+
+// newRuntimeHeartbeatLoop builds the control-plane heartbeat loop shared by
+// `runtime heartbeat` and `serve`. Callers set the report, its version, and
+// where beats and warnings go.
+func newRuntimeHeartbeatLoop(cfg Config, client keiruntime.HeartbeatClient, interval time.Duration) *keiruntime.HeartbeatLoop {
+	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
+	return &keiruntime.HeartbeatLoop{
+		Client:   client,
+		Token:    cfg.RuntimeToken,
+		Interval: interval,
+		Now:      time.Now,
+		Jitter:   keiruntime.JitterInterval,
+		AppendLifecycle: func(e keiruntime.LifecycleEvent) error {
+			return appendLifecycleEvent(auditPath, auditMax, e)
+		},
+	}
+}
+
+// versionedHeartbeatReport is the v2 heartbeat body.
+func versionedHeartbeatReport(runID string, interval time.Duration, started time.Time, envelope *keiruntime.HarnessEnvelope) keiruntime.HeartbeatReport {
+	return keiruntime.HeartbeatReport{
+		RuntimeVersion:   version,
+		SchemaVersion:    2,
+		RunID:            runID,
+		IntervalSeconds:  int(interval / time.Second),
+		RuntimeStartedAt: started.UTC().Format(time.RFC3339),
+		Harness:          envelope,
+	}
+}
+
+// heartbeatStateDir is the state directory `runtime heartbeat` claimed, if
+// any.
+type heartbeatStateDir struct {
+	release func()
+	claimed bool
+}
+
+func (d heartbeatStateDir) refresherOptions() []keiruntime.RefresherOption {
+	if !d.claimed {
+		return nil
+	}
+	return []keiruntime.RefresherOption{keiruntime.WithClaimedStateDir()}
+}
+
+// claimHeartbeatStateDir claims the state directory before `runtime
+// heartbeat` starts anything. When `kei-proxy serve` (or another runtime
+// process) already owns it, owned is true and the heartbeat must exit: serve
+// sends its own heartbeats and runs the directory's only policy refresher and
+// audit collector (HAI-438). Any other claim failure keeps the old behavior,
+// where the refresher reports it and the runtime stays deny-only.
+func claimHeartbeatStateDir(cfg Config, stderr io.Writer) (dir heartbeatStateDir, owned bool) {
+	release, err := keiruntime.ClaimStateDir(cfg.RuntimeStateDir)
+	switch {
+	case errors.Is(err, keiruntime.ErrStateDirOwned):
+		fmt.Fprintf(stderr, "runtime heartbeat refused: %v; kei-proxy serve already reports heartbeats and runs the policy refresher and audit collector for it, so run only kei-proxy serve\n", err)
+		return heartbeatStateDir{}, true
+	case err != nil:
+		return heartbeatStateDir{release: func() {}}, false
+	}
+	return heartbeatStateDir{release: release, claimed: true}, false
 }
 
 // classifyWhoamiError places a whoami failure on the runtime -> catalog leg. A

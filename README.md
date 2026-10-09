@@ -448,6 +448,32 @@ Installation, org, workspace, and assigned agents all come from `whoami`; do
 not add an agent-ID environment variable to a harness. A supervised harness
 reads its agent from the heartbeat `identity` event below.
 
+**Containers run only `kei-proxy serve`.** The daemon owns the heartbeat:
+one supervisor runs the socket and TCP listeners, the policy refresher (which
+resolves the runtime identity), the audit collector, and the control-plane
+heartbeat loop under one context. If any of them fails fatally (a revoked or
+rejected installation, a listener error) the others stop, the collector makes
+its final flush, and `serve` exits non-zero. `serve` sends the v2 heartbeat
+body every `KEI_RUNTIME_HEARTBEAT_INTERVAL` (Go duration, default `1m`) and
+forwards the same allowlisted harness envelope as `--output jsonl`; an invalid
+envelope value is logged and left out rather than stopping the daemon.
+
+`serve` claims its state directory (`KEI_RUNTIME_STATE_DIR`) at startup by
+taking the directory's refresher lock and holds it until it exits. Only one
+process refreshes policy and ships audit for a state directory:
+
+- `kei-proxy runtime heartbeat` started beside `serve` exits at once with
+  `runtime heartbeat refused: another kei-proxy process owns the runtime state
+  directory ...` (exit `1`, or `4` with a `config_invalid` terminal event under
+  `--output jsonl`). It sends nothing to the control plane and starts no
+  second refresher or collector.
+- `serve` started while a heartbeat already owns the directory fails with
+  `runtime_state_dir_unavailable` and exits `1`, instead of serving without an
+  identity. Stop the heartbeat process.
+
+`kei-proxy runtime heartbeat` remains for runtimes that do not run the
+authorize socket (for example a harness that only calls the one-shot CLI).
+
 `kei-proxy runtime heartbeat` reports that this runtime installation is
 connected to kei-policy-catalog (`POST /api/v1/runtime:heartbeat`). It is the
 runtime-to-catalog **liveness** leg; a harness-local `/healthz` or `whoami` is

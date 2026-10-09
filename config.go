@@ -40,6 +40,9 @@ type Config struct {
 	// SessionIdleTTL is KEI_SESSION_IDLE_TTL: how long a named daemon session
 	// lives without use (Go duration, default 30m).
 	SessionIdleTTL time.Duration
+	// RuntimeHeartbeatInterval is KEI_RUNTIME_HEARTBEAT_INTERVAL: how often
+	// `kei-proxy serve` reports liveness (Go duration, default 1m).
+	RuntimeHeartbeatInterval time.Duration
 }
 
 func envOr(key, fallback string) string {
@@ -83,6 +86,20 @@ func sessionIdleTTLFromEnv() time.Duration {
 	return pdp.DefaultIdleTTL
 }
 
+const defaultRuntimeHeartbeatInterval = time.Minute
+
+// runtimeHeartbeatIntervalFromEnv reads KEI_RUNTIME_HEARTBEAT_INTERVAL (a Go
+// duration such as "30s"). Unset, malformed, or sub-second values use the
+// one-minute default, the same floor `runtime heartbeat --interval` enforces.
+func runtimeHeartbeatIntervalFromEnv() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("KEI_RUNTIME_HEARTBEAT_INTERVAL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= time.Second {
+			return d
+		}
+	}
+	return defaultRuntimeHeartbeatInterval
+}
+
 func configFromEnv() Config {
 	return Config{
 		ABACURL:                       envOr("ABAC_URL", defaultABACURL),
@@ -104,6 +121,7 @@ func configFromEnv() Config {
 		CredentialRelease:             envOr("KEI_CREDENTIAL_RELEASE", CredentialReleaseLegacy),
 		CredentialReleaseURL:          os.Getenv("KEI_CREDENTIAL_RELEASE_URL"),
 		SessionIdleTTL:                sessionIdleTTLFromEnv(),
+		RuntimeHeartbeatInterval:      runtimeHeartbeatIntervalFromEnv(),
 	}
 }
 
