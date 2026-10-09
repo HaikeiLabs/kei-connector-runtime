@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 )
 
 func TestModelAuthorizationStopsAtStaleV2SnapshotBeforeSubjectResolution(t *testing.T) {
@@ -56,7 +57,7 @@ func TestModelAuthorizationStopsAtStaleV2SnapshotBeforeSubjectResolution(t *test
 	defer control.Close()
 	cfg := Config{RuntimeToken: "kh_live_model_test_token_123456", RuntimeControlPlaneURL: control.URL, ABACURL: control.URL, RuntimeStateDir: filepath.Clean(stateDir)}
 	handler := &runtimeHTTPHandler{cfg: cfg}
-	err = handler.authorizeModel(context.Background(), &ModelProfile{ProfileID: "model-v2"}, "user-alice")
+	err = handler.authorizeModel(context.Background(), &ModelProfile{ProfileID: "model-v2"}, pdp.Subject{UserID: "user-alice", Source: "cli", Status: pdp.StatusLinked})
 	if !errors.Is(err, policybundle.ErrSubjectSnapshotStale) {
 		t.Fatalf("authorizeModel error=%v", err)
 	}
