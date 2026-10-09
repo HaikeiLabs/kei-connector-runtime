@@ -1,0 +1,122 @@
+{
+  "schema": "kei.policy-bundle/v2",
+  "bundle_id": "20000000-0000-0000-0000-000000000004",
+  "bundle_version": 3,
+  "policy_revision": 7,
+  "issuer": "kei-policy-catalog",
+  "audience": {
+    "installation_id": "20000000-0000-0000-0000-000000000001",
+    "org_id": "20000000-0000-0000-0000-000000000002",
+    "workspace_id": "20000000-0000-0000-0000-000000000003"
+  },
+  "issued_at": "2026-10-09T12:00:00Z",
+  "not_after": "2026-10-09T13:00:00Z",
+  "refresh": {
+    "poll_interval_seconds": 60,
+    "stale_after_seconds": 300
+  },
+  "subject_resolution": {
+    "max_cache_seconds": 60,
+    "mode": "bundle"
+  },
+  "policy_set": {
+    "checks": [],
+    "evaluation": {
+      "checks": "per_capability_first_match_and",
+      "default": "deny",
+      "precedence": [
+        "priority_desc",
+        "deny_before_permit",
+        "policy_id_asc"
+      ]
+    },
+    "harness_match_semantics": "kei.harness-match/v1",
+    "harness_policies": [
+      {
+        "action": "deny",
+        "dst_pattern": "skill:deploy",
+        "name": "group deploy block",
+        "policy_id": "20000000-0000-0000-0000-000000000010",
+        "priority": 100,
+        "scope": {
+          "agent_id": null,
+          "org_id": "20000000-0000-0000-0000-000000000002",
+          "workspace_id": "20000000-0000-0000-0000-000000000003"
+        },
+        "src_pattern": "group:release_eng"
+      },
+      {
+        "action": "permit",
+        "dst_pattern": "shell:git",
+        "name": "creator git",
+        "policy_id": "20000000-0000-0000-0000-000000000011",
+        "priority": 100,
+        "scope": {
+          "agent_id": null,
+          "org_id": "20000000-0000-0000-0000-000000000002",
+          "workspace_id": "20000000-0000-0000-0000-000000000003"
+        },
+        "src_pattern": "user:20000000-0000-0000-0000-000000000005"
+      },
+      {
+        "action": "permit",
+        "dst_pattern": "shell:gh",
+        "name": "codex gh",
+        "policy_id": "20000000-0000-0000-0000-000000000012",
+        "priority": 50,
+        "scope": {
+          "agent_id": null,
+          "org_id": "20000000-0000-0000-0000-000000000002",
+          "workspace_id": "20000000-0000-0000-0000-000000000003"
+        },
+        "src_pattern": "harness:codex"
+      }
+    ],
+    "match_semantics": "kei.match/v2",
+    "org_id": "20000000-0000-0000-0000-000000000002",
+    "schema": "kei.policy-set/v2",
+    "tool_policies": [],
+    "tools": [
+      {
+        "name": "harness.open_file",
+        "operation_class": "read",
+        "route": {
+          "harness_executor": {
+            "executor": "opencode",
+            "registration": "registration-1"
+          }
+        },
+        "source": "local"
+      }
+    ],
+    "workspace_id": "20000000-0000-0000-0000-000000000003"
+  },
+  "agent_connector_bindings": [],
+  "harnesses": [
+    {
+      "agent_id": "20000000-0000-0000-0000-000000000006",
+      "kind": "codex"
+    }
+  ],
+  "harness_match_semantics": "kei.harness-match/v1",
+  "identities": [
+    {
+      "source": "cli",
+      "external_id": "ext-creator",
+      "user_id": "20000000-0000-0000-0000-000000000005",
+      "status": "linked",
+      "groups": [
+        "members",
+        "release_eng"
+      ]
+    }
+  ],
+  "subject": {
+    "user_id": "20000000-0000-0000-0000-000000000005",
+    "email": "creator@example.test",
+    "groups": [
+      "members",
+      "release_eng"
+    ]
+  }
+}

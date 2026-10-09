@@ -37,32 +37,25 @@ func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID, reason str
 	if v != nil && v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(time.Now()) {
 		return HarnessNotRenderable, "", HarnessReasonBundleInvalid
 	}
-	set, err := v.decodePolicySet()
-	if err != nil {
-		return HarnessNotRenderable, "", HarnessReasonBundleInvalid
-	}
-	policyRows := set.Policies
+	var policies []harnessmatch.Policy
 	if v.Payload.Schema == "kei.policy-bundle/v2" {
-		if v.Payload.HarnessMatchSemantics != "kei.harness-match/v1" {
+		// v2 carries harness policies under policy_set (kei#852).
+		var set v2PolicySet
+		if err := json.Unmarshal(v.Payload.PolicySet, &set); err != nil || set.HarnessMatchSemantics != "kei.harness-match/v1" {
 			return HarnessNotRenderable, "", HarnessReasonBundleInvalid
 		}
-		var harnessPolicies []policy
-		if len(v.Payload.HarnessPolicies) > 0 {
-			if err := json.Unmarshal(v.Payload.HarnessPolicies, &harnessPolicies); err != nil {
-				return HarnessNotRenderable, "", HarnessReasonBundleInvalid
-			}
+		policies = make([]harnessmatch.Policy, len(set.HarnessPolicies))
+		for i, p := range set.HarnessPolicies {
+			policies[i] = harnessmatch.Policy{ID: p.PolicyID, Src: p.Src, Dst: p.Dst, Action: p.Action, Enabled: true, Scope: p.Scope.AgentID}
 		}
-		policyRows = harnessPolicies
-	}
-	policies := make([]harnessmatch.Policy, len(policyRows))
-	for i, p := range policyRows {
-		policies[i] = harnessmatch.Policy{
-			ID:      p.ID,
-			Src:     p.Src,
-			Dst:     p.Dst,
-			Action:  p.Action,
-			Enabled: true,
-			Scope:   p.Scope.AgentID,
+	} else {
+		set, err := v.decodePolicySet()
+		if err != nil {
+			return HarnessNotRenderable, "", HarnessReasonBundleInvalid
+		}
+		policies = make([]harnessmatch.Policy, len(set.Policies))
+		for i, p := range set.Policies {
+			policies[i] = harnessmatch.Policy{ID: p.ID, Src: p.Src, Dst: p.Dst, Action: p.Action, Enabled: true, Scope: p.Scope.AgentID}
 		}
 	}
 	result := harnessmatch.Evaluate(c, policies)

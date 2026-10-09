@@ -31,7 +31,9 @@
     },
     "tools": [],
     "checks": [],
-    "tool_policies": []
+    "tool_policies": [],
+    "harness_match_semantics": "kei.harness-match/v1",
+    "harness_policies": []
   },
   "agent_connector_bindings": [],
   "identities": [

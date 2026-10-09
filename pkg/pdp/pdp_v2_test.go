@@ -18,7 +18,7 @@ func v2SnapshotBundle(t *testing.T, now time.Time, version int64, identities []m
 		"issued_at": now.UTC().Format(time.RFC3339Nano), "not_after": now.Add(12 * time.Hour).UTC().Format(time.RFC3339Nano),
 		"refresh":                  map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300},
 		"subject_resolution":       map[string]any{"mode": "bundle", "max_cache_seconds": 1},
-		"policy_set":               map[string]any{"schema": "kei.policy-set/v2", "org_id": testOrg, "workspace_id": testWorkspace, "match_semantics": "kei.match/v2", "evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"}, "tools": []any{}, "checks": []any{}, "tool_policies": []any{}},
+		"policy_set":               map[string]any{"schema": "kei.policy-set/v2", "org_id": testOrg, "workspace_id": testWorkspace, "match_semantics": "kei.match/v2", "evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"}, "tools": []any{}, "checks": []any{}, "tool_policies": []any{}, "harness_match_semantics": "kei.harness-match/v1", "harness_policies": []any{}},
 		"agent_connector_bindings": []any{}, "identities": identities,
 	}
 	raw, err := json.Marshal(bundle)

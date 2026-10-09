@@ -100,9 +100,27 @@ type v2PolicySet struct {
 		Checks     string   `json:"checks"`
 		Default    string   `json:"default"`
 	} `json:"evaluation"`
-	Tools        []V2Tool  `json:"tools"`
-	Checks       []v2Check `json:"checks"`
-	ToolPolicies []v2Check `json:"tool_policies"`
+	Tools                 []V2Tool          `json:"tools"`
+	Checks                []v2Check         `json:"checks"`
+	ToolPolicies          []v2Check         `json:"tool_policies"`
+	HarnessMatchSemantics string            `json:"harness_match_semantics"`
+	HarnessPolicies       []v2HarnessPolicy `json:"harness_policies"`
+}
+
+// v2HarnessPolicy is one ADR-029 harness policy row as the catalog emits it
+// under policy_set.harness_policies (kei.harness-match/v1).
+type v2HarnessPolicy struct {
+	PolicyID string `json:"policy_id"`
+	Name     string `json:"name"`
+	Src      string `json:"src_pattern"`
+	Dst      string `json:"dst_pattern"`
+	Action   string `json:"action"`
+	Priority int    `json:"priority"`
+	Scope    struct {
+		OrgID       *string `json:"org_id"`
+		WorkspaceID *string `json:"workspace_id"`
+		AgentID     *string `json:"agent_id"`
+	} `json:"scope"`
 }
 
 // EvaluateV2HarnessTool decides one harness-executed tool against the v2

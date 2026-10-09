@@ -4,7 +4,7 @@
   "title": "kei.policy-set/v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "org_id", "workspace_id", "match_semantics", "evaluation", "tools", "checks", "tool_policies"],
+  "required": ["schema", "org_id", "workspace_id", "match_semantics", "evaluation", "tools", "checks", "tool_policies", "harness_match_semantics", "harness_policies"],
   "properties": {
     "schema": {"const": "kei.policy-set/v2"},
     "org_id": {"$ref": "#/$defs/id"},
@@ -13,9 +13,12 @@
     "evaluation": {"type": "object", "additionalProperties": false, "required": ["precedence", "checks", "default"], "properties": {"precedence": {"const": ["priority_desc", "deny_before_permit", "policy_id_asc"]}, "checks": {"const": "per_capability_first_match_and"}, "default": {"const": "deny"}}},
     "tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}},
     "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
-    "tool_policies": {"type": "array", "items": {"$ref": "#/$defs/check"}}
+    "tool_policies": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "harness_match_semantics": {"const": "kei.harness-match/v1"},
+    "harness_policies": {"type": "array", "items": {"$ref": "#/$defs/harnessPolicy"}}
   },
   "$defs": {
+    "harnessPolicy": {"type": "object", "additionalProperties": false, "required": ["policy_id", "name", "src_pattern", "dst_pattern", "action", "priority", "scope"], "properties": {"policy_id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "src_pattern": {"type": "string", "minLength": 1}, "dst_pattern": {"type": "string", "minLength": 1}, "action": {"enum": ["permit", "deny"]}, "priority": {"type": "integer"}, "scope": {"$ref": "#/$defs/scope"}}},
     "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
     "capability": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$"},
     "resourceType": {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"}, "parent_type": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"}}},

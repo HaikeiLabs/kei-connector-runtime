@@ -44,7 +44,7 @@ func unsignedV2ExampleBundle(t *testing.T, now time.Time) []byte {
 		"policy_set": map[string]any{
 			"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2",
 			"evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
-			"tools":      []any{}, "checks": []any{}, "tool_policies": []any{},
+			"tools":      []any{}, "checks": []any{}, "tool_policies": []any{}, "harness_match_semantics": "kei.harness-match/v1", "harness_policies": []any{},
 		},
 		"agent_connector_bindings": []any{},
 		"identities":               []any{map[string]any{"source": "discord", "external_id": "ext-v2-client-test", "user_id": "u-v2-client-test", "status": "linked", "groups": []string{"members"}}},
