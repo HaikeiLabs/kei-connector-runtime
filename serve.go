@@ -105,11 +105,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
 		},
 		func(identity *keiruntime.Identity) error {
-			sync := SyncPolicyBundle
-			if cfg.PolicyBundleV2Ready {
-				sync = SyncPolicyBundleV2Ready
-			}
-			return sync(ctx, cfg, &RuntimeIdentity{
+			return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
 				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
 			}, 10*time.Second)
 		},

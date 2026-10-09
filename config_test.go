@@ -31,21 +31,6 @@ func TestValidateRuntimeTokenFormatRejectsShortToken(t *testing.T) {
 	}
 }
 
-func TestConfigFromEnvEnablesV2BundleOnlyWithExplicitOptIn(t *testing.T) {
-	t.Setenv("KEI_POLICY_BUNDLE_V2", "")
-	if configFromEnv().PolicyBundleV2Ready {
-		t.Fatal("v2 bundle readiness must default to false")
-	}
-	t.Setenv("KEI_POLICY_BUNDLE_V2", "true")
-	if configFromEnv().PolicyBundleV2Ready {
-		t.Fatal("only the explicit value 1 should enable v2 bundle readiness")
-	}
-	t.Setenv("KEI_POLICY_BUNDLE_V2", "1")
-	if !configFromEnv().PolicyBundleV2Ready {
-		t.Fatal("explicit v2 bundle readiness opt-in was ignored")
-	}
-}
-
 func TestConfigFromEnvDoesNotEnableRuntimeWithoutCanonicalToken(t *testing.T) {
 	cfg := configFromEnv()
 	if cfg.RuntimeToken != "" {
