@@ -665,7 +665,12 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
 	} else if e := l.evaluator.Load(); e != nil {
 		var err error
-		if d, err = e.Evaluate(r.Context(), preq); err != nil {
+		if e.IsV2HarnessTool(req.Tool) {
+			d, err = e.AuthorizeV2HarnessTool(r.Context(), preq)
+		} else {
+			d, err = e.Evaluate(r.Context(), preq)
+		}
+		if err != nil {
 			writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
 			return
 		}

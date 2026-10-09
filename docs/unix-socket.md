@@ -15,6 +15,13 @@ responses omit enrollment claim URLs. Runtimes built before this change still
 require the bearer token on `/v1/authorize` and will reject an unauthenticated
 adapter request.
 
+For v2 bundles, named-session `POST /v1/authorize` calls evaluate local
+`tool_policies` only for tools explicitly registered with a
+`harness_executor` route. Pass the runtime-issued session ID in
+`X-Kei-Session`. This is a decision-only path: the harness executes the tool;
+no preflight handle or connector credential is returned. V1 socket behavior is
+unchanged, and one-shot `kei-proxy authorize` does not authorize v2.
+
 There are three reasons for this design.
 
 ## 1. Speed
