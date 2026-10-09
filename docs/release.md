@@ -14,8 +14,9 @@ Check these before you cut a release:
   `admin`, which means a repository or organization owner.
 - **`gh` authenticated** against github.com (`gh auth status`).
 - **`main` is green:** CI runs build, vet, gofmt, and `go test -race`.
-- **Release runner online.** The self-hosted `kei-cli-release` runner, shared
-  with kei-cli, must be registered and idle. Check
+- **Release runner online.** The self-hosted `kei-proxy-release` runner
+  (runner group `kei-proxy-release`, this repository only) must be registered
+  and idle. Check
   <https://github.com/HaikeiLabs/kei-connector-runtime/settings/actions/runners>.
 - **Signing key present.** The `release` environment must have the
   `GORELEASER_SIGNING_KEY` secret: the GPG key for

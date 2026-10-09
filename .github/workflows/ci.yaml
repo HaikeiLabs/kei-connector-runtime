@@ -14,7 +14,16 @@ concurrency:
 jobs:
   verify:
     name: Build and test
-    runs-on: kei-cli-release
+    # Build and test need no AWS, so they run on the private-only no-AWS
+    # docker-ci runner, not on a release runner (HaikeiLabs/kei infra/README.md,
+    # "Runner groups and secrets"). Its runner image has no C toolchain and
+    # the pod cannot escalate privileges, so -race (cgo) runs in a Go image,
+    # as kei-oidc-bridge's CI does.
+    runs-on: kei-docker-ci
+    container: golang:1.27-bookworm
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
     steps:
       - uses: actions/checkout@v4
 

@@ -512,8 +512,9 @@ is skipped or fails), see [docs/release.md](docs/release.md).
    and installer for leaked credentials, and, for stable releases only,
    writes `latest.txt`.
 
-Validate tag and Release run on the self-hosted `kei-cli-release` runner,
-the same one kei-cli uses. The runner Pod gets AWS access from its IRSA role,
+Validate tag and Release run on the self-hosted `kei-proxy-release` runner,
+whose runner group admits only this repository. The runner Pod gets AWS
+access from its IRSA role (write on `kei-proxy/*` only),
 so no AWS credentials are stored in the repository or the workflow. The
 Release job runs in the `release` environment, which holds the
 `GORELEASER_SIGNING_KEY` secret (the GPG key for
