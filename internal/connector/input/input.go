@@ -14,9 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/providers"
 )
@@ -101,7 +103,9 @@ type GmailMessageGet struct {
 
 // DriveSearch is the google_drive/drive.search input.
 type DriveSearch struct {
-	Query string `json:"query"`
+	Query    string `json:"query,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
 }
 
 // TitoEventList is the tito/event.list input.
@@ -261,8 +265,14 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 		return in, nil
 	case "google_drive/drive.search":
 		var in DriveSearch
-		if strict(raw, &in) != nil || in.Query == "" || len(in.Query) > 512 {
+		if strict(raw, &in) != nil || len(in.Query) > 512 || strings.Contains(in.Query, `\`) || strings.IndexFunc(in.Query, unicode.IsControl) >= 0 || in.Limit < 0 || in.Limit > 100 {
 			return nil, ErrInvalid
+		}
+		if in.MimeType != "" {
+			mediaType, params, err := mime.ParseMediaType(in.MimeType)
+			if err != nil || mediaType != in.MimeType || !strings.Contains(mediaType, "/") || len(params) != 0 {
+				return nil, ErrInvalid
+			}
 		}
 		return in, nil
 	case "tito/event.list":

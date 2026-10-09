@@ -230,8 +230,15 @@ func envelopeJSON(capability, action, resource, subject string) string {
 }
 
 func descriptorJSON(provider, source, model, subject string, capabilities string, extra string) string {
-	d := fmt.Sprintf(`{"id":%q,"tenant_id":%q,"workspace_id":%q,"name":"conn","provider":%q,"status":"active","credential_source":%q,"credential_ref":%q,"scopes":["read"],"resources":["*"],"policy":{"allowed_actions":["read"],"allowed_resources":["*"]},"capabilities":%s,"created_by":%q`,
-		execConnector, execTenant, execWorkspace, provider, source, execSecretRef, capabilities, execUser)
+	scopes := []string{"read"}
+	if provider == "google_drive" {
+		scopes = []string{"https://www.googleapis.com/auth/drive.readonly"}
+	} else if provider == "gmail" {
+		scopes = []string{"https://www.googleapis.com/auth/gmail.readonly"}
+	}
+	scopesJSON, _ := json.Marshal(scopes)
+	d := fmt.Sprintf(`{"id":%q,"tenant_id":%q,"workspace_id":%q,"name":"conn","provider":%q,"status":"active","credential_source":%q,"credential_ref":%q,"scopes":%s,"resources":["*"],"policy":{"allowed_actions":["read"],"allowed_resources":["*"]},"capabilities":%s,"created_by":%q`,
+		execConnector, execTenant, execWorkspace, provider, source, execSecretRef, string(scopesJSON), capabilities, execUser)
 	if model != "" {
 		d += fmt.Sprintf(`,"account_model":%q`, model)
 	}
@@ -395,20 +402,51 @@ func TestConnectorInvokeLinearIssueRead(t *testing.T) {
 	}
 }
 
-func TestConnectorInvokeDriveSearch(t *testing.T) {
+func TestConnectorInvokeDriveListFilesUsesReadPolicyAndBoundedProviderQuery(t *testing.T) {
 	h := newExecHarness(t)
 	caps := `[{"name":"drive.search","action":"read"}]`
 	h.catalogBody = allowJSON(envelopeJSON("drive.search", "read", "drive/0AFx", execUser),
 		descriptorJSON("google_drive", "oauth", "per_user", "", caps, ""), oauthJSON(h.now.Add(time.Minute)))
 	h.transport.routes["www.googleapis.com"] = func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"files":[{"id":"f-1","driveId":"0AFx","name":"Plan","mimeType":"application/vnd.google-apps.document","modifiedTime":"2026-09-01T00:00:00Z"}]}`)
+		if r.Method != http.MethodGet || r.URL.Path != "/drive/v3/files" || r.URL.Query().Get("driveId") != "0AFx" || r.URL.Query().Get("pageSize") != "" {
+			t.Errorf("provider list request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		q := r.URL.Query().Get("q")
+		if !strings.Contains(q, "trashed = false") || !strings.Contains(q, "name contains 'plan'") || strings.Contains(q, "mimeType") {
+			t.Errorf("provider filter = %q", q)
+		}
+		_, _ = io.WriteString(w, `{"files":[{"id":"f-1","driveId":"0AFx","name":"Plan","mimeType":"text/plain","modifiedTime":"2026-09-01T00:00:00Z","content":"must not be returned"},{"id":"f-2","driveId":"0AFx","name":"Plan document","mimeType":"application/vnd.google-apps.document"},{"id":"f-3","driveId":"other-drive","name":"Plan other","mimeType":"text/plain"}]}`)
 	}
-	out, code := h.run("--capability", "drive.search", "--action", "read", "--resource", "drive/0AFx", "--user", execUser, "--input", `{"query":"plan"}`)
+	out, code := h.run("--capability", "drive.search", "--action", "read", "--resource", "drive/0AFx", "--user", execUser, "--input", `{"query":"plan","mime_type":"text/plain","limit":10}`)
 	if code != 0 {
 		t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
 	}
-	if !strings.Contains(fmt.Sprint(out["result"]), "Plan") {
-		t.Fatalf("result = %v", out["result"])
+	result := fmt.Sprint(out["result"])
+	if !strings.Contains(result, "f-1") || strings.Contains(result, "f-2") || strings.Contains(result, "f-3") || strings.Contains(result, "must not be returned") {
+		t.Fatalf("normalized result = %v", out["result"])
+	}
+	catalogJSON, _ := json.Marshal(h.catalogReqs)
+	for _, privateInput := range []string{"plan", "mime_type", "text/plain", "limit"} {
+		if strings.Contains(string(catalogJSON), privateInput) {
+			t.Fatalf("provider input %q reached the policy catalog: %s", privateInput, catalogJSON)
+		}
+	}
+}
+
+func TestConnectorInvokeDriveListFilesRejectsBackslashQueryBeforeProvider(t *testing.T) {
+	h := newExecHarness(t)
+	caps := `[{"name":"drive.search","action":"read"}]`
+	h.catalogBody = allowJSON(envelopeJSON("drive.search", "read", "drive/0AFx", execUser),
+		descriptorJSON("google_drive", "oauth", "per_user", "", caps, ""), oauthJSON(h.now.Add(time.Minute)))
+	out, code := h.run("--capability", "drive.search", "--action", "read", "--resource", "drive/0AFx", "--user", execUser,
+		"--input", `{"query":"\\\\' or trashed != true"}`)
+	h.assertDeny(out, code, "input_invalid")
+	if h.catalogCalled != 1 || h.transport.callCount() != 0 {
+		t.Fatalf("invalid query reached catalog %d times or provider %d times", h.catalogCalled, h.transport.callCount())
+	}
+	catalogJSON, _ := json.Marshal(h.catalogReqs)
+	if strings.Contains(string(catalogJSON), "trashed") || strings.Contains(string(catalogJSON), "query") {
+		t.Fatalf("raw invalid input reached catalog: %s", catalogJSON)
 	}
 }
 

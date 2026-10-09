@@ -1,4 +1,4 @@
-// Package googledrive is the google_drive connector: drive.search,
+// Package googledrive is the google_drive connector: bounded drive.search,
 // drive.metadata.read, and docs.read through the kei-connector-contracts
 // Google client. Search and metadata never carry file content; docs.read
 // returns the document text, capped at MaxDocumentBytes.
@@ -26,6 +26,14 @@ type Document struct {
 // Connector executes google_drive reads.
 type Connector struct{}
 
+func driveIDFromResource(resource string) string {
+	parts := strings.Split(resource, "/")
+	if len(parts) != 2 || parts[0] != "drive" {
+		return ""
+	}
+	return parts[1]
+}
+
 // Execute runs one google_drive read.
 func (Connector) Execute(ctx context.Context, call connector.Call) (any, error) {
 	var payload providers.Payload
@@ -47,6 +55,28 @@ func (Connector) Execute(ctx context.Context, call connector.Call) (any, error) 
 	res, err := providers.NewAuthenticatedGoogle(call.RuntimeConfig()).Invoke(ctx, call.Meta, call.Invocation, payload)
 	if err != nil {
 		return nil, err
+	}
+	if in, ok := call.Input.(input.DriveSearch); ok {
+		files, ok := res.Data.([]providers.GoogleFile)
+		if !ok {
+			return nil, connector.ErrInput
+		}
+		driveID := driveIDFromResource(call.Invocation.Resource)
+		limit := in.Limit
+		if limit == 0 {
+			limit = 50
+		}
+		filtered := make([]providers.GoogleFile, 0, min(limit, len(files)))
+		for _, file := range files {
+			if file.DriveID != driveID || (in.MimeType != "" && file.MimeType != in.MimeType) {
+				continue
+			}
+			filtered = append(filtered, file)
+			if len(filtered) == limit {
+				break
+			}
+		}
+		return filtered, nil
 	}
 	if text, ok := res.Data.(string); ok {
 		if len(text) > MaxDocumentBytes {
