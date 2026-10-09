@@ -338,6 +338,13 @@ func (e *Evaluator) BundleIdentities() []policybundle.Identity {
 	return v.Payload.Identities
 }
 
+// BundleStatus reports the locally stored bundle schema and state without
+// contacting the control plane. Schema is retained for invalid/expired bundles
+// when it can be safely read from the stored document.
+func (e *Evaluator) BundleStatus() (policybundle.Status, error) {
+	return e.store.Status(e.now().UTC())
+}
+
 // IsV2HarnessTool reports whether name has an explicit harness_executor route
 // in the current verified v2 bundle. It performs no network request.
 func (e *Evaluator) IsV2HarnessTool(name string) bool {

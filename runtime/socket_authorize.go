@@ -25,6 +25,7 @@ const (
 	sessionSchema           = "kei.session/v1"
 	// sessionSchemaV2 creates a named session (multi-session socket API).
 	sessionSchemaV2      = "kei.session/v2"
+	bundleStatusSchema   = "kei.policy-bundle-status/v1"
 	maxSocketRequest     = 64 << 10
 	maxSocketPlanRequest = 192 << 10
 )
@@ -347,6 +348,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
+		case r.URL.Path == "/v1/policy-bundle/status" && r.Method == http.MethodGet:
 		case r.URL.Path == "/v1/preflight" && r.Method == http.MethodPost && l.preflight != nil:
 		case r.URL.Path == "/v1/consume" && r.Method == http.MethodPost && l.preflight != nil:
 		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
@@ -371,6 +373,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		switch {
 		case r.URL.Path == "/v1/authorize":
 			l.handleAuthorize(w, r, authenticated)
+		case r.URL.Path == "/v1/policy-bundle/status":
+			l.handlePolicyBundleStatus(w)
 		case r.URL.Path == "/v1/preflight":
 			l.handlePreflight(w, r)
 		case r.URL.Path == "/v1/consume":
@@ -643,6 +647,29 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type socketPolicyBundleStatus struct {
+	Schema        string `json:"schema"`
+	BundleSchema  string `json:"bundle_schema,omitempty"`
+	BundleVersion int64  `json:"bundle_version,omitempty"`
+	State         string `json:"state"`
+}
+
+// handlePolicyBundleStatus exposes only the locally stored bundle schema,
+// version and state. It makes no control-plane call and returns no policy data.
+func (l *LocalPDP) handlePolicyBundleStatus(w http.ResponseWriter) {
+	result := socketPolicyBundleStatus{Schema: bundleStatusSchema, State: "cold"}
+	if e := l.evaluator.Load(); e != nil {
+		status, err := e.BundleStatus()
+		result.State = string(status.State)
+		if err == nil {
+			result.BundleSchema, result.BundleVersion = status.BundleSchema, status.BundleVersion
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, includeEnrollment bool) {

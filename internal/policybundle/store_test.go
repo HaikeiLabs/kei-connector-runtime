@@ -24,6 +24,21 @@ func audience() (string, string, string) {
 	return "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001"
 }
 
+func TestStatusReportsStoredBundleSchema(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, org, ws := audience()
+	if _, err := store.Activate(fixtureBundle(t), inst, org, ws, fixtureNow()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.Status(fixtureNow())
+	if err != nil || status.BundleSchema != "kei.policy-bundle/v1" || status.BundleVersion != 42 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
 func TestHealthReportContainsOnlyApprovedMetadata(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "state"))
 	if err != nil {

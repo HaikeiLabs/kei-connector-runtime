@@ -121,6 +121,11 @@ func TestGenericLocalPDPHandlerStillRequiresRuntimeTokenForAuthorize(t *testing.
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated authorize on generic handler status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
+	status := httptest.NewRecorder()
+	handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/v1/policy-bundle/status", nil))
+	if status.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated bundle status = %d, want %d", status.Code, http.StatusUnauthorized)
+	}
 }
 
 func TestSocketSessionGetReturns401WithoutRuntimeToken(t *testing.T) {

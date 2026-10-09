@@ -118,6 +118,12 @@ func TestSocketAuthorizeV2HarnessToolRequiresNamedSessionAndUsesToolPolicies(t *
 		t.Fatal(err)
 	}
 	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	status := httptest.NewRecorder()
+	h.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/v1/policy-bundle/status", nil))
+	var bundleStatus socketPolicyBundleStatus
+	if status.Code != http.StatusOK || json.Unmarshal(status.Body.Bytes(), &bundleStatus) != nil || bundleStatus.Schema != bundleStatusSchema || bundleStatus.BundleSchema != "kei.policy-bundle/v2" || bundleStatus.BundleVersion != 42 {
+		t.Fatalf("bundle status=%d body=%s", status.Code, status.Body.String())
+	}
 	put := httptest.NewRecorder()
 	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
 	var sessionResponse socketSessionResponse
