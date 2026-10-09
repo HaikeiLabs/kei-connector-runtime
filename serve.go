@@ -117,6 +117,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		func() { RevokePolicyState(cfg) },
 		local.SetIdentity,
 		local.AfterSync,
+		keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, os.Getenv)),
 	)
 	slog.Info("runtime_http_listener_started", "addr", addr)
 	slog.Info("runtime_unix_listener_started", "path", socketPath, "mode", "0600")

@@ -65,14 +65,47 @@ func Listen(path string) (net.Listener, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	listener, err := net.Listen("unix", path)
+	return listenPrivate(path)
+}
+
+// listenPrivate binds the socket in a private (0700) directory beside path,
+// sets it to 0600, then renames it into place, so path never exists with the
+// umask's wider mode, not even between bind and chmod.
+func listenPrivate(path string) (net.Listener, error) {
+	staging, err := os.MkdirTemp(filepath.Dir(path), ".kps")
+	if err != nil {
+		return nil, fmt.Errorf("create socket staging directory: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	tmp := filepath.Join(staging, "s")
+	listener, err := net.Listen("unix", tmp)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	unixListener := listener.(*net.UnixListener)
+	// The listener would unlink tmp on close; closeListener removes path.
+	unixListener.SetUnlinkOnClose(false)
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		_ = listener.Close()
-		_ = os.Remove(path)
 		return nil, fmt.Errorf("set socket permissions: %w", err)
 	}
-	return listener, nil
+	if err := os.Rename(tmp, path); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("move socket into place: %w", err)
+	}
+	return &closeListener{UnixListener: unixListener, path: path}, nil
+}
+
+// closeListener removes the socket file at path when it is closed.
+type closeListener struct {
+	*net.UnixListener
+	path string
+}
+
+func (l *closeListener) Close() error {
+	err := l.UnixListener.Close()
+	if removeErr := os.Remove(l.path); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
+		err = removeErr
+	}
+	return err
 }

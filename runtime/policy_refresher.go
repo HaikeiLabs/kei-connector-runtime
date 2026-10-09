@@ -3,10 +3,12 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/harnessresync"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
@@ -38,6 +40,9 @@ type PolicyRefresher struct {
 	CheckRevocation func(error) bool
 	// RevokeState clears the local policy state on revocation.
 	RevokeState func()
+	// HarnessResync, when set, runs beside the loop while it holds the
+	// refresher lock and is told about each successful refresh (HAI-432).
+	HarnessResync *harnessresync.Resyncer
 }
 
 // NewPolicyRefresher creates a PolicyRefresher bound to the given config
@@ -73,6 +78,18 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 		return
 	}
 	defer release()
+	if r.HarnessResync != nil {
+		resyncCtx, stopResync := context.WithCancel(ctx)
+		resyncDone := make(chan struct{})
+		go func() {
+			defer close(resyncDone)
+			r.HarnessResync.Run(resyncCtx)
+		}()
+		defer func() {
+			stopResync()
+			<-resyncDone
+		}()
+	}
 
 	var identity *Identity
 	for {
@@ -96,6 +113,9 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 			if err != nil && ctx.Err() == nil {
 				slog.Warn("policy bundle refresh failed; the active bundle stays until it expires", "error", err)
 			}
+			if err == nil && r.HarnessResync != nil {
+				r.HarnessResync.BundleRefreshed(bundleKey(store))
+			}
 			r.notify(err)
 		}
 		select {
@@ -104,6 +124,16 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 		case <-r.After(r.Jitter(PollInterval(store, identity))):
 		}
 	}
+}
+
+// bundleKey identifies the active bundle, so a resync check runs only when
+// the refresh changed it.
+func bundleKey(store *policybundle.Store) string {
+	status, err := store.Status(time.Now().UTC())
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%s/%d/%s", status.BundleID, status.BundleVersion, status.BundleDigest)
 }
 
 func (r *PolicyRefresher) notify(err error) {
@@ -151,6 +181,7 @@ func StartPolicyRefresher(
 	revokeState func(),
 	onIdentity func(*Identity),
 	afterSync func(error),
+	opts ...RefresherOption,
 ) (stop func()) {
 	if !cfg.IsRuntime() {
 		return func() {}
@@ -158,6 +189,9 @@ func StartPolicyRefresher(
 	refresher := NewPolicyRefresher(cfg, whoami, sync, checkRevocation, revokeState)
 	refresher.OnIdentity = onIdentity
 	refresher.AfterSync = afterSync
+	for _, opt := range opts {
+		opt(refresher)
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -169,4 +203,13 @@ func StartPolicyRefresher(
 		cancel()
 		<-done
 	}
+}
+
+// RefresherOption configures a PolicyRefresher started by
+// StartPolicyRefresher.
+type RefresherOption func(*PolicyRefresher)
+
+// WithHarnessResync runs r beside the refresher (nil is a no-op).
+func WithHarnessResync(r *harnessresync.Resyncer) RefresherOption {
+	return func(p *PolicyRefresher) { p.HarnessResync = r }
 }
