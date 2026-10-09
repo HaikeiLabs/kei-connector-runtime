@@ -217,6 +217,31 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 	return HarnessResult{Outcome: outcome, PolicyID: policyID, Reason: reason}, nil
 }
 
+// AuthorizeV2HarnessTool evaluates a registered harness-executor tool for the
+// subject held by a live named session. It never accepts a caller-supplied
+// subject and does not execute the harness tool.
+func (e *Evaluator) AuthorizeV2HarnessTool(ctx context.Context, req Request) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
+	if req.Session == DefaultSession || !e.sessionLive(req.Session) {
+		if req.Session == DefaultSession {
+			return Decision{Reason: "v2 harness authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
+		}
+		return sessionDenial(), nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return stateDenial(state), nil
+	}
+	var subject *policybundle.SessionSubject
+	if current, ok := e.sessions.Get(req.Session); ok {
+		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+	}
+	d := v.EvaluateV2HarnessTool(req.Tool, req.AgentID, subject, e.now().UTC())
+	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+}
+
 // AuthorizeV2Plan revalidates the exact named session and evaluates the complete plan.
 type V2PlanContext struct {
 	BundleDigest  string
@@ -313,6 +338,20 @@ func (e *Evaluator) BundleIdentities() []policybundle.Identity {
 	return v.Payload.Identities
 }
 
+// BundleStatus reports the locally stored bundle schema and state without
+// contacting the control plane. Schema is retained for invalid/expired bundles
+// when it can be safely read from the stored document.
+func (e *Evaluator) BundleStatus() (policybundle.Status, error) {
+	return e.store.Status(e.now().UTC())
+}
+
+// IsV2HarnessTool reports whether name has an explicit harness_executor route
+// in the current verified v2 bundle. It performs no network request.
+func (e *Evaluator) IsV2HarnessTool(name string) bool {
+	v, _, err := e.check()
+	return err == nil && v.V2HarnessTool(name, e.now().UTC())
+}
+
 func (e *Evaluator) check() (*policybundle.Verified, policybundle.State, error) {
 	return e.store.Check(e.aud.InstallationID, e.aud.OrgID, e.aud.WorkspaceID, e.now().UTC())
 }
@@ -345,7 +384,7 @@ func denySource(code string) string {
 		return "runtime_state"
 	case strings.HasPrefix(code, "tool_"), strings.HasPrefix(code, "agent_"):
 		return "registry"
-	case strings.HasPrefix(code, "subject_"), code == ReasonSessionNotFound:
+	case strings.HasPrefix(code, "subject_"), code == ReasonSessionNotFound, code == "session_required":
 		return "identity"
 	}
 	return "policy"

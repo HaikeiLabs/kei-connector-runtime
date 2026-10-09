@@ -42,6 +42,24 @@ type V2Tool struct {
 	Plan                 json.RawMessage  `json:"plan,omitempty"`
 }
 
+// V2HarnessTool reports whether name resolves to an explicitly registered
+// harness_executor route in a verified v2 bundle.
+func (v *Verified) V2HarnessTool(name string, now time.Time) bool {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return false
+	}
+	var set v2PolicySet
+	if strictJSON(v.Payload.PolicySet, &set) != nil {
+		return false
+	}
+	for _, tool := range set.Tools {
+		if tool.Name == name {
+			return tool.Route.HarnessExecutor != nil && tool.Route.ConnectorBinding == nil
+		}
+	}
+	return false
+}
+
 // V2ConnectorTool resolves one trusted connector tool from the parsed v2 set.
 func (v *Verified) V2ConnectorTool(name string, now time.Time) (V2Tool, bool) {
 	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
@@ -85,6 +103,52 @@ type v2PolicySet struct {
 	Tools        []V2Tool  `json:"tools"`
 	Checks       []v2Check `json:"checks"`
 	ToolPolicies []v2Check `json:"tool_policies"`
+}
+
+// EvaluateV2HarnessTool decides one harness-executed tool against the v2
+// tool_policies set. The harness executes the tool; this method only returns
+// the local policy decision. A fresh bundle identity must corroborate the
+// named session subject before any tool policy can permit it.
+func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *SessionSubject, now time.Time) Decision {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
+	}
+	if subject == nil {
+		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "no session subject"}
+	}
+	if decision, denied := subjectGate(subject); denied {
+		return decision
+	}
+	var identity Identity
+	var known bool
+	if subject.Source == "cli" && subject.ExternalID == "" {
+		identity, known = v.LookupLinkedUser(subject.UserID, now)
+	} else {
+		identity, known = v.LookupIdentity(subject.Source, subject.ExternalID, now)
+	}
+	if !known || identity.UserID != subject.UserID {
+		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session identity is not present in the fresh bundle snapshot"}
+	}
+	if identity.Status != SubjectLinked {
+		return Decision{Outcome: "deny", ReasonCode: statusReasonCode(identity.Status), Reason: "the bundle snapshot does not grant the session identity"}
+	}
+	var set v2PolicySet
+	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
+		return invalidDecision()
+	}
+	var registered *V2Tool
+	for i := range set.Tools {
+		if set.Tools[i].Name == toolName {
+			registered = &set.Tools[i]
+			break
+		}
+	}
+	if registered == nil || registered.Route.HarnessExecutor == nil || registered.Route.ConnectorBinding != nil {
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "harness tool is not registered in the policy bundle"}
+	}
+	request := map[string]string{"tool": registered.Name, "source": registered.Source}
+	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
+	return evaluateV2Check(set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
 }
 
 // EvaluateV2Plan locally AND-authorizes a complete exact operation plan for a

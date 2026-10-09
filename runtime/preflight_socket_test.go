@@ -76,6 +76,80 @@ func runtimeV2SchemaValidator(t *testing.T) func([]byte) error {
 	}
 }
 
+func v2HarnessAuthorizationBundle(t *testing.T, now time.Time) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(v2PreflightBundle(t, now), &doc); err != nil {
+		t.Fatal(err)
+	}
+	set := doc["policy_set"].(map[string]any)
+	tools := set["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	tool["source"] = "discord"
+	tool["route"] = map[string]any{"harness_executor": map[string]any{"executor": "discord", "registration": "web_search"}}
+	delete(tool, "required_capabilities")
+	delete(tool, "resource_types")
+	delete(tool, "plan")
+	set["checks"] = []any{}
+	set["tool_policies"] = []any{map[string]any{
+		"policy_id": "web-search-policy", "name": "web search", "effect": "permit", "priority": 10,
+		"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
+		"selector": map[string]any{"source_principal": "user:user-alice", "source": "discord", "tool": "github.read_repo"},
+	}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestSocketAuthorizeV2HarnessToolRequiresNamedSessionAndUsesToolPolicies(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	local := NewLocalPDP(cfg, nil)
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	local.SetIdentity(identity)
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Activate(v2HarnessAuthorizationBundle(t, now), identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	status := httptest.NewRecorder()
+	h.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/v1/policy-bundle/status", nil))
+	var bundleStatus socketPolicyBundleStatus
+	if status.Code != http.StatusOK || json.Unmarshal(status.Body.Bytes(), &bundleStatus) != nil || bundleStatus.Schema != bundleStatusSchema || bundleStatus.BundleSchema != "kei.policy-bundle/v2" || bundleStatus.BundleVersion != 42 {
+		t.Fatalf("bundle status=%d body=%s", status.Code, status.Body.String())
+	}
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil || sessionResponse.SessionID == "" {
+		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+	}
+	body := `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","framework":"discord"}`
+	call := func(sessionID string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
+		if sessionID != "" {
+			withSessionHeader(req, sessionID)
+		}
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	var response socketAuthorizeResponse
+	if err := json.Unmarshal(call("").Body.Bytes(), &response); err != nil || response.Decision != "deny" || response.ReasonCode != "session_required" {
+		t.Fatalf("default-session response=%+v err=%v", response, err)
+	}
+	rec := call(sessionResponse.SessionID)
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK || response.Decision != "permit" || response.PolicyID != "web-search-policy" || response.PolicyBundleVersion == nil || *response.PolicyBundleVersion != 42 {
+		t.Fatalf("named-session status=%d response=%+v err=%v", rec.Code, response, err)
+	}
+}
+
 func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()

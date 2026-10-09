@@ -58,6 +58,76 @@ func v2TestPlanOps() []Operation {
 	}
 }
 
+func v2HarnessBundle(t *testing.T, now time.Time, status, effect string) *Verified {
+	t.Helper()
+	v := v2ToolBundle(t, now, nil)
+	var doc map[string]any
+	if err := json.Unmarshal(v.PayloadBytes, &doc); err != nil {
+		t.Fatal(err)
+	}
+	set := doc["policy_set"].(map[string]any)
+	tools := set["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	tool["source"] = "discord"
+	tool["route"] = map[string]any{"harness_executor": map[string]any{"executor": "discord", "registration": "web_search"}}
+	delete(tool, "required_capabilities")
+	delete(tool, "resource_types")
+	delete(tool, "plan")
+	set["tool_policies"] = []any{map[string]any{
+		"policy_id": "harness-policy", "name": "harness-policy", "effect": effect, "priority": 10,
+		"scope":    map[string]any{"org_id": "org-v2", "workspace_id": "ws-v2"},
+		"selector": map[string]any{"source_principal": "user:user-alice", "source": "discord", "tool": "github.review_pr"},
+	}}
+	identities := doc["identities"].([]any)
+	identities[0].(map[string]any)["status"] = status
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload Payload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return &Verified{Payload: payload, PayloadBytes: raw, Digest: "sha256:harness-test"}
+}
+
+func TestEvaluateV2HarnessToolRequiresFreshLinkedSessionAndPolicy(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	subject := &SessionSubject{UserID: "user-alice", Source: "discord", ExternalID: "ext-alice", Status: SubjectLinked}
+	for status, reason := range map[string]string{"unlinked": "subject_unlinked", "pending": "subject_pending", "revoked": "subject_revoked", "cross_workspace": "subject_cross_workspace"} {
+		t.Run(status, func(t *testing.T) {
+			v := v2HarnessBundle(t, now, status, "permit")
+			if d := v.EvaluateV2HarnessTool("github.review_pr", "", subject, now); d.ReasonCode != reason || d.Outcome != "deny" {
+				t.Fatalf("decision = %+v", d)
+			}
+		})
+	}
+	t.Run("permit", func(t *testing.T) {
+		v := v2HarnessBundle(t, now, "linked", "permit")
+		if d := v.EvaluateV2HarnessTool("github.review_pr", "", subject, now); d.Outcome != "allow" || d.PolicyID != "harness-policy" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+	t.Run("deny", func(t *testing.T) {
+		v := v2HarnessBundle(t, now, "linked", "deny")
+		if d := v.EvaluateV2HarnessTool("github.review_pr", "", subject, now); d.Outcome != "deny" || d.ReasonCode != "policy_deny" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+	t.Run("stale", func(t *testing.T) {
+		v := v2HarnessBundle(t, now, "linked", "permit")
+		if d := v.EvaluateV2HarnessTool("github.review_pr", "", subject, now.Add(30*time.Second)); d.ReasonCode != "subject_snapshot_stale" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+	t.Run("connector route is not harness registered", func(t *testing.T) {
+		v := v2ToolBundle(t, now, nil)
+		if d := v.EvaluateV2HarnessTool("github.review_pr", "", subject, now); d.ReasonCode != "tool_not_registered" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+}
+
 func TestEvaluateV2PlanRequiresANDForAllDeclaredCapabilities(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	subject := &SessionSubject{UserID: "user-alice", Source: "discord", ExternalID: "ext-alice", Status: SubjectLinked}

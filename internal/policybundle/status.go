@@ -15,6 +15,7 @@ import (
 // policies, subjects or credentials.
 type Status struct {
 	State               State     `json:"state"`
+	BundleSchema        string    `json:"bundle_schema,omitempty"`
 	Audience            *Audience `json:"audience,omitempty"`
 	BundleID            string    `json:"bundle_id,omitempty"`
 	BundleVersion       int64     `json:"bundle_version,omitempty"`
@@ -38,6 +39,14 @@ func (s *Store) Status(now time.Time) (Status, error) {
 	var st Status
 	err := s.withLock(func() error {
 		st = Status{State: s.state.State, LastCheck: s.state.LastCheck, LastSuccess: s.state.LastSuccess}
+		if len(s.state.Bundle) > 0 {
+			var header struct {
+				Schema string `json:"schema"`
+			}
+			if json.Unmarshal(s.state.Bundle, &header) == nil && (header.Schema == "kei.policy-bundle/v1" || header.Schema == "kei.policy-bundle/v2") {
+				st.BundleSchema = header.Schema
+			}
+		}
 		if s.state.Audience != (Audience{}) {
 			aud := s.state.Audience
 			st.Audience = &aud

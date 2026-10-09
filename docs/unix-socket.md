@@ -15,6 +15,20 @@ responses omit enrollment claim URLs. Runtimes built before this change still
 require the bearer token on `/v1/authorize` and will reject an unauthenticated
 adapter request.
 
+`GET /v1/policy-bundle/status` returns the schema and state of the locally
+stored bundle (no policy contents and no control-plane request). Its response
+schema is `kei.policy-bundle-status/v1`; `bundle_schema` is the stored
+`kei.policy-bundle/v1` or `kei.policy-bundle/v2` value when recognized. The
+reported schema remains available for invalid or expired stored bundles so
+callers do not silently downgrade to a different authorization path.
+
+For v2 bundles, named-session `POST /v1/authorize` calls evaluate local
+`tool_policies` only for tools explicitly registered with a
+`harness_executor` route. Pass the runtime-issued session ID in
+`X-Kei-Session`. This is a decision-only path: the harness executes the tool;
+no preflight handle or connector credential is returned. V1 socket behavior is
+unchanged, and one-shot `kei-proxy authorize` does not authorize v2.
+
 There are three reasons for this design.
 
 ## 1. Speed
