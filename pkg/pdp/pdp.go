@@ -242,6 +242,36 @@ func (e *Evaluator) AuthorizeV2HarnessTool(ctx context.Context, req Request) (De
 	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
 }
 
+// AuthorizeV2Model decides a model call for the subject held by the request's
+// session (ADR-035 §6). The calling agent's model-profile assignment in the
+// bundle is the permission; nothing is resolved online. v2 is false only when
+// the active bundle is valid and not v2, so the caller keeps its v1 path. An
+// unusable bundle (missing, expired, revoked, stale) is a v2 denial, because
+// no path may permit a model call from it.
+func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, profileID string) (d Decision, v2 bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, true, err
+	}
+	if !e.sessionLive(sessionID) {
+		return sessionDenial(), true, nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return stateDenial(state), true, nil
+	}
+	if v.Payload.Schema != "kei.policy-bundle/v2" {
+		return Decision{}, false, nil
+	}
+	var subject *policybundle.SessionSubject
+	if e.sessions != nil {
+		if current, ok := e.sessions.Get(sessionID); ok {
+			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+		}
+	}
+	m := v.EvaluateV2Model(profileID, agentID, subject, e.now().UTC())
+	return Decision{Allow: m.Outcome == "allow", Reason: m.Reason, ReasonCode: m.ReasonCode, DenySource: denySource(m.ReasonCode), BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, true, nil
+}
+
 // AuthorizeV2Plan revalidates the exact named session and evaluates the complete plan.
 type V2PlanContext struct {
 	BundleDigest  string
@@ -382,7 +412,7 @@ func denySource(code string) string {
 		return ""
 	case strings.HasPrefix(code, "policy_bundle_"), code == "installation_revoked", code == "startup_config_invalid":
 		return "runtime_state"
-	case strings.HasPrefix(code, "tool_"), strings.HasPrefix(code, "agent_"):
+	case strings.HasPrefix(code, "tool_"), strings.HasPrefix(code, "agent_"), strings.HasPrefix(code, "model_"):
 		return "registry"
 	case strings.HasPrefix(code, "subject_"), code == ReasonSessionNotFound, code == "session_required":
 		return "identity"

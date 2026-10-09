@@ -73,6 +73,18 @@ type Payload struct {
 	HarnessMatchSemantics  string          `json:"harness_match_semantics,omitempty"`
 	// Subject is the v2-only installation subject (HAI-433).
 	Subject *InstallationSubject `json:"subject,omitempty"`
+	// AgentModelProfiles is the v2-only effective model profile of each agent
+	// assigned to the installation (HAI-459). In v2 it is the model-call
+	// permission; see EvaluateV2Model.
+	AgentModelProfiles []AgentModelProfile `json:"agent_model_profiles,omitempty"`
+}
+
+// AgentModelProfile is one agent's effective model profile in a v2 bundle
+// (ADR-035 §6). Status is the profile's catalog status; only active permits.
+type AgentModelProfile struct {
+	AgentID   string `json:"agent_id"`
+	ProfileID string `json:"profile_id"`
+	Status    string `json:"status"`
 }
 
 // InstallationSubject is the installation's principal as the catalog resolved

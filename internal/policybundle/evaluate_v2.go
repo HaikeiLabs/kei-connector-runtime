@@ -123,19 +123,18 @@ type v2HarnessPolicy struct {
 	} `json:"scope"`
 }
 
-// EvaluateV2HarnessTool decides one harness-executed tool against the v2
-// tool_policies set. The harness executes the tool; this method only returns
-// the local policy decision. A fresh bundle identity must corroborate the
-// named session subject before any tool policy can permit it.
-func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *SessionSubject, now time.Time) Decision {
+// v2SubjectDenial is the v2 session-subject gate shared by every local v2
+// decision: a fresh identity snapshot must corroborate a linked session
+// subject. It reports the denial, or false when the subject passes.
+func (v *Verified) v2SubjectDenial(subject *SessionSubject, now time.Time) (Decision, bool) {
 	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
-		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
+		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}, true
 	}
 	if subject == nil {
-		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "no session subject"}
+		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "no session subject"}, true
 	}
 	if decision, denied := subjectGate(subject); denied {
-		return decision
+		return decision, true
 	}
 	var identity Identity
 	var known bool
@@ -145,10 +144,21 @@ func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *Sess
 		identity, known = v.LookupIdentity(subject.Source, subject.ExternalID, now)
 	}
 	if !known || identity.UserID != subject.UserID {
-		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session identity is not present in the fresh bundle snapshot"}
+		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session identity is not present in the fresh bundle snapshot"}, true
 	}
 	if identity.Status != SubjectLinked {
-		return Decision{Outcome: "deny", ReasonCode: statusReasonCode(identity.Status), Reason: "the bundle snapshot does not grant the session identity"}
+		return Decision{Outcome: "deny", ReasonCode: statusReasonCode(identity.Status), Reason: "the bundle snapshot does not grant the session identity"}, true
+	}
+	return Decision{}, false
+}
+
+// EvaluateV2HarnessTool decides one harness-executed tool against the v2
+// tool_policies set. The harness executes the tool; this method only returns
+// the local policy decision. A fresh bundle identity must corroborate the
+// named session subject before any tool policy can permit it.
+func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *SessionSubject, now time.Time) Decision {
+	if decision, denied := v.v2SubjectDenial(subject, now); denied {
+		return decision
 	}
 	var set v2PolicySet
 	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
@@ -173,27 +183,8 @@ func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *Sess
 // registered connector tool. The runtime derives operations from its validated
 // cached bundle plan; caller capability declarations are never authority.
 func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubject, ops []Operation, now time.Time) Decision {
-	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
-		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
-	}
-	if subject == nil {
-		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "no session subject"}
-	}
-	if decision, denied := subjectGate(subject); denied {
+	if decision, denied := v.v2SubjectDenial(subject, now); denied {
 		return decision
-	}
-	var identity Identity
-	var known bool
-	if subject.Source == "cli" && subject.ExternalID == "" {
-		identity, known = v.LookupLinkedUser(subject.UserID, now)
-	} else {
-		identity, known = v.LookupIdentity(subject.Source, subject.ExternalID, now)
-	}
-	if !known || identity.UserID != subject.UserID {
-		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session identity is not present in the fresh bundle snapshot"}
-	}
-	if identity.Status != SubjectLinked {
-		return Decision{Outcome: "deny", ReasonCode: statusReasonCode(identity.Status), Reason: "the bundle snapshot does not grant the session identity"}
 	}
 	var set v2PolicySet
 	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
