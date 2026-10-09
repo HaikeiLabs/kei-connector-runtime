@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
@@ -132,14 +133,6 @@ func (c *policyControlClient) fetchBundle(ctx context.Context, etag string, v2Re
 	}
 	defer resp.Body.Close()
 	version, _ = strconv.ParseInt(resp.Header.Get("Kei-Policy-Bundle-Version"), 10, 64)
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		err = fmt.Errorf("%w: bundle endpoint returned HTTP %d", ErrPolicyAuthorizationDenied, resp.StatusCode)
-		return
-	}
-	if resp.StatusCode == http.StatusConflict {
-		err = ErrPolicyBundleNotReady
-		return
-	}
 	if resp.StatusCode == http.StatusNotModified {
 		unchanged = true
 		gotETag = resp.Header.Get("ETag")
@@ -147,7 +140,7 @@ func (c *policyControlClient) fetchBundle(ctx context.Context, etag string, v2Re
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("policy bundle returned status %d", resp.StatusCode)
+		err = parseBundleErrorResponse(resp, v2Ready)
 		return
 	}
 	if encoding := strings.TrimSpace(strings.ToLower(resp.Header.Get("Content-Encoding"))); encoding != "" && encoding != "identity" {
@@ -167,6 +160,108 @@ func (c *policyControlClient) fetchBundle(ctx context.Context, etag string, v2Re
 	gotETag = resp.Header.Get("ETag")
 	contentType = resp.Header.Get("Content-Type")
 	return
+}
+
+// bundleRefreshError carries structured fields from a policy bundle fetch
+// error response for structured logging. It wraps the original sentinel error
+// so Is / errors.Is still works.
+type bundleRefreshError struct {
+	HTTPStatus int
+	Reason     string
+	Detail     string
+	V2Ready    bool
+	wrapped    error
+}
+
+func (e *bundleRefreshError) Error() string {
+	s := fmt.Sprintf("policy bundle refresh: HTTP %d", e.HTTPStatus)
+	if e.Reason != "" {
+		s += " reason=" + e.Reason
+	}
+	if e.Detail != "" {
+		s += " detail=" + e.Detail
+	}
+	return s
+}
+
+func (e *bundleRefreshError) Unwrap() error { return e.wrapped }
+
+// logFields returns structured slog attributes suitable for warn/error logging.
+func (e *bundleRefreshError) logFields() []any {
+	fields := []any{"http_status", e.HTTPStatus}
+	if e.Reason != "" {
+		fields = append(fields, "reason", e.Reason)
+	}
+	if e.Detail != "" {
+		fields = append(fields, "detail", e.Detail)
+	}
+	return fields
+}
+
+func v2ReadyString(v2Ready bool) string {
+	if v2Ready {
+		return "v2"
+	}
+	return "v1"
+}
+
+const detailMaxRunes = 256
+
+// truncateDetail caps s at detailMaxRunes runes, appending an ellipsis
+// when truncated. Returns s unchanged if it fits within the limit.
+func truncateDetail(s string) string {
+	if s == "" {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= detailMaxRunes {
+		return s
+	}
+	return string(runes[:detailMaxRunes]) + "..."
+}
+
+// parseBundleErrorResponse reads the response body (up to 4 KiB) and extracts
+// reason and detail from a JSON error response. If the body is not valid JSON
+// the raw text is used as the detail.
+func parseBundleErrorResponse(resp *http.Response, v2Ready bool) *bundleRefreshError {
+	var bodyBuf bytes.Buffer
+	bodyBuf.Grow(4096)
+	_, readErr := io.Copy(&bodyBuf, io.LimitReader(resp.Body, 4096))
+	if readErr != nil {
+		_ = resp.Body.Close()
+	}
+	body := bodyBuf.String()
+
+	bre := &bundleRefreshError{
+		HTTPStatus: resp.StatusCode,
+		V2Ready:    v2Ready,
+	}
+
+	// Try JSON first.
+	var payload struct {
+		Reason string `json:"reason"`
+		Detail string `json:"detail"`
+	}
+	if body != "" && json.Unmarshal([]byte(body), &payload) == nil {
+		bre.Reason = payload.Reason
+		bre.Detail = truncateDetail(payload.Detail)
+	} else {
+		raw := strings.TrimSpace(body)
+		raw = strings.ReplaceAll(raw, "\n", " ")
+		raw = strings.ReplaceAll(raw, "\r", " ")
+		bre.Detail = truncateDetail(raw)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusConflict:
+		bre.wrapped = ErrPolicyBundleNotReady
+	case http.StatusUnauthorized, http.StatusForbidden:
+		bre.wrapped = ErrPolicyAuthorizationDenied
+	default:
+		bre.wrapped = fmt.Errorf("policy bundle returned status %d", resp.StatusCode)
+	}
+
+	return bre
 }
 
 type SubjectResolveRequest struct {
@@ -298,7 +393,16 @@ func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 	}
 	body, bundleETag, contentType, headerVersion, unchanged, err := client.fetchBundle(ctx, etag, v2Ready)
 	if errors.Is(err, ErrPolicyBundleNotReady) {
-		return store.RefreshFailed(time.Now().UTC())
+		_ = store.RefreshFailed(time.Now().UTC())
+		var bre *bundleRefreshError
+		if errors.As(err, &bre) {
+			slog.Warn("policy bundle not ready (409); the active bundle stays until it expires",
+				append(bre.logFields(), "bundle_version_requested", v2ReadyString(v2Ready))...)
+		} else {
+			slog.Warn("policy bundle not ready (409); the active bundle stays until it expires",
+				"bundle_version_requested", v2ReadyString(v2Ready))
+		}
+		return nil
 	}
 	if errors.Is(err, ErrPolicyInstallationRevoked) {
 		_ = store.Revoke(time.Now().UTC())
@@ -306,10 +410,20 @@ func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 	}
 	if errors.Is(err, ErrPolicyAuthorizationDenied) {
 		_ = store.RefreshFailed(time.Now().UTC())
+		var bre *bundleRefreshError
+		if errors.As(err, &bre) {
+			slog.Warn("policy bundle authorization denied",
+				append(bre.logFields(), "bundle_version_requested", v2ReadyString(v2Ready))...)
+		}
 		return err
 	}
 	if err != nil {
 		_ = store.RefreshFailed(time.Now().UTC())
+		var bre *bundleRefreshError
+		if errors.As(err, &bre) {
+			slog.Warn("policy bundle fetch failed",
+				append(bre.logFields(), "bundle_version_requested", v2ReadyString(v2Ready))...)
+		}
 		return err
 	}
 	if unchanged {

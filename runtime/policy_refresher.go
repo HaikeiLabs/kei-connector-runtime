@@ -16,6 +16,9 @@ const (
 	defaultPolicyPollInterval = 60 * time.Second
 	minPolicyPollInterval     = 30 * time.Second
 	maxPolicyPollInterval     = 300 * time.Second
+	// failureLogInterval suppresses repeated failure logs: at most one log
+	// per N polls while the store state does not change.
+	failureLogInterval = 10
 )
 
 // PolicyRefresher keeps the persisted bundle current inside `kei-proxy serve`
@@ -43,6 +46,11 @@ type PolicyRefresher struct {
 	// HarnessResync, when set, runs beside the loop while it holds the
 	// refresher lock and is told about each successful refresh (HAI-432).
 	HarnessResync *harnessresync.Resyncer
+	// lastFailureState is the store state the last failure was logged at;
+	// used to detect state transitions for rate-limited logging.
+	lastFailureState policybundle.State
+	// failureLogTick counts consecutive failure polls; reset on success.
+	failureLogTick int
 }
 
 // NewPolicyRefresher creates a PolicyRefresher bound to the given config
@@ -109,12 +117,19 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 			}
 		}
 		if identity != nil {
+			beforeState := store.State()
 			err := r.sync(identity)
+			afterState := store.State()
 			if err != nil && ctx.Err() == nil {
-				slog.Warn("policy bundle refresh failed; the active bundle stays until it expires", "error", err)
-			}
-			if err == nil && r.HarnessResync != nil {
-				r.HarnessResync.BundleRefreshed(bundleKey(store))
+				r.logSyncFailure(err, beforeState, afterState)
+			} else if err == nil {
+				// Sync succeeded or returned nil (409). Check if the store
+				// state indicates a failure (e.g. 409 on cold start).
+				r.failureLogTick = 0
+				r.lastFailureState = ""
+				if r.HarnessResync != nil {
+					r.HarnessResync.BundleRefreshed(bundleKey(store))
+				}
 			}
 			r.notify(err)
 		}
@@ -124,6 +139,31 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 		case <-r.After(r.Jitter(PollInterval(store, identity))):
 		}
 	}
+}
+
+// logSyncFailure logs a policy sync failure with rate-limiting and structured
+// attributes. It fires unconditionally on a state transition and at most every
+// failureLogInterval polls while the state remains the same.
+func (r *PolicyRefresher) logSyncFailure(err error, before, after policybundle.State) {
+	r.failureLogTick++
+
+	stateChanged := before != after
+	shouldLog := stateChanged || r.failureLogTick == 1 || r.failureLogTick%failureLogInterval == 0
+	if !shouldLog {
+		return
+	}
+
+	attrs := []any{"error", err}
+	var bre *bundleRefreshError
+	if errors.As(err, &bre) {
+		attrs = append(attrs, bre.logFields()...)
+	}
+	if stateChanged {
+		attrs = append(attrs, "state_transition", string(before)+"->"+string(after))
+	}
+	slog.Warn("policy bundle refresh failed; the active bundle stays until it expires", attrs...)
+
+	r.lastFailureState = after
 }
 
 // bundleKey identifies the active bundle, so a resync check runs only when
