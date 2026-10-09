@@ -150,6 +150,143 @@ func TestSocketAuthorizeV2HarnessToolRequiresNamedSessionAndUsesToolPolicies(t *
 	}
 }
 
+func TestTokenlessOwnerSocketBindsVerifiedBundleSubjectAndKeepsSessionRoutesTokenOnly(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	local := NewLocalPDP(cfg, nil)
+	defer local.Close()
+	local.SetTokenlessOwnerSession(true)
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	local.SetIdentity(identity)
+	var doc map[string]any
+	if err := json.Unmarshal(v2HarnessAuthorizationBundle(t, now), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["subject"] = map[string]any{"user_id": "user-alice", "email": "alice@example.test", "groups": []string{"members"}}
+	bundle, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Activate(bundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	local.AfterSync(nil)
+	local.SetCommandRunner(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	h := local.NewSocketHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return false })
+	call := func(path, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+		return rec
+	}
+	var response socketAuthorizeResponse
+	allowed := call("/v1/authorize", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo"}`)
+	if err := json.Unmarshal(allowed.Body.Bytes(), &response); err != nil || allowed.Code != http.StatusOK || response.Decision != "permit" || response.PolicyID != "web-search-policy" {
+		t.Fatalf("owner authorization=%d %+v err=%v", allowed.Code, response, err)
+	}
+	denied := call("/v1/authorize", `{"schema":"kei.authorize-request/v1","tool":"unknown.tool"}`)
+	if err := json.Unmarshal(denied.Body.Bytes(), &response); err != nil || response.Decision != "deny" {
+		t.Fatalf("owner denied call=%d %+v err=%v", denied.Code, response, err)
+	}
+	for _, route := range []struct{ path, body string }{
+		{"/v1/session", `{"schema":"kei.session/v2","source":"cli"}`},
+		{"/v1/commands:run", `{}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, route.path, strings.NewReader(route.body))
+		if route.path != "/v1/session" {
+			req.Method = http.MethodPost
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("tokenless %s status=%d body=%s", route.path, rec.Code, rec.Body.String())
+		}
+	}
+	previousOwnerSession := local.ownerID
+	delete(doc, "subject")
+	doc["bundle_version"] = 43
+	missingSubjectBundle, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(missingSubjectBundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	local.AfterSync(nil)
+	if local.ownerID != "" || local.Sessions.Exists(previousOwnerSession) {
+		t.Fatal("owner session survived bundle refresh without a subject")
+	}
+	unavailable := call("/v1/authorize", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo"}`)
+	var unavailableBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(unavailable.Body.Bytes(), &unavailableBody) != nil || unavailable.Code != http.StatusForbidden || unavailableBody.Error.Code != "owner_subject_unavailable" {
+		t.Fatalf("missing owner subject response=%d %s", unavailable.Code, unavailable.Body.String())
+	}
+	local.SetTokenlessOwnerSession(false)
+	disabled := call("/v1/authorize", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo"}`)
+	if disabled.Code != http.StatusUnauthorized {
+		t.Fatalf("disabled tokenless status=%d", disabled.Code)
+	}
+}
+
+func TestTokenlessOwnerPreflightAndConnectorInvokeUseOwnerSession(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	local := NewLocalPDP(cfg, nil)
+	defer local.Close()
+	local.SetTokenlessOwnerSession(true)
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	local.SetIdentity(identity)
+	var doc map[string]any
+	if err := json.Unmarshal(v2PreflightBundle(t, now), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["subject"] = map[string]any{"user_id": "user-alice", "email": "alice@example.test", "groups": []string{"members"}}
+	bundle, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	local.AfterSync(nil)
+	ownerID := local.ownerID
+	var invokedSession string
+	local.SetConnectorInvoker(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		invokedSession = session.FromRequest(r)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	h := local.NewSocketHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return false })
+	args, contextValues := json.RawMessage(`{}`), json.RawMessage(`{"repository":"acme/kei"}`)
+	preBody, _ := json.Marshal(socketPreflightRequest{Schema: "kei.preflight-request/v1", Tool: "github.read_repo", AgentID: "agent-fixture-0001", Arguments: args, Context: contextValues})
+	pre := httptest.NewRecorder()
+	h.ServeHTTP(pre, httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preBody))))
+	if pre.Code != http.StatusOK {
+		t.Fatalf("owner preflight status=%d body=%s", pre.Code, pre.Body.String())
+	}
+	var grant socketPreflightResponse
+	if err := json.Unmarshal(pre.Body.Bytes(), &grant); err != nil || grant.Handle == "" {
+		t.Fatalf("owner preflight response=%s err=%v", pre.Body.String(), err)
+	}
+	invoke := httptest.NewRecorder()
+	h.ServeHTTP(invoke, httptest.NewRequest(http.MethodPost, "/v1/connectors:invoke", strings.NewReader(`{}`)))
+	if invoke.Code != http.StatusNoContent || invokedSession != ownerID {
+		t.Fatalf("owner invoke status=%d session=%q want %q body=%s", invoke.Code, invokedSession, ownerID, invoke.Body.String())
+	}
+}
+
 func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()

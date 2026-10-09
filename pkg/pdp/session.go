@@ -32,6 +32,7 @@ type Subject struct {
 	Email      string
 	Source     string
 	ExternalID string
+	Groups     []string
 	Status     Status
 	Enrollment json.RawMessage
 	Token      string
@@ -68,6 +69,7 @@ type Sessions struct {
 type idSession struct {
 	mu       sync.RWMutex
 	sub      Subject
+	pinned   bool
 	lastUsed atomic.Int64 // unix nanoseconds
 }
 
@@ -115,6 +117,7 @@ func validSubject(sub Subject) (Subject, error) {
 
 func copySubject(sub Subject) Subject {
 	sub.Enrollment = append(json.RawMessage(nil), sub.Enrollment...)
+	sub.Groups = append([]string(nil), sub.Groups...)
 	return sub
 }
 
@@ -151,7 +154,14 @@ func (s *Sessions) Current() (Subject, bool) {
 // Create starts a new session for sub and returns its id: "ks_" and 32
 // random bytes, base64url. Sessions created this way are independent of each
 // other and of the default session.
-func (s *Sessions) Create(sub Subject) (string, error) {
+func (s *Sessions) Create(sub Subject) (string, error) { return s.create(sub, false) }
+
+// CreatePinned creates a named session that does not expire from idleness.
+// It is intended for daemon-owned identities that are explicitly ended when
+// their authoritative source changes.
+func (s *Sessions) CreatePinned(sub Subject) (string, error) { return s.create(sub, true) }
+
+func (s *Sessions) create(sub Subject, pinned bool) (string, error) {
 	sub, err := validSubject(sub)
 	if err != nil {
 		return "", err
@@ -161,7 +171,7 @@ func (s *Sessions) Create(sub Subject) (string, error) {
 		return "", err
 	}
 	id := "ks_" + base64.RawURLEncoding.EncodeToString(b)
-	e := &idSession{sub: sub}
+	e := &idSession{sub: sub, pinned: pinned}
 	e.lastUsed.Store(s.now().UnixNano())
 	s.byID.Store(id, e)
 	return id, nil
@@ -208,7 +218,7 @@ func (s *Sessions) live(id string) (*idSession, bool) {
 }
 
 func (s *Sessions) expired(e *idSession, now time.Time) bool {
-	return now.Sub(time.Unix(0, e.lastUsed.Load())) >= s.IdleTTL()
+	return !e.pinned && now.Sub(time.Unix(0, e.lastUsed.Load())) >= s.IdleTTL()
 }
 
 // EndID ends session id (DefaultSession ends the default session) and
