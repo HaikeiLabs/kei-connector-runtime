@@ -51,6 +51,9 @@ type PolicyRefresher struct {
 	lastFailureState policybundle.State
 	// failureLogTick counts consecutive failure polls; reset on success.
 	failureLogTick int
+	// stateDirClaimed means the caller already holds the refresher lock
+	// through ClaimStateDir, so Run must not take it again.
+	stateDirClaimed bool
 }
 
 // NewPolicyRefresher creates a PolicyRefresher bound to the given config
@@ -76,16 +79,18 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 		slog.Error("policy refresher cannot open state directory; runtime stays deny-only", "error", err)
 		return
 	}
-	release, err := store.LockRefresher()
-	if errors.Is(err, policybundle.ErrRefresherLocked) {
-		slog.Info("policy refresher already running for this state directory")
-		return
+	if !r.stateDirClaimed {
+		release, err := store.LockRefresher()
+		if errors.Is(err, policybundle.ErrRefresherLocked) {
+			slog.Info("policy refresher already running for this state directory")
+			return
+		}
+		if err != nil {
+			slog.Error("policy refresher lock failed; runtime stays deny-only", "error", err)
+			return
+		}
+		defer release()
 	}
-	if err != nil {
-		slog.Error("policy refresher lock failed; runtime stays deny-only", "error", err)
-		return
-	}
-	defer release()
 	if r.HarnessResync != nil {
 		resyncCtx, stopResync := context.WithCancel(ctx)
 		resyncDone := make(chan struct{})
@@ -252,4 +257,10 @@ type RefresherOption func(*PolicyRefresher)
 // WithHarnessResync runs r beside the refresher (nil is a no-op).
 func WithHarnessResync(r *harnessresync.Resyncer) RefresherOption {
 	return func(p *PolicyRefresher) { p.HarnessResync = r }
+}
+
+// WithClaimedStateDir tells the refresher that its caller already holds the
+// state directory through ClaimStateDir.
+func WithClaimedStateDir() RefresherOption {
+	return func(p *PolicyRefresher) { p.stateDirClaimed = true }
 }

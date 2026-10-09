@@ -253,6 +253,13 @@ background process (e.g., a supervisor or an init script) and have the harness
 connect over the socket at the agreed path. The socket lives on the container's
 own filesystem so no volume mount is needed.
 
+Run only `kei-proxy serve`. It sends the control-plane heartbeat itself and is
+the one process that runs the policy refresher and audit collector for its
+state directory, so do not also start `kei-proxy runtime heartbeat` or
+`kei-proxy collector --poll` in the container. A `runtime heartbeat` started
+beside `serve` refuses to run; a `serve` started after a heartbeat already owns
+the state directory exits non-zero. See "Runtime heartbeat" in the README.
+
 For the existing OpenWebUI deployment the runtime also keeps its TCP listener on
 `KEI_PROXY_LISTEN_ADDR` (default `:8085`). OpenWebUI continues to reach the
 runtime at `http://connector-runtime:8085/v1` as before.
