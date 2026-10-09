@@ -26,6 +26,7 @@ type SessionSubject struct {
 	Email      string
 	Source     string
 	ExternalID string
+	Groups     []string
 	Status     string
 }
 

@@ -125,9 +125,13 @@ type LocalPDP struct {
 	invoker      http.Handler
 	runner       http.Handler
 	// deprecated records the routes already warned about the default session.
-	deprecated sync.Map
-	stopSweep  chan struct{}
-	closeOnce  sync.Once
+	deprecated            sync.Map
+	stopSweep             chan struct{}
+	closeOnce             sync.Once
+	ownerMu               sync.RWMutex
+	ownerID               string
+	tokenlessOwnerSession bool
+	ownerUnavailable      bool
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
@@ -140,6 +144,58 @@ func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 // SetSessionIdleTTL sets how long a named session lives without use
 // (KEI_SESSION_IDLE_TTL). The default session never expires.
 func (l *LocalPDP) SetSessionIdleTTL(d time.Duration) { l.Sessions.SetIdleTTL(d) }
+
+// SetTokenlessOwnerSession controls tokenless access on the owner-only socket.
+func (l *LocalPDP) SetTokenlessOwnerSession(enabled bool) {
+	l.ownerMu.Lock()
+	l.tokenlessOwnerSession = enabled
+	if enabled && l.ownerID == "" {
+		l.ownerUnavailable = true
+	}
+	if !enabled {
+		l.endOwnerSessionLocked()
+		l.ownerUnavailable = false
+	}
+	l.ownerMu.Unlock()
+}
+
+func (l *LocalPDP) reconcileOwnerSession() {
+	l.ownerMu.Lock()
+	defer l.ownerMu.Unlock()
+	if !l.tokenlessOwnerSession {
+		return
+	}
+	e := l.evaluator.Load()
+	if e == nil {
+		l.endOwnerSessionLocked()
+		l.ownerUnavailable = true
+		return
+	}
+	bundleSubject, ok := e.BundleInstallationSubject()
+	if !ok {
+		l.endOwnerSessionLocked()
+		l.ownerUnavailable = true
+		return
+	}
+	// Recreate on every successful refresh so email/groups never outlive the
+	// currently verified installation subject.
+	l.endOwnerSessionLocked()
+	sub := pdp.Subject{UserID: bundleSubject.UserID, Email: bundleSubject.Email, Groups: bundleSubject.Groups, Status: pdp.StatusLinked, Source: "installation_owner", ExternalID: bundleSubject.UserID}
+	id, err := l.Sessions.CreatePinned(sub)
+	if err != nil {
+		l.ownerUnavailable = true
+		return
+	}
+	l.ownerID = id
+	l.ownerUnavailable = false
+}
+
+func (l *LocalPDP) endOwnerSessionLocked() {
+	if l.ownerID != "" {
+		l.Sessions.EndID(l.ownerID)
+		l.ownerID = ""
+	}
+}
 
 // SweepSessions ends idle named sessions until ctx is done or Close. The
 // serve daemon runs it; idle sessions also end when next used.
@@ -312,6 +368,10 @@ func (l *LocalPDP) AfterSync(err error) {
 	}
 	e := l.evaluator.Load()
 	if errors.Is(err, ErrInstallationRevoked) {
+		l.ownerMu.Lock()
+		l.endOwnerSessionLocked()
+		l.ownerUnavailable = l.tokenlessOwnerSession
+		l.ownerMu.Unlock()
 		if e != nil {
 			e.RevokeSession()
 		} else {
@@ -321,7 +381,15 @@ func (l *LocalPDP) AfterSync(err error) {
 		l.flushCredentials()
 		return
 	}
+	if e == nil {
+		l.ownerMu.Lock()
+		l.endOwnerSessionLocked()
+		l.ownerUnavailable = l.tokenlessOwnerSession
+		l.ownerMu.Unlock()
+	}
 	if e != nil {
+		// Refresh/revocation is the freshness boundary for the owner session.
+		l.reconcileOwnerSession()
 		// Each session is reconciled on its own; only revoked ones flush.
 		for _, id := range e.ReconcileSessions() {
 			l.flushSession(id)
@@ -362,12 +430,23 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			return
 		}
 		authenticated := checkAuth(r)
-		unauthenticatedAuthorize := allowUnauthenticatedAuthorize && r.Method == http.MethodPost && r.URL.Path == "/v1/authorize"
-		if !authenticated && !unauthenticatedAuthorize {
+		routeAllowsOwner := r.Method == http.MethodPost && (r.URL.Path == "/v1/authorize" || r.URL.Path == "/v1/preflight" || r.URL.Path == "/v1/consume" || r.URL.Path == "/v1/connectors:invoke")
+		l.ownerMu.RLock()
+		ownerID, ownerEnabled, ownerUnavailable := l.ownerID, l.tokenlessOwnerSession, l.ownerUnavailable
+		l.ownerMu.RUnlock()
+		unauthenticatedOwner := allowUnauthenticatedAuthorize && routeAllowsOwner && ownerEnabled && ownerID != "" && !authenticated && session.FromRequest(r) == pdp.DefaultSession
+		if !authenticated && !unauthenticatedOwner && !(allowUnauthenticatedAuthorize && ownerEnabled && routeAllowsOwner && !authenticated && ownerUnavailable) {
 			writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
 			return
 		}
-		if session.FromRequest(r) == pdp.DefaultSession && r.Method != http.MethodPut {
+		if unauthenticatedOwner {
+			r = r.Clone(r.Context())
+			r.Header = r.Header.Clone()
+			session.SetHeader(r, ownerID)
+		} else if !authenticated && ownerUnavailable {
+			writeRuntimeError(w, http.StatusForbidden, "owner_subject_unavailable", "the installation owner subject is unavailable in the current v2 bundle")
+			return
+		} else if session.FromRequest(r) == pdp.DefaultSession && authenticated && r.Method != http.MethodPut {
 			l.deprecate(r.Method + " " + r.URL.Path)
 		}
 		switch {
@@ -589,7 +668,15 @@ type socketConsumeRequest struct {
 
 func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
 	var req socketPreflightRequest
-	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.preflight-request/v1" || req.SessionID == "" || session.FromRequest(r) != req.SessionID || req.Tool == "" || !jsonJSONObject(req.Arguments) || (len(req.Context) > 0 && !jsonJSONObject(req.Context)) {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.preflight-request/v1" || req.Tool == "" || !jsonJSONObject(req.Arguments) || (len(req.Context) > 0 && !jsonJSONObject(req.Context)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
+		return
+	}
+	boundSession := session.FromRequest(r)
+	if req.SessionID == "" {
+		req.SessionID = boundSession
+	}
+	if req.SessionID == "" || boundSession != req.SessionID {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
 		return
 	}
@@ -605,7 +692,15 @@ func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
 
 func (l *LocalPDP) handleConsume(w http.ResponseWriter, r *http.Request) {
 	var req socketConsumeRequest
-	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.consume-request/v1" || req.SessionID == "" || session.FromRequest(r) != req.SessionID || req.Handle == "" || req.Tool == "" || req.Operation.ID == "" || req.Operation.ConnectorID == "" || req.Operation.Capability == "" || req.Operation.Action == "" || req.Operation.InputDigest == "" {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.consume-request/v1" || req.Handle == "" || req.Tool == "" || req.Operation.ID == "" || req.Operation.ConnectorID == "" || req.Operation.Capability == "" || req.Operation.Action == "" || req.Operation.InputDigest == "" {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
+		return
+	}
+	boundSession := session.FromRequest(r)
+	if req.SessionID == "" {
+		req.SessionID = boundSession
+	}
+	if req.SessionID == "" || boundSession != req.SessionID {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
 		return
 	}

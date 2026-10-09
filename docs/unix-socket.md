@@ -6,11 +6,18 @@ path depends on the operating system: `/run/kei-proxy/runtime.sock` on Linux,
 Override with `KEI_RUNTIME_SOCKET_PATH`. The runtime creates the socket with
 mode `0600`, refuses to replace an active socket or a regular file, replaces a
 stale socket left behind by a crash, and removes the socket on graceful
-shutdown. Requests over the socket use the runtime bearer token except for
-`POST /v1/authorize`: that policy-only route trusts the mode-0600 socket's
-same-UID boundary so harness adapters need not inherit `KEI_RUNTIME_TOKEN`.
-Session management and model routes remain token-authenticated. The TCP
-listener does not expose the local PDP routes. Unauthenticated authorize
+shutdown. Requests over the socket use the runtime bearer token except for explicitly
+configured tokenless owner-session calls. `KEI_TOKENLESS_OWNER_SESSION` defaults
+on for local desktop installs and off for server deployments; set it to `false`
+to disable. When enabled, the mode-0600 socket binds requests that omit a
+session to a named session for the v2 bundle's verified installation subject.
+The tokenless routes are `POST /v1/authorize`, `/v1/preflight`, `/v1/consume`,
+and `/v1/connectors:invoke`. The subject is rebound on bundle refresh and its
+session is ended if the subject disappears or changes. If the current v2 bundle
+does not provide a usable subject, tokenless calls fail closed with
+`owner_subject_unavailable`. `PUT /v1/session` and `POST /v1/commands:run` stay
+token-only; token callers remain unchanged. The TCP listener never accepts
+tokenless calls. Unauthenticated authorize
 responses omit enrollment claim URLs. Runtimes built before this change still
 require the bearer token on `/v1/authorize` and will reject an unauthenticated
 adapter request.
@@ -150,9 +157,9 @@ re-fetch and one retry, and after that the call is denied. The daemon sets
 `RLIMIT_CORE=0` so it never core-dumps them.
 
 **No socket route returns a credential.** Any process running as the proxy's
-OS user can reach the owner-only socket. Only `POST /v1/authorize` uses that
-same-UID boundary without a bearer token; session, credential, model, and
-connector routes remain authenticated or governed. Credentialed work runs
+OS user can reach the owner-only socket. Only the explicitly configured owner
+routes listed above use that same-UID boundary without a bearer token; session
+creation and command execution remain token-authenticated. Credentialed work runs
 inside the daemon instead, through the two routes below.
 
 ### `POST /v1/connectors:invoke` (`KEI_CREDENTIAL_RELEASE=identity`)

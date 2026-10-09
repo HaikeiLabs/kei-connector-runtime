@@ -68,6 +68,27 @@ func TestRuntimeValidateRequiresHTTPSExceptNonProductionLoopback(t *testing.T) {
 	}
 }
 
+func TestTokenlessOwnerSessionConfig(t *testing.T) {
+	t.Setenv("ENV", "development")
+	t.Setenv("KEI_RUNTIME_DEPLOYMENT", "")
+	t.Setenv("KEI_TOKENLESS_OWNER_SESSION", "")
+	if !configFromEnv().TokenlessOwnerSession {
+		t.Fatal("local default should enable tokenless owner sessions")
+	}
+	t.Setenv("ENV", "production")
+	if configFromEnv().TokenlessOwnerSession {
+		t.Fatal("production default should disable tokenless owner sessions")
+	}
+	t.Setenv("KEI_TOKENLESS_OWNER_SESSION", "true")
+	if !configFromEnv().TokenlessOwnerSession {
+		t.Fatal("explicit true should enable tokenless owner sessions")
+	}
+	t.Setenv("KEI_TOKENLESS_OWNER_SESSION", "false")
+	if configFromEnv().TokenlessOwnerSession {
+		t.Fatal("explicit false should disable tokenless owner sessions")
+	}
+}
+
 func TestConfigFromEnvSetsDefaultRuntimeStateDir(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_STATE_DIR", "")
 	cfg := configFromEnv()

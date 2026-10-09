@@ -163,7 +163,7 @@ func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State,
 	if e.sessions != nil {
 		var ok bool
 		if current, ok = e.sessions.Get(req.Session); ok {
-			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Groups: current.Groups, Status: string(current.Status)}
 			used = &current
 		}
 	}
@@ -236,7 +236,7 @@ func (e *Evaluator) AuthorizeV2HarnessTool(ctx context.Context, req Request) (De
 	}
 	var subject *policybundle.SessionSubject
 	if current, ok := e.sessions.Get(req.Session); ok {
-		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Groups: current.Groups, Status: string(current.Status)}
 	}
 	d := v.EvaluateV2HarnessTool(req.Tool, req.AgentID, subject, e.now().UTC())
 	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
@@ -265,7 +265,7 @@ func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, pr
 	var subject *policybundle.SessionSubject
 	if e.sessions != nil {
 		if current, ok := e.sessions.Get(sessionID); ok {
-			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Groups: current.Groups, Status: string(current.Status)}
 		}
 	}
 	m := v.EvaluateV2Model(profileID, agentID, subject, e.now().UTC())
@@ -302,7 +302,7 @@ func (e *Evaluator) AuthorizeV2Plan(sessionID, installationID, subjectID, source
 	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" {
 		return "", 0, false, err
 	}
-	subject := &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+	subject := &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Groups: current.Groups, Status: string(current.Status)}
 	decision := v.EvaluateV2Plan(tool, agentID, subject, ops, e.now().UTC())
 	return v.Digest, v.Payload.BundleVersion, decision.Outcome == "allow", nil
 }
@@ -325,6 +325,9 @@ func (e *Evaluator) ReconcileSessions() []string {
 	return e.sessions.revokeIf(func(sub Subject) bool {
 		if sub.Status != StatusLinked {
 			return false
+		}
+		if sub.Source == "installation_owner" {
+			return v.Payload.Subject == nil || v.Payload.Subject.UserID != sub.UserID
 		}
 		if v.Payload.SubjectResolution.Mode == "bundle" {
 			id, found := v.LookupIdentity(sub.Source, sub.ExternalID, now)
@@ -366,6 +369,18 @@ func (e *Evaluator) BundleIdentities() []policybundle.Identity {
 		return nil
 	}
 	return v.Payload.Identities
+}
+
+// BundleInstallationSubject returns the current verified v2 installation subject.
+// The returned subject is copied so callers cannot mutate the verified payload.
+func (e *Evaluator) BundleInstallationSubject() (*policybundle.InstallationSubject, bool) {
+	v, _, err := e.check()
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.Subject == nil || v.Payload.Subject.UserID == "" {
+		return nil, false
+	}
+	subject := *v.Payload.Subject
+	subject.Groups = append([]string(nil), subject.Groups...)
+	return &subject, true
 }
 
 // BundleStatus reports the locally stored bundle schema and state without

@@ -40,6 +40,8 @@ type Config struct {
 	// SessionIdleTTL is KEI_SESSION_IDLE_TTL: how long a named daemon session
 	// lives without use (Go duration, default 30m).
 	SessionIdleTTL time.Duration
+	// TokenlessOwnerSession enables omitted-session calls on the local owner socket.
+	TokenlessOwnerSession bool
 	// RuntimeHeartbeatInterval is KEI_RUNTIME_HEARTBEAT_INTERVAL: how often
 	// `kei-proxy serve` reports liveness (Go duration, default 1m).
 	RuntimeHeartbeatInterval time.Duration
@@ -86,6 +88,19 @@ func sessionIdleTTLFromEnv() time.Duration {
 	return pdp.DefaultIdleTTL
 }
 
+func tokenlessOwnerSessionFromEnv() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("KEI_TOKENLESS_OWNER_SESSION")))
+	switch value {
+	case "1", "true", "on":
+		return true
+	case "0", "false", "off":
+		return false
+	default:
+		// Server/container deployments opt out by default; local desktop installs opt in.
+		return os.Getenv("ENV") != "production" && os.Getenv("KEI_RUNTIME_DEPLOYMENT") != "server"
+	}
+}
+
 const defaultRuntimeHeartbeatInterval = time.Minute
 
 // runtimeHeartbeatIntervalFromEnv reads KEI_RUNTIME_HEARTBEAT_INTERVAL (a Go
@@ -121,6 +136,7 @@ func configFromEnv() Config {
 		CredentialRelease:             envOr("KEI_CREDENTIAL_RELEASE", CredentialReleaseLegacy),
 		CredentialReleaseURL:          os.Getenv("KEI_CREDENTIAL_RELEASE_URL"),
 		SessionIdleTTL:                sessionIdleTTLFromEnv(),
+		TokenlessOwnerSession:         tokenlessOwnerSessionFromEnv(),
 		RuntimeHeartbeatInterval:      runtimeHeartbeatIntervalFromEnv(),
 	}
 }

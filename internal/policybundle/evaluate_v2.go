@@ -138,7 +138,11 @@ func (v *Verified) v2SubjectDenial(subject *SessionSubject, now time.Time) (Deci
 	}
 	var identity Identity
 	var known bool
-	if subject.Source == "cli" && subject.ExternalID == "" {
+	if subject.Source == "installation_owner" {
+		if v.Payload.Subject != nil && v.Payload.Subject.UserID == subject.UserID {
+			identity, known = Identity{UserID: subject.UserID, Status: SubjectLinked}, true
+		}
+	} else if subject.Source == "cli" && subject.ExternalID == "" {
 		identity, known = v.LookupLinkedUser(subject.UserID, now)
 	} else {
 		identity, known = v.LookupIdentity(subject.Source, subject.ExternalID, now)
@@ -176,6 +180,7 @@ func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *Sess
 	}
 	request := map[string]string{"tool": registered.Name, "source": registered.Source}
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
+	groups = append(groups, subject.Groups...)
 	return evaluateV2Check(set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
 }
 
@@ -212,6 +217,7 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 	}
 	covered := make(map[string]bool, len(tool.RequiredCapabilities))
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
+	groups = append(groups, subject.Groups...)
 	for _, op := range ops {
 		if op.ConnectorID != connectorID || op.Capability == "" || op.Action == "" {
 			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan contains a malformed operation"}

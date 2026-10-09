@@ -118,8 +118,8 @@ func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read local authorize response: %v", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("unauthenticated POST /v1/authorize status = %d, want %d: %s", resp.StatusCode, http.StatusOK, body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("tokenless POST /v1/authorize without an enabled owner session status = %d, want %d: %s", resp.StatusCode, http.StatusUnauthorized, body)
 	}
 
 	transport.CloseIdleConnections()
@@ -164,18 +164,8 @@ func TestSocketAuthorizeUsesOwnerOnlySocketWithoutRuntimeToken(t *testing.T) {
 
 	socketResponse := httptest.NewRecorder()
 	socketHandler.ServeHTTP(socketResponse, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
-	if socketResponse.Code != http.StatusOK {
-		t.Fatalf("unauthenticated local authorize status = %d, want %d: %s", socketResponse.Code, http.StatusOK, socketResponse.Body.String())
-	}
-	var decision struct {
-		Schema   string `json:"schema"`
-		Decision string `json:"decision"`
-	}
-	if err := json.Unmarshal(socketResponse.Body.Bytes(), &decision); err != nil {
-		t.Fatalf("decode local authorize response: %v", err)
-	}
-	if decision.Schema != "kei.authorize-response/v1" || decision.Decision != "deny" {
-		t.Fatalf("cold PDP response = %#v, want versioned explicit deny", decision)
+	if socketResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("tokenless local authorize status = %d, want %d: %s", socketResponse.Code, http.StatusUnauthorized, socketResponse.Body.String())
 	}
 
 	tcpResponse := httptest.NewRecorder()
