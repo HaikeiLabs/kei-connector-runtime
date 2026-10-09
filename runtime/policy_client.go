@@ -23,10 +23,8 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-const (
-	policyBundleAcceptV1 = policybundle.ContentType
-	policyBundleAcceptV2 = policybundle.ContentTypeV2 + ", " + policybundle.ContentType
-)
+// Kei serves only kei.policy-bundle/v2 (TSK T89); v1 is never requested.
+const policyBundleAccept = policybundle.ContentTypeV2
 
 var (
 	ErrPolicyInstallationRevoked = errors.New("runtime installation is revoked or inactive")
@@ -107,21 +105,17 @@ func (c *policyControlClient) request(ctx context.Context, method, path string, 
 }
 
 func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
-	return c.fetchBundle(ctx, etag, false)
+	return c.fetchBundle(ctx, etag)
 }
 
-func (c *policyControlClient) fetchBundle(ctx context.Context, etag string, v2Ready bool) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
+func (c *policyControlClient) fetchBundle(ctx context.Context, etag string) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
 	req, e := c.newRequest(ctx, http.MethodGet, "/api/v1/runtime/policy-bundles/current", nil)
 	if e != nil {
 		err = e
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	accept := policyBundleAcceptV1
-	if v2Ready {
-		accept = policyBundleAcceptV2
-	}
-	req.Header.Set("Accept", accept)
+	req.Header.Set("Accept", policyBundleAccept)
 	req.Header.Set("Accept-Encoding", "identity")
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
@@ -140,7 +134,7 @@ func (c *policyControlClient) fetchBundle(ctx context.Context, etag string, v2Re
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		err = parseBundleErrorResponse(resp, v2Ready)
+		err = parseBundleErrorResponse(resp)
 		return
 	}
 	if encoding := strings.TrimSpace(strings.ToLower(resp.Header.Get("Content-Encoding"))); encoding != "" && encoding != "identity" {
@@ -169,7 +163,6 @@ type bundleRefreshError struct {
 	HTTPStatus int
 	Reason     string
 	Detail     string
-	V2Ready    bool
 	wrapped    error
 }
 
@@ -198,13 +191,6 @@ func (e *bundleRefreshError) logFields() []any {
 	return fields
 }
 
-func v2ReadyString(v2Ready bool) string {
-	if v2Ready {
-		return "v2"
-	}
-	return "v1"
-}
-
 const detailMaxRunes = 256
 
 // truncateDetail caps s at detailMaxRunes runes, appending an ellipsis
@@ -223,7 +209,7 @@ func truncateDetail(s string) string {
 // parseBundleErrorResponse reads the response body (up to 4 KiB) and extracts
 // reason and detail from a JSON error response. If the body is not valid JSON
 // the raw text is used as the detail.
-func parseBundleErrorResponse(resp *http.Response, v2Ready bool) *bundleRefreshError {
+func parseBundleErrorResponse(resp *http.Response) *bundleRefreshError {
 	var bodyBuf bytes.Buffer
 	bodyBuf.Grow(4096)
 	_, readErr := io.Copy(&bodyBuf, io.LimitReader(resp.Body, 4096))
@@ -234,7 +220,6 @@ func parseBundleErrorResponse(resp *http.Response, v2Ready bool) *bundleRefreshE
 
 	bre := &bundleRefreshError{
 		HTTPStatus: resp.StatusCode,
-		V2Ready:    v2Ready,
 	}
 
 	// Try JSON first.
@@ -369,16 +354,6 @@ func (c *policyControlClient) ResolveSubject(ctx context.Context, req SubjectRes
 // SyncPolicyBundle fetches an unsigned canonical bundle only over a validated
 // HTTPS control-plane channel authenticated by the installation runtime token.
 func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration) error {
-	return syncPolicyBundle(ctx, cfg, identity, timeout, false)
-}
-
-// SyncPolicyBundleV2Ready requests v2 for an installation whose running serve daemon
-// supports v2 tool authorization. Other sync paths must use SyncPolicyBundle.
-func SyncPolicyBundleV2Ready(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration) error {
-	return syncPolicyBundle(ctx, cfg, identity, timeout, true)
-}
-
-func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration, v2Ready bool) error {
 	if identity == nil || identity.WorkspaceID == nil {
 		return errors.New("runtime identity has no workspace audience")
 	}
@@ -391,16 +366,16 @@ func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 	if active, _, checkErr := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); checkErr == nil && active != nil {
 		etag = active.Digest
 	}
-	body, bundleETag, contentType, headerVersion, unchanged, err := client.fetchBundle(ctx, etag, v2Ready)
+	body, bundleETag, contentType, headerVersion, unchanged, err := client.fetchBundle(ctx, etag)
 	if errors.Is(err, ErrPolicyBundleNotReady) {
 		_ = store.RefreshFailed(time.Now().UTC())
 		var bre *bundleRefreshError
 		if errors.As(err, &bre) {
 			slog.Warn("policy bundle not ready (409); the active bundle stays until it expires",
-				append(bre.logFields(), "bundle_version_requested", v2ReadyString(v2Ready))...)
+				append(bre.logFields(), "bundle_version_requested", "v2")...)
 		} else {
 			slog.Warn("policy bundle not ready (409); the active bundle stays until it expires",
-				"bundle_version_requested", v2ReadyString(v2Ready))
+				"bundle_version_requested", "v2")
 		}
 		return nil
 	}
@@ -413,7 +388,7 @@ func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		var bre *bundleRefreshError
 		if errors.As(err, &bre) {
 			slog.Warn("policy bundle authorization denied",
-				append(bre.logFields(), "bundle_version_requested", v2ReadyString(v2Ready))...)
+				append(bre.logFields(), "bundle_version_requested", "v2")...)
 		}
 		return err
 	}
@@ -422,7 +397,7 @@ func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		var bre *bundleRefreshError
 		if errors.As(err, &bre) {
 			slog.Warn("policy bundle fetch failed",
-				append(bre.logFields(), "bundle_version_requested", v2ReadyString(v2Ready))...)
+				append(bre.logFields(), "bundle_version_requested", "v2")...)
 		}
 		return err
 	}

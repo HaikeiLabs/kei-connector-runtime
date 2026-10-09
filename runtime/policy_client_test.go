@@ -59,9 +59,9 @@ func unsignedV2ExampleBundle(t *testing.T, now time.Time) []byte {
 	return bundle
 }
 
-func TestSyncPolicyBundleRequestsV1ByDefault(t *testing.T) {
+func TestSyncPolicyBundleRequestsOnlyV2(t *testing.T) {
 	now := time.Now().UTC()
-	raw := unsignedExampleBundle(t, now)
+	raw := unsignedV2ExampleBundle(t, now)
 	digest := fmt.Sprintf(`"sha256:%x"`, sha256.Sum256(raw))
 	paths := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,12 +71,12 @@ func TestSyncPolicyBundleRequestsV1ByDefault(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/v1/runtime/policy-bundles/current":
-			if r.Header.Get("Accept") != policyBundleAcceptV1 {
-				t.Errorf("Accept=%q", r.Header.Get("Accept"))
+			if r.Header.Get("Accept") != policybundle.ContentTypeV2 {
+				t.Errorf("Accept=%q, want only %q", r.Header.Get("Accept"), policybundle.ContentTypeV2)
 			}
-			w.Header().Set("Content-Type", policybundle.ContentType)
+			w.Header().Set("Content-Type", policybundle.ContentTypeV2)
 			w.Header().Set("ETag", digest)
-			w.Header().Set("Kei-Policy-Bundle-Version", "42")
+			w.Header().Set("Kei-Policy-Bundle-Version", "43")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(raw)
 		default:
@@ -98,7 +98,7 @@ func TestSyncPolicyBundleRequestsV1ByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bundle == nil || state != policybundle.Active || bundle.Payload.BundleVersion != 42 || bundle.Digest != strings.Trim(digest, `"`) {
+	if bundle == nil || state != policybundle.Active || bundle.Payload.BundleVersion != 43 || bundle.Digest != strings.Trim(digest, `"`) {
 		t.Fatalf("bundle=%v state=%s digest=%s", bundle, state, bundle.Digest)
 	}
 	if len(paths) != 1 || paths["/api/v1/runtime/policy-bundles/current"] != 1 {
@@ -113,8 +113,8 @@ func TestSyncPolicyBundleAcceptsV2AndValidatesItsNotModifiedETagAndVersion(t *te
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if got := r.Header.Get("Accept"); got != policyBundleAcceptV2 {
-			t.Errorf("Accept=%q want %q", got, policyBundleAcceptV2)
+		if got := r.Header.Get("Accept"); got != policyBundleAccept {
+			t.Errorf("Accept=%q want %q", got, policyBundleAccept)
 		}
 		if calls > 1 {
 			if got := r.Header.Get("If-None-Match"); got != etag {
@@ -135,7 +135,7 @@ func TestSyncPolicyBundleAcceptsV2AndValidatesItsNotModifiedETagAndVersion(t *te
 	dir := t.TempDir()
 	cfg := testPolicyConfig{token: "kh_live_runtime_test_token_1234567890", controlPlaneURL: server.URL, policyStateDir: dir}
 	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
-	if err := SyncPolicyBundleV2Ready(context.Background(), cfg, identity, time.Second); err != nil {
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
 		t.Fatalf("sync v2 bundle: %v", err)
 	}
 	store, err := policybundle.OpenStore(dir)
@@ -146,7 +146,7 @@ func TestSyncPolicyBundleAcceptsV2AndValidatesItsNotModifiedETagAndVersion(t *te
 	if err != nil || state != policybundle.Active || active == nil || active.Payload.Schema != "kei.policy-bundle/v2" || active.Payload.BundleVersion != 43 {
 		t.Fatalf("v2 bundle=%v state=%s err=%v", active, state, err)
 	}
-	if err := SyncPolicyBundleV2Ready(context.Background(), cfg, identity, time.Second); err != nil {
+	if err := SyncPolicyBundle(context.Background(), cfg, identity, time.Second); err != nil {
 		t.Fatalf("sync unchanged v2 bundle: %v", err)
 	}
 	if calls != 2 {
@@ -163,8 +163,8 @@ func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 		calls++
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Kei-Policy-Bundle-Version", "42")
-		if r.Header.Get("Accept") != policyBundleAcceptV1 {
-			t.Errorf("Accept=%q want %q", r.Header.Get("Accept"), policyBundleAcceptV1)
+		if r.Header.Get("Accept") != policyBundleAccept {
+			t.Errorf("Accept=%q want %q", r.Header.Get("Accept"), policyBundleAccept)
 		}
 		if calls > 1 {
 			if r.Header.Get("If-None-Match") != etag {
@@ -404,7 +404,7 @@ func TestParseBundleErrorResponse(t *testing.T) {
 				StatusCode: tc.status,
 				Body:       io.NopCloser(strings.NewReader(tc.body)),
 			}
-			bre := parseBundleErrorResponse(resp, false)
+			bre := parseBundleErrorResponse(resp)
 			if bre == nil {
 				t.Fatal("parseBundleErrorResponse returned nil")
 			}
@@ -430,7 +430,7 @@ func TestParseBundleErrorResponseTruncatesLargeBody(t *testing.T) {
 		StatusCode: 409,
 		Body:       io.NopCloser(strings.NewReader(big)),
 	}
-	bre := parseBundleErrorResponse(resp, false)
+	bre := parseBundleErrorResponse(resp)
 	if bre == nil {
 		t.Fatal("parseBundleErrorResponse returned nil")
 	}
