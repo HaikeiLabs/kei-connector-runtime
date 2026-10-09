@@ -1,10 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -276,6 +280,209 @@ func TestPolicyControlPlaneURLRequiresValidatedHTTPSExceptExplicitLoopbackTests(
 		if err := ValidatePolicyControlPlaneURL(tc.url, tc.allowLoopbackHTTP); (err != nil) != tc.wantErr {
 			t.Errorf("validate(%q) err=%v wantErr=%v", tc.url, err, tc.wantErr)
 		}
+	}
+}
+
+func TestBundleRefreshError(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    *bundleRefreshError
+		want   string
+		unwrap error
+	}{
+		{
+			name:   "409 no body",
+			err:    &bundleRefreshError{HTTPStatus: 409, wrapped: ErrPolicyBundleNotReady},
+			want:   "HTTP 409",
+			unwrap: ErrPolicyBundleNotReady,
+		},
+		{
+			name:   "409 with reason detail",
+			err:    &bundleRefreshError{HTTPStatus: 409, Reason: "not_ready", Detail: "policy not published", wrapped: ErrPolicyBundleNotReady},
+			want:   "not_ready",
+			unwrap: ErrPolicyBundleNotReady,
+		},
+		{
+			name:   "403 with reason",
+			err:    &bundleRefreshError{HTTPStatus: 403, Reason: "unauthorized", wrapped: ErrPolicyAuthorizationDenied},
+			want:   "unauthorized",
+			unwrap: ErrPolicyAuthorizationDenied,
+		},
+		{
+			name:   "503 no body",
+			err:    &bundleRefreshError{HTTPStatus: 503},
+			want:   "HTTP 503",
+			unwrap: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.err.Error()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("Error()=%q does not contain %q", got, tc.want)
+			}
+			if tc.unwrap != nil {
+				if !errors.Is(tc.err, tc.unwrap) {
+					t.Errorf("errors.Is(%v, %v) = false", tc.err, tc.unwrap)
+				}
+			}
+		})
+	}
+}
+
+func TestBundleRefreshErrorLogFields(t *testing.T) {
+	err := &bundleRefreshError{HTTPStatus: 409, Reason: "not_ready", Detail: "something"}
+	fields := err.logFields()
+	if len(fields) < 4 {
+		t.Fatalf("logFields()=%v expected at least 4 elements", fields)
+	}
+}
+
+func TestParseBundleErrorResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantReason string
+		wantDetail string
+		wantUnwrap error
+		wantHTTP   int
+	}{
+		{
+			name:       "409 JSON body",
+			status:     409,
+			body:       `{"reason":"not_ready","detail":"policy not published yet"}`,
+			wantReason: "not_ready",
+			wantDetail: "policy not published yet",
+			wantUnwrap: ErrPolicyBundleNotReady,
+			wantHTTP:   409,
+		},
+		{
+			name:       "409 raw body",
+			status:     409,
+			body:       "not ready",
+			wantDetail: "not ready",
+			wantUnwrap: ErrPolicyBundleNotReady,
+			wantHTTP:   409,
+		},
+		{
+			name:       "403 JSON body",
+			status:     403,
+			body:       `{"reason":"unauthorized"}`,
+			wantReason: "unauthorized",
+			wantUnwrap: ErrPolicyAuthorizationDenied,
+			wantHTTP:   403,
+		},
+		{
+			name:       "503 JSON body",
+			status:     503,
+			body:       `{"reason":"overloaded","detail":"too many requests"}`,
+			wantReason: "overloaded",
+			wantDetail: "too many requests",
+			wantUnwrap: nil,
+			wantHTTP:   503,
+		},
+		{
+			name:       "503 empty body",
+			status:     503,
+			body:       "",
+			wantUnwrap: nil,
+			wantHTTP:   503,
+		},
+		{
+			name:       "HTML error page newlines stripped and truncated",
+			status:     502,
+			body:       "<html>\n<head><title>502 Bad Gateway</title></head>\n<body>\n<center><h1>502 Bad Gateway</h1></center>\n</body>\n</html>",
+			wantDetail: "<html> <head><title>502 Bad Gateway</title></head> <body> <center><h1>502 Bad Gateway</h1></center> </body> </html>",
+			wantUnwrap: nil,
+			wantHTTP:   502,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: tc.status,
+				Body:       io.NopCloser(strings.NewReader(tc.body)),
+			}
+			bre := parseBundleErrorResponse(resp, false)
+			if bre == nil {
+				t.Fatal("parseBundleErrorResponse returned nil")
+			}
+			if bre.HTTPStatus != tc.wantHTTP {
+				t.Errorf("HTTPStatus=%d want %d", bre.HTTPStatus, tc.wantHTTP)
+			}
+			if bre.Reason != tc.wantReason {
+				t.Errorf("Reason=%q want %q", bre.Reason, tc.wantReason)
+			}
+			if !strings.Contains(bre.Detail, tc.wantDetail) {
+				t.Errorf("Detail=%q does not contain %q", bre.Detail, tc.wantDetail)
+			}
+			if tc.wantUnwrap != nil && !errors.Is(bre, tc.wantUnwrap) {
+				t.Errorf("errors.Is(%v, %v) = false", bre, tc.wantUnwrap)
+			}
+		})
+	}
+}
+
+func TestParseBundleErrorResponseTruncatesLargeBody(t *testing.T) {
+	big := strings.Repeat("x", 8192)
+	resp := &http.Response{
+		StatusCode: 409,
+		Body:       io.NopCloser(strings.NewReader(big)),
+	}
+	bre := parseBundleErrorResponse(resp, false)
+	if bre == nil {
+		t.Fatal("parseBundleErrorResponse returned nil")
+	}
+	wantMax := detailMaxRunes + 3 // 3 for "..."
+	if len(bre.Detail) > wantMax {
+		t.Errorf("Detail len=%d; want <=%d", len(bre.Detail), wantMax)
+	}
+	if !strings.HasSuffix(bre.Detail, "...") {
+		t.Errorf("Detail=%q does not end with '...'", bre.Detail)
+	}
+	if strings.ContainsAny(bre.Detail, "\n\r") {
+		t.Errorf("Detail=%q contains newline or carriage return", bre.Detail)
+	}
+}
+
+func TestLogSyncFailureRateLimiting(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	r := &PolicyRefresher{}
+	berr := &bundleRefreshError{HTTPStatus: 409, Reason: "not_ready", wrapped: ErrPolicyBundleNotReady}
+
+	// First call should always log.
+	r.logSyncFailure(berr, "cold", "cold")
+	if buf.Len() == 0 {
+		t.Fatal("first failure did not log")
+	}
+	firstLines := strings.Count(buf.String(), "\n")
+
+	// Calls 2-9 with same state should NOT log (rate-limited).
+	for i := 2; i < 10; i++ {
+		r.logSyncFailure(berr, "cold", "cold")
+	}
+	lines := strings.Count(buf.String(), "\n")
+	if lines != firstLines {
+		t.Fatalf("logs increased from %d to %d during rate-limiting window", firstLines, lines)
+	}
+
+	// Call 10 should log (tick % 10 == 0).
+	r.logSyncFailure(berr, "cold", "cold")
+	lines2 := strings.Count(buf.String(), "\n")
+	if lines2 <= lines {
+		t.Fatal("expected log on 10th tick, got none")
+	}
+
+	// State change should log immediately regardless of tick.
+	r.logSyncFailure(berr, "cold", "stale_but_valid")
+	lines3 := strings.Count(buf.String(), "\n")
+	if lines3 <= lines2 {
+		t.Fatal("expected log on state transition, got none")
 	}
 }
 
