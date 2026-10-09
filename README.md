@@ -100,6 +100,15 @@ the daemon-side PEP — replaces the legacy `authorize` CLI subprocess.
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
 
+### Policy refresh failures
+
+When the control plane refuses a bundle refresh (`409` not ready, `401`/`403`,
+`5xx`), the runtime keeps its stored bundle, logs a warn line with
+`http_status`, `reason` and `detail`, and ages the bundle until it fails
+closed. [docs/policy-refresh.md](docs/policy-refresh.md) covers the log
+fields, the `active` → `stale_but_valid` → `expired` states, and how to read
+`policy/state.json`.
+
 ### Desktop harness resync
 
 On a desktop install, the policy refresher inside `kei-proxy serve` and
