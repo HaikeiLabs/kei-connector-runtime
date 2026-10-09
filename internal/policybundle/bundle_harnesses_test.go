@@ -307,8 +307,9 @@ func TestBundleHarnessesContractParityKnownProperties(t *testing.T) {
 		}
 	}
 	for field := range goFields {
-		// subject belongs to v2 (HAI-433); Payload is shared by both versions.
-		if field == "subject" {
+		// subject (HAI-433) and agent_model_profiles (HAI-459) belong to v2;
+		// Payload is shared by both versions.
+		if field == "subject" || field == "agent_model_profiles" {
 			continue
 		}
 		if !schemaProps[field] {

@@ -302,6 +302,7 @@ func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invok
 // routes still require the runtime token. The TCP handler exposes no PDP route.
 func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Handler) {
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
+	base.models = local
 	return base, local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
 }
 
@@ -337,6 +338,14 @@ type runtimeHTTPHandler struct {
 	profiles ControlPlaneModelProfileClient
 	client   *http.Client
 	sessions *pdp.Sessions
+	// models decides v2 model calls locally (ADR-035 §6); nil keeps only the
+	// v1 path.
+	models modelAuthorizer
+}
+
+// modelAuthorizer is the local PDP's v2 model decision.
+type modelAuthorizer interface {
+	AuthorizeModel(ctx context.Context, sessionID, agentID, profileID string) (pdp.Decision, bool, error)
 }
 
 func newRuntimeHTTPHandler(cfg Config, sessions *pdp.Sessions) http.Handler {
@@ -484,8 +493,9 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 	}
 
 	var invokingSubject pdp.Subject
+	sessionID := session.FromRequest(r)
 	if h.sessions != nil {
-		id := session.FromRequest(r)
+		id := sessionID
 		sub, ok := h.sessions.Get(id)
 		if !ok && id != pdp.DefaultSession {
 			writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
@@ -524,7 +534,7 @@ func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *htt
 		writeRuntimeError(w, http.StatusServiceUnavailable, "model_unavailable", "configured model is not active")
 		return
 	}
-	if err := h.authorizeModel(ctx, profile, invokingSubject); err != nil {
+	if err := h.authorizeModel(ctx, profile, sessionID, invokingSubject); err != nil {
 		writeRuntimeError(w, http.StatusForbidden, "model_invocation_denied", err.Error())
 		return
 	}
@@ -585,7 +595,23 @@ func modelSubjectRequest(sub pdp.Subject, providerUserID, tenantID string) (keir
 	return keiruntime.SubjectResolveRequest{}, false
 }
 
-func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile, invokingSubject pdp.Subject) error {
+// authorizeModel decides a model call. Under a v2 bundle the local PDP decides
+// from the refresher's identity and the bundle's agent_model_profiles, with no
+// control-plane request; the calling agent is the default agent the resolved
+// profile was served for. The v1 path below is unchanged.
+func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile, sessionID string, invokingSubject pdp.Subject) error {
+	if h.models != nil {
+		decision, v2, err := h.models.AuthorizeModel(ctx, sessionID, profile.AgentID, profile.ProfileID)
+		if err != nil {
+			return err
+		}
+		if v2 {
+			if !decision.Allow {
+				return fmt.Errorf("local policy denied model invocation (%s)", decision.ReasonCode)
+			}
+			return nil
+		}
+	}
 	identity, err := NewRuntimeClient(h.cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, h.cfg.RuntimeToken)
 	if err != nil {
 		return fmt.Errorf("resolve runtime identity for local policy: %w", err)
@@ -602,7 +628,7 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 		return fmt.Errorf("local policy bundle unavailable: %w", err)
 	}
 	if bundle.Payload.Schema == "kei.policy-bundle/v2" {
-		return errors.New("v2 model authorization is unsupported; refusing the legacy online subject path")
+		return errors.New("v2 model authorization needs the resolved runtime identity; refusing the legacy online subject path")
 	}
 	var attrs *policybundle.Subject
 	if req, ok := modelSubjectRequest(invokingSubject, h.cfg.ProviderUserID, os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")); ok {

@@ -59,6 +59,10 @@ func TestStaleV2SnapshotHardDeniesEveryPDPEntryPoint(t *testing.T) {
 	if err != nil || harness.Outcome != policybundle.HarnessNotRenderable {
 		t.Fatalf("harness=%+v err=%v", harness, err)
 	}
+	model, v2, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile")
+	if err != nil || !v2 || model.Allow || model.ReasonCode != "subject_snapshot_stale" {
+		t.Fatalf("model decision=%+v v2=%v err=%v", model, v2, err)
+	}
 	_, _, allowed, err := e.AuthorizeV2Plan(sessionID, testInstallation, "u-alice", "discord", "discord-old", testAgent, "tool", []policybundle.Operation{{ConnectorID: "conn", Capability: "read", Action: "read"}})
 	if allowed || !errors.Is(err, policybundle.ErrSubjectSnapshotStale) {
 		t.Fatalf("preflight allowed=%v err=%v", allowed, err)
@@ -102,5 +106,25 @@ func TestV2RefreshDoesNotPreserveRemovedRemoteIdentityByUserMembership(t *testin
 	}
 	if got, ok := sessions.Get(kept); !ok || got.Status != StatusLinked {
 		t.Fatalf("unrelated identity session=%+v exists=%v", got, ok)
+	}
+}
+
+func TestAuthorizeV2ModelLeavesV1BundlesToTheLegacyPath(t *testing.T) {
+	useValidator(t, schemaValidator(t))
+	now := time.Now().UTC()
+	e, _, _ := newTestEvaluator(t, now, testBundle(t, now, 1, evaluatorPolicies, nil), NewSessions())
+	if d, v2, err := e.AuthorizeV2Model(context.Background(), DefaultSession, testAgent, "profile"); err != nil || v2 || d.Allow {
+		t.Fatalf("v1 bundle decision=%+v v2=%v err=%v", d, v2, err)
+	}
+}
+
+func TestAuthorizeV2ModelDeniesWithoutABundleAndForEndedSessions(t *testing.T) {
+	now := time.Now().UTC()
+	e, _, _ := newTestEvaluator(t, now, nil, NewSessions())
+	if d, v2, err := e.AuthorizeV2Model(context.Background(), DefaultSession, testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != "policy_bundle_missing" {
+		t.Fatalf("cold decision=%+v v2=%v err=%v", d, v2, err)
+	}
+	if d, v2, err := e.AuthorizeV2Model(context.Background(), "ended-session", testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != ReasonSessionNotFound {
+		t.Fatalf("ended session decision=%+v v2=%v err=%v", d, v2, err)
 	}
 }
