@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -166,5 +167,78 @@ func TestListenFailsWhenDirectoryIsNotWritable(t *testing.T) {
 	if listener, err := Listen(filepath.Join(dir, "runtime.sock")); err == nil {
 		_ = listener.Close()
 		t.Fatal("Listen succeeded in a read-only directory")
+	}
+}
+
+// TestListenNeverExposesWiderMode guards the bind-then-chmod race: with a
+// permissive umask, a watcher polling the path must only ever see a 0600
+// socket, and the listener must still serve and clean up after itself.
+func TestListenNeverExposesWiderMode(t *testing.T) {
+	old := syscall.Umask(0)
+	t.Cleanup(func() { syscall.Umask(old) })
+	dir := shortTempDir(t)
+	path := filepath.Join(dir, "runtime.sock")
+
+	stop := make(chan struct{})
+	bad := make(chan os.FileMode, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600) {
+				select {
+				case bad <- info.Mode():
+				default:
+				}
+			}
+		}
+	}()
+	for range 200 {
+		listener, err := Listen(path)
+		if err != nil {
+			close(stop)
+			<-done
+			t.Fatalf("Listen: %v", err)
+		}
+		accepted := make(chan error, 1)
+		go func() {
+			conn, err := listener.Accept()
+			if err == nil {
+				_ = conn.Close()
+			}
+			accepted <- err
+		}()
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			close(stop)
+			<-done
+			t.Fatalf("dial renamed socket: %v", err)
+		}
+		_ = conn.Close()
+		if err := <-accepted; err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		if err := listener.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+	close(stop)
+	<-done
+	select {
+	case mode := <-bad:
+		t.Fatalf("socket path observed with mode %v, want only 0600 socket", mode)
+	default:
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("left behind %d entries (staging dirs or socket): %v", len(entries), entries)
 	}
 }

@@ -100,6 +100,24 @@ the daemon-side PEP — replaces the legacy `authorize` CLI subprocess.
 The `KEI_PROXY_*` environment variables are likewise an unchanged public
 contract.
 
+### Desktop harness resync
+
+On a desktop install, the policy refresher inside `kei-proxy serve` and
+`kei-proxy runtime heartbeat` keeps Claude Code, Codex and OpenCode native
+config in line with the bundle (HAI-432). After each refresh that changes the
+bundle, and on a timer, it runs `kei harness sync --check --json` (the `kei`
+binary next to `kei-proxy`, then `PATH`) and runs `kei harness sync` when the
+check exits 1. It logs counts only. If another writer rewrites the same
+harness again within three checks, the timer doubles, up to one hour, and
+`kei-proxy policy show` reports `harness_resync.state` as
+`harness resync backoff`; three clean checks reset it.
+
+- `KEI_PROXY_HARNESS_RESYNC_INTERVAL` sets the timer as a Go duration
+  (default `5m`); `off` or `0` disables the loop.
+- It does nothing when no `~/.claude`, `~/.codex` or OpenCode config
+  directory exists (server installations), and its failures never affect
+  bundle refresh or heartbeats.
+
 ## Linking a platform identity
 
 Harnesses can start a platform-neutral identity claim with the `identity-link`

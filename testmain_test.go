@@ -21,6 +21,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	_ = os.Setenv("KEI_RUNTIME_STATE_DIR", filepath.Join(dir, "policy-state"))
+	// Never run the real `kei harness sync` from a test (HAI-432).
+	_ = os.Setenv("KEI_PROXY_HARNESS_RESYNC_INTERVAL", "off")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

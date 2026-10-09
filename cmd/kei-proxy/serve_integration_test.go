@@ -60,6 +60,8 @@ func TestServeDaemonOverUnixSocket(t *testing.T) {
 		"KEI_RUNTIME_SOCKET_PATH="+socketPath,
 		"KEI_PROXY_LISTEN_ADDR=127.0.0.1:0",
 		"KEI_PROXY_AUDIT="+auditPath,
+		// Never run the real `kei harness sync` from a test (HAI-432).
+		"KEI_PROXY_HARNESS_RESYNC_INTERVAL=off",
 	)
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

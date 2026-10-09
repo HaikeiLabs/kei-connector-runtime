@@ -165,7 +165,8 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID,
 		}, *timeout)
 	}
-	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil)
+	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil,
+		keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, getenv)))
 	defer stopRefresher()
 	if err := loop.Run(ctx, false); err != nil {
 		if IsRuntimeRevocation(err) {
@@ -248,7 +249,8 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID,
 		}, timeout)
 	}
-	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil)
+	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil,
+		keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, getenv)))
 	defer stopRefresher()
 	err := loop.Run(ctx, true)
 	if IsRuntimeRevocation(err) {

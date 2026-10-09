@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/harnessresync"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
@@ -67,7 +68,11 @@ func RunPolicyShow(args []string, stdout, stderr io.Writer, cfg PolicyConfig) in
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
-	if err := WriteJSON(stdout, status); err != nil {
+	show := policyShow{Status: status}
+	if resync, err := harnessresync.LoadStatus(cfg.PolicyStateDir()); err == nil {
+		show.HarnessResync = resync
+	}
+	if err := WriteJSON(stdout, show); err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
@@ -75,6 +80,14 @@ func RunPolicyShow(args []string, stdout, stderr io.Writer, cfg PolicyConfig) in
 		return 1
 	}
 	return 0
+}
+
+// policyShow is `policy show` output: the bundle status plus, on a desktop
+// install, the harness resync state ("harness resync backoff" when a harness
+// keeps getting rewritten).
+type policyShow struct {
+	policybundle.Status
+	HarnessResync *harnessresync.Status `json:"harness_resync,omitempty"`
 }
 
 // PolicyStatus returns the persisted bundle's metadata and enforcement state.
