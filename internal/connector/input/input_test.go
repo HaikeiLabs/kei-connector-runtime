@@ -78,8 +78,11 @@ func TestDecodeReturnsTypedInputs(t *testing.T) {
 	if got, err := Decode("gmail", "message.get", []byte(`{"message_id":"m-1"}`)); err != nil || got != (GmailMessageGet{MessageID: "m-1"}) {
 		t.Fatalf("gmail get = %#v, %v", got, err)
 	}
-	if got, err := Decode("google_drive", "drive.search", []byte(`{"query":"plan"}`)); err != nil || got != (DriveSearch{Query: "plan"}) {
-		t.Fatalf("drive search = %#v, %v", got, err)
+	if got, err := Decode("google_drive", "drive.search", []byte(`{"query":"plan","mime_type":"text/plain","limit":25}`)); err != nil || got != (DriveSearch{Query: "plan", MimeType: "text/plain", Limit: 25}) {
+		t.Fatalf("drive list = %#v, %v", got, err)
+	}
+	if got, err := Decode("google_drive", "drive.search", []byte(`{}`)); err != nil || got != (DriveSearch{}) {
+		t.Fatalf("unfiltered drive list = %#v, %v", got, err)
 	}
 	if got, err := Decode("tito", "event.list", []byte(`{"status":"past","page":2}`)); err != nil || got != (TitoEventList{Status: "past", Page: 2}) {
 		t.Fatalf("tito list = %#v, %v", got, err)
@@ -109,7 +112,14 @@ func TestDecodeRejectsInvalidInput(t *testing.T) {
 		{"gmail", "message.search", `{"query":"` + strings.Repeat("q", 513) + `"}`},
 		{"gmail", "message.search", `{"page_size":"5"}`},
 		{"gmail", "message.get", `{"message_id":"` + strings.Repeat("m", 257) + `"}`},
-		{"google_drive", "drive.search", `{}`},
+		{"google_drive", "drive.search", `{"limit":101}`},
+		{"google_drive", "drive.search", `{"limit":-1}`},
+		{"google_drive", "drive.search", `{"mime_type":"not-a-mime"}`},
+		{"google_drive", "drive.search", `{"tenant_id":"tenant-from-agent"}`},
+		{"google_drive", "drive.search", `{"query":"` + strings.Repeat("q", 513) + `"}`},
+		{"google_drive", "drive.search", "{\"query\":\"line\\nfeed\"}"},
+		{"google_drive", "drive.search", `{"query":"\\' or trashed != true or name contains '"}`},
+
 		{"tito", "event.list", `{"status":"all"}`},
 		{"tito", "event.list", `{"page":-1}`},
 		{"http_api", "http.get", `{}`},

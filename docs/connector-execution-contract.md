@@ -443,7 +443,7 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | --- | --- | --- | --- | --- |
 | gmail | `message.search` | `gmail/messages` | `{query?: string ≤512 (Gmail syntax), page_size?: 1..25 (default 10), page_token?: string ≤256}` | `{messages: [GmailMessage], next_page_token?}`; bodies are never returned |
 | gmail | `message.get` | `gmail/messages/<id>` | `{message_id?}` (must equal the resource id if set) | `GmailMessage` |
-| google_drive | `drive.search` | `drive/<drive_id>` | `{query: string 1..512}` | `{files: [{id, drive_id, name, mime_type, modified_at}]}` |
+| google_drive | `drive.search` (used by the existing `drive.list_files` tool) | `drive/<drive_id>` | `{query?: string ≤512, mime_type?: valid MIME type, limit?: 1..100 (default 50)}` | `[{id, drive_id, name, mime_type, modified_at}]`; only the first Google Drive `files.list` page (provider default page size), `trashed=false`, scoped to the bound drive; MIME filtering and output limit apply within that page. The existing tool schema has no cursor, so it cannot request subsequent pages. |
 | google_drive | `drive.metadata.read` | `drive/<drive_id>/files/<file_id>` | `{}` | `{id, drive_id, name, mime_type, modified_at}` |
 | google_drive | `docs.read` | `drive/<drive_id>/files/<file_id>` | `{}` | `{file_id, text}`, with `text` capped at 256 KiB (a larger document is `result_too_large`) |
 | linear | `issue.read` | `linear/issue/<id>` | `{}` | `{id, identifier, team_key, project_id?, title, state}` |
