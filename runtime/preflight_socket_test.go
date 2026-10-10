@@ -450,8 +450,10 @@ func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	local.AfterSync(nil)
-	if _, err := local.PreflightV2(context.Background(), sessionID, "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0, 10*time.Second); err == nil {
-		t.Fatal("stale snapshot passed preflight")
+	// HAI-452: the snapshot is fresh for the bundle lifetime; preflight
+	// proceeds with the updated bundle version.
+	if _, err := local.PreflightV2(context.Background(), sessionID, "github.read_repo", "agent-fixture-0001", args, contextMap, "", 0, 10*time.Second); err != nil {
+		t.Fatalf("fresh snapshot preflight should succeed: %v", err)
 	}
 }
 

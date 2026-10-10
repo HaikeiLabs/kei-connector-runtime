@@ -3,7 +3,6 @@ package pdp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -28,7 +27,7 @@ func v2SnapshotBundle(t *testing.T, now time.Time, version int64, identities []m
 	return raw
 }
 
-func TestStaleV2SnapshotHardDeniesEveryPDPEntryPoint(t *testing.T) {
+func TestV2SnapshotFreshAfterMaxCacheWindow(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	previous := policybundle.SetV2SchemaValidator
 	_ = previous
@@ -47,31 +46,35 @@ func TestStaleV2SnapshotHardDeniesEveryPDPEntryPoint(t *testing.T) {
 	}
 	e, store, _ := newTestEvaluator(t, now, bundle, sessions)
 	e.now = func() time.Time { return now.Add(time.Second) }
+	// HAI-452: the subject snapshot is no longer stale after the old
+	// max_cache_seconds window. Every PDP entry point proceeds past the
+	// staleness gate and makes its normal decision.
+
 	decision, err := e.Evaluate(context.Background(), Request{Tool: "some.tool"})
-	if err != nil || decision.Allow || decision.ReasonCode != "subject_snapshot_stale" {
+	if err != nil || decision.Allow || decision.ReasonCode != "preflight_required" {
 		t.Fatalf("authorize decision=%+v err=%v", decision, err)
 	}
 	connector, err := e.EvaluateConnector(context.Background(), Request{Connector: &ConnectorTarget{ConnectorID: "conn", Capability: "read"}})
-	if err != nil || connector.Allow || connector.ReasonCode != "subject_snapshot_stale" {
+	if err != nil || connector.Allow || connector.ReasonCode != "preflight_required" {
 		t.Fatalf("connector decision=%+v err=%v", connector.Decision, err)
 	}
 	harness, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "codex", Argv: []string{"git"}})
-	if err != nil || harness.Outcome != policybundle.HarnessNotRenderable {
+	if err != nil || harness.Outcome != policybundle.HarnessUnmatched {
 		t.Fatalf("harness=%+v err=%v", harness, err)
 	}
 	model, v2, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile")
-	if err != nil || !v2 || model.Allow || model.ReasonCode != "subject_snapshot_stale" {
+	if err != nil || !v2 || model.Allow || model.ReasonCode != "model_not_assigned" {
 		t.Fatalf("model decision=%+v v2=%v err=%v", model, v2, err)
 	}
 	_, _, allowed, err := e.AuthorizeV2Plan(sessionID, testInstallation, "u-alice", "discord", "discord-old", testAgent, "tool", []policybundle.Operation{{ConnectorID: "conn", Capability: "read", Action: "read"}})
-	if allowed || !errors.Is(err, policybundle.ErrSubjectSnapshotStale) {
+	if allowed || err != nil {
 		t.Fatalf("preflight allowed=%v err=%v", allowed, err)
 	}
 	e.ReconcileSession()
-	if got, _ := sessions.Current(); got.Status != StatusRevoked {
-		t.Fatalf("stale subject survived reconciliation: %+v", got)
+	if got, _ := sessions.Current(); got.Status != StatusLinked {
+		t.Fatalf("linked session was incorrectly revoked: %+v", got)
 	}
-	if _, state, err := store.Check(testInstallation, testOrg, testWorkspace, now.Add(time.Second)); state != policybundle.Stale || !errors.Is(err, policybundle.ErrSubjectSnapshotStale) {
+	if _, state, err := store.Check(testInstallation, testOrg, testWorkspace, now.Add(time.Second)); state != policybundle.Active || err != nil {
 		t.Fatalf("store state=%s err=%v", state, err)
 	}
 }
