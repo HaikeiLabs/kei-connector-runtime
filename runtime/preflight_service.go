@@ -174,7 +174,11 @@ func (l *LocalPDP) ConsumeV2Plan(ctx context.Context, handle, sessionID, toolNam
 
 func (l *LocalPDP) DescribeV2Tool(sessionID, toolName, agentID string) (provider, connectorID string, capabilities []string, subject, trustedAgentID string, tenantID, workspaceID string, ok bool) {
 	e, identity := l.evaluator.Load(), l.identity.Load()
-	if e == nil || identity == nil || identity.WorkspaceID == nil || agentID == "" {
+	if e == nil || identity == nil || identity.WorkspaceID == nil {
+		return "", "", nil, "", "", "", "", false
+	}
+	agentID = trustedDefaultAgentID(agentID, identity.AgentID)
+	if agentID == "" {
 		return "", "", nil, "", "", "", "", false
 	}
 	ctx, found := e.V2PlanContext(toolName)
@@ -200,11 +204,19 @@ func (l *LocalPDP) AuthorizePlan(binding BindingContext, ops []Operation) (strin
 	return e.AuthorizeV2Plan(binding.SessionID, binding.InstallationID, binding.Subject, binding.SubjectSource, binding.SubjectExternalID, binding.AgentID, binding.Tool, ops)
 }
 
+func trustedDefaultAgentID(requestedAgentID, defaultAgentID string) string {
+	if requestedAgentID != "" {
+		return requestedAgentID
+	}
+	return defaultAgentID
+}
+
 func (l *LocalPDP) preflightBinding(sessionID, toolName, agentID string, argsRaw, contextRaw []byte, parentSpan string, depth int) (BindingContext, policybundle.V2Tool, []byte, []byte, error) {
 	e, identity := l.evaluator.Load(), l.identity.Load()
 	if e == nil || identity == nil || identity.WorkspaceID == nil {
 		return BindingContext{}, policybundle.V2Tool{}, nil, nil, ErrPreflightDenied
 	}
+	agentID = trustedDefaultAgentID(agentID, identity.AgentID)
 	planContext, ok := e.V2PlanContext(toolName)
 	if !ok || planContext.Tool.Route.ConnectorBinding == nil {
 		return BindingContext{}, policybundle.V2Tool{}, nil, nil, ErrBundlePlanUnavailable

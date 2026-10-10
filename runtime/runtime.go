@@ -40,6 +40,9 @@ type Identity struct {
 	ID          string
 	OrgID       string
 	WorkspaceID *string
+	// AgentID is the default agent assigned to this installation by whoami.
+	// It is trusted daemon identity, not caller-supplied request data.
+	AgentID string
 }
 
 // IdentityFunc is a function that resolves the runtime identity.

@@ -157,7 +157,7 @@ func runRuntimeHeartbeat(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	syncBundle := func(id *keiruntime.Identity) error {
 		return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
-			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID,
+			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID, AgentID: id.AgentID,
 		}, *timeout)
 	}
 	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil,
@@ -230,7 +230,7 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 	}
 	syncBundle := func(id *keiruntime.Identity) error {
 		return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
-			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID,
+			ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID, AgentID: id.AgentID,
 		}, timeout)
 	}
 	stopRefresher := keiruntime.StartPolicyRefresher(ctx, cfg, whoami, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, nil, nil,

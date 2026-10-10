@@ -9,6 +9,33 @@ import (
 	"time"
 )
 
+func TestRuntimeIdentityDefaultAgentID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity RuntimeIdentity
+		want     string
+	}{
+		{name: "legacy top-level default", identity: RuntimeIdentity{ID: "installation-1", AgentID: "agent-legacy", Agents: []RuntimeAgent{{InstallationID: "installation-1", AgentID: "agent-other", IsDefault: true}}}, want: "agent-legacy"},
+		{name: "assigned default", identity: RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{InstallationID: "installation-1", AgentID: "agent-default", IsDefault: true}, {InstallationID: "installation-1", AgentID: "agent-other"}}}, want: "agent-default"},
+		{name: "no default", identity: RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{InstallationID: "installation-1", AgentID: "agent-only"}}}},
+		{name: "multiple defaults", identity: RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{InstallationID: "installation-1", AgentID: "agent-a", IsDefault: true}, {InstallationID: "installation-1", AgentID: "agent-b", IsDefault: true}}}},
+		{name: "default for another installation", identity: RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{InstallationID: "installation-2", AgentID: "agent-other", IsDefault: true}}}},
+		{name: "mismatched default alongside assigned default", identity: RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{InstallationID: "installation-1", AgentID: "agent-a", IsDefault: true}, {InstallationID: "installation-2", AgentID: "agent-other", IsDefault: true}}}},
+		{name: "empty default agent ID", identity: RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{InstallationID: "installation-1", IsDefault: true}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.identity.DefaultAgentID(); got != tc.want {
+				t.Fatalf("DefaultAgentID() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	identity := identityFromRoot(&RuntimeIdentity{ID: "installation-1", Agents: []RuntimeAgent{{InstallationID: "installation-1", AgentID: "agent-default", IsDefault: true}}})
+	if identity.AgentID != "agent-default" {
+		t.Fatalf("runtime identity AgentID = %q, want trusted default", identity.AgentID)
+	}
+}
+
 func TestBootstrapRuntimeResolvesInstallationAndReportsHeartbeat(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

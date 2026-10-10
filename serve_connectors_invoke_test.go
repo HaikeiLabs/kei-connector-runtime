@@ -69,7 +69,7 @@ func newInvokeRig(t *testing.T) *invokeRig {
 	}
 	t.Cleanup(rig.local.Close)
 	ws := "ws-fixture-0001"
-	rig.local.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &ws})
+	rig.local.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &ws, AgentID: "agent-fixture-0001"})
 	_, h := newServeHandlers(rig.cfg, rig.local)
 	rig.client, rig.socket = serveSocketForTest(t, h)
 	return rig
