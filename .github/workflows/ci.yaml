@@ -3,13 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
 
+# Keyed by ref so a pull request run never cancels a main run. Only a newer
+# push to the same pull request cancels its older run; main runs always finish.
 concurrency:
-  group: ci-${{ github.workflow }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
