@@ -111,7 +111,8 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 	}
 	tool, argv0 := reportedTool(in.ToolName, in.ToolInput)
 	skill := activeSkillFor(kind, in.SessionID, in.ToolName, in.ToolInput, cfg.RuntimeStateDir)
-	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: false, HarnessSessionID: in.SessionID, SessionID: *sessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
+	registered := harnessRegisteredFor(cfg.RuntimeStateDir, *harnessID, kind)
+	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: registered, HarnessSessionID: in.SessionID, SessionID: *sessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {
 		WriteAudit(cfg, data)
@@ -188,4 +189,48 @@ func skillToolName(name string, raw json.RawMessage) (string, bool) {
 		return "", false
 	}
 	return input.Skill, true
+}
+
+// bundleKind maps a hook's short harness kind to the kind recorded in the
+// policy bundle's harnesses[] (ADR-029). The rendered hook CLI uses short
+// kinds (claude, codex, opencode); the bundle records claude_code, codex and
+// opencode. This is the single place that translates between the two.
+var bundleKind = map[string]string{
+	"claude":   "claude_code",
+	"codex":    "codex",
+	"opencode": "opencode",
+}
+
+// harnessRegistered reports whether the bundle's registered harnesses include
+// harnessID under the bundle kind for the hook's short kind.
+func harnessRegistered(harnesses []policybundle.Harness, harnessID, kind string) bool {
+	want, ok := bundleKind[kind]
+	if !ok || harnessID == "" {
+		return false
+	}
+	for _, h := range harnesses {
+		if h.AgentID == harnessID && h.Kind == want {
+			return true
+		}
+	}
+	return false
+}
+
+// harnessRegisteredFor reports whether the persisted policy bundle lists
+// harnessID as a registered harness of the given short kind. It is
+// report-only: a missing, unreadable, invalid, or expired bundle yields false,
+// and it never fails the hook.
+func harnessRegisteredFor(stateDir, harnessID, kind string) bool {
+	if stateDir == "" || harnessID == "" {
+		return false
+	}
+	store, err := policybundle.OpenStore(stateDir)
+	if err != nil {
+		return false
+	}
+	harnesses, err := store.Harnesses(time.Now())
+	if err != nil {
+		return false
+	}
+	return harnessRegistered(harnesses, harnessID, kind)
 }
