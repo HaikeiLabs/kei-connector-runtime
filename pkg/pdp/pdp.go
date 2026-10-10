@@ -86,8 +86,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
-	if !e.sessionLive(req.Session) {
-		return sessionDenial(), nil
+	if live, reason := e.sessionLive(req.Session); !live {
+		return sessionDenial(reason), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
@@ -99,12 +99,27 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 
 // sessionLive reports whether the named session can be used: the default
 // session always can (it may hold no subject), an id session only while live.
-func (e *Evaluator) sessionLive(id string) bool {
-	return id == DefaultSession || (e.sessions != nil && e.sessions.Exists(id))
+// When false, the returned string is the denial reason code.
+func (e *Evaluator) sessionLive(id string) (bool, string) {
+	if id == DefaultSession {
+		return true, ""
+	}
+	if e.sessions == nil {
+		return false, ReasonSessionNotFound
+	}
+	return e.sessions.liveWithReason(id)
 }
 
-func sessionDenial() Decision {
-	return Decision{Reason: "the session does not exist or has ended", ReasonCode: ReasonSessionNotFound, DenySource: "identity"}
+func sessionDenial(reasonCode ...string) Decision {
+	code := ReasonSessionNotFound
+	if len(reasonCode) > 0 && reasonCode[0] != "" {
+		code = reasonCode[0]
+	}
+	reason := "the session does not exist or has ended"
+	if code == ReasonSessionRevalidationRequired {
+		reason = "the session has exceeded its max age and must be revalidated"
+	}
+	return Decision{Reason: reason, ReasonCode: code, DenySource: "identity"}
 }
 
 // Connector is a connector entry from the policy bundle.
@@ -132,8 +147,8 @@ func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (Connect
 	if req.Connector == nil {
 		return ConnectorGrant{Decision: Decision{Reason: "connector target is required", ReasonCode: "tool_not_registered", DenySource: "registry"}}, nil
 	}
-	if !e.sessionLive(req.Session) {
-		return ConnectorGrant{Decision: sessionDenial()}, nil
+	if live, reason := e.sessionLive(req.Session); !live {
+		return ConnectorGrant{Decision: sessionDenial(reason)}, nil
 	}
 	v, state, err := e.check()
 	if err != nil {
@@ -224,11 +239,11 @@ func (e *Evaluator) AuthorizeV2HarnessTool(ctx context.Context, req Request) (De
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
-	if req.Session == DefaultSession || !e.sessionLive(req.Session) {
-		if req.Session == DefaultSession {
-			return Decision{Reason: "v2 harness authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
-		}
-		return sessionDenial(), nil
+	if req.Session == DefaultSession {
+		return Decision{Reason: "v2 harness authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
+	}
+	if live, reason := e.sessionLive(req.Session); !live {
+		return sessionDenial(reason), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
@@ -252,8 +267,8 @@ func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, pr
 	if err := ctx.Err(); err != nil {
 		return Decision{}, true, err
 	}
-	if !e.sessionLive(sessionID) {
-		return sessionDenial(), true, nil
+	if live, reason := e.sessionLive(sessionID); !live {
+		return sessionDenial(reason), true, nil
 	}
 	v, state, err := e.check()
 	if err != nil {

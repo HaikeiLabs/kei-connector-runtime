@@ -47,6 +47,14 @@ const DefaultSession = ""
 // created, has ended, or expired.
 const ReasonSessionNotFound = "session_not_found"
 
+// ReasonSessionRevalidationRequired is the deny reason for a session whose
+// max age was exceeded and was recycled.
+const ReasonSessionRevalidationRequired = "session_revalidation_required"
+
+// SessionMaxAge is how long a named session lives before it must be
+// revalidated. See ADR-026 G0.
+const SessionMaxAge = 8 * time.Hour
+
 // Sessions holds worker sessions in memory only: the legacy default session
 // and any number of sessions named by an opaque id (owner decision
 // 2026-10-06: many agents in parallel on one machine). Nothing is persisted;
@@ -60,17 +68,20 @@ type Sessions struct {
 	mu  sync.RWMutex
 	cur *Subject
 
-	byID    sync.Map // id -> *idSession
-	idleTTL atomic.Int64
-	now     func() time.Time
-	onEnd   atomic.Pointer[func(id string)]
+	byID     sync.Map // id -> *idSession
+	idleTTL  atomic.Int64
+	now      func() time.Time
+	onEnd    atomic.Pointer[func(id string)]
+	onReuse  atomic.Pointer[func(id string)] // recycle (max age) only
+	recycled sync.Map                        // id -> struct{}; consumed by the next sessionLive check
 }
 
 type idSession struct {
-	mu       sync.RWMutex
-	sub      Subject
-	pinned   bool
-	lastUsed atomic.Int64 // unix nanoseconds
+	mu        sync.RWMutex
+	sub       Subject
+	pinned    bool
+	startedAt int64        // unix nanoseconds, set at creation
+	lastUsed  atomic.Int64 // unix nanoseconds
 }
 
 // DefaultIdleTTL is how long an id session lives without use.
@@ -100,6 +111,11 @@ func (s *Sessions) IdleTTL() time.Duration { return time.Duration(s.idleTTL.Load
 // any reason (EndID, idle expiry, Sweep), so its owner can drop what it held
 // for it. fn runs on the ending goroutine and must not block.
 func (s *Sessions) OnEnd(fn func(id string)) { s.onEnd.Store(&fn) }
+
+// OnRecycle registers fn to run when a session is ended because its max age
+// was exceeded. The runtime uses this to emit a session_recycled lifecycle
+// event. fn runs on the ending goroutine and must not block.
+func (s *Sessions) OnRecycle(fn func(id string)) { s.onReuse.Store(&fn) }
 
 func validSubject(sub Subject) (Subject, error) {
 	switch sub.Status {
@@ -173,9 +189,10 @@ func (s *Sessions) create(sub Subject, pinned bool) (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
+	now := s.now()
 	id := "ks_" + base64.RawURLEncoding.EncodeToString(b)
-	e := &idSession{sub: sub, pinned: pinned}
-	e.lastUsed.Store(s.now().UnixNano())
+	e := &idSession{sub: sub, pinned: pinned, startedAt: now.UnixNano()}
+	e.lastUsed.Store(now.UnixNano())
 	s.byID.Store(id, e)
 	return id, nil
 }
@@ -213,7 +230,16 @@ func (s *Sessions) live(id string) (*idSession, bool) {
 		return nil, false
 	}
 	e := v.(*idSession)
-	if s.expired(e, s.now()) {
+	now := s.now()
+	if maxAge := s.maxAgeExpired(e, now); maxAge {
+		s.recycled.Store(id, struct{}{})
+		s.endID(id, e)
+		if fn := s.onReuse.Load(); fn != nil {
+			(*fn)(id)
+		}
+		return nil, false
+	}
+	if s.expired(e, now) {
 		s.endID(id, e)
 		return nil, false
 	}
@@ -222,6 +248,10 @@ func (s *Sessions) live(id string) (*idSession, bool) {
 
 func (s *Sessions) expired(e *idSession, now time.Time) bool {
 	return !e.pinned && now.Sub(time.Unix(0, e.lastUsed.Load())) >= s.IdleTTL()
+}
+
+func (s *Sessions) maxAgeExpired(e *idSession, now time.Time) bool {
+	return !e.pinned && now.Sub(time.Unix(0, e.startedAt)) >= SessionMaxAge
 }
 
 // EndID ends session id (DefaultSession ends the default session) and
@@ -249,6 +279,32 @@ func (s *Sessions) endID(id string, e *idSession) bool {
 		(*fn)(id)
 	}
 	return true
+}
+
+// ConsumeRecycled reports whether id was recently recycled (max-age exceeded)
+// and removes it from the recycled set, so the next call sees session_not_found.
+func (s *Sessions) ConsumeRecycled(id string) bool {
+	_, loaded := s.recycled.LoadAndDelete(id)
+	return loaded
+}
+
+// liveWithReason checks whether id is live. If the session was recycled (max
+// age exceeded) the caller gets ReasonSessionRevalidationRequired; if it
+// expired from idleness it gets ReasonSessionNotFound.
+func (s *Sessions) liveWithReason(id string) (bool, string) {
+	if s.ConsumeRecycled(id) {
+		return false, ReasonSessionRevalidationRequired
+	}
+	live := s.Exists(id)
+	if live {
+		return true, ""
+	}
+	// Exists may have just recycled the session (max age detected during
+	// live()); consume again to catch it.
+	if s.ConsumeRecycled(id) {
+		return false, ReasonSessionRevalidationRequired
+	}
+	return false, ReasonSessionNotFound
 }
 
 // Sweep ends every id session idle past the TTL and returns their ids.
