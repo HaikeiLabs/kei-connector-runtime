@@ -125,22 +125,36 @@ func (r *serveRun) client() *http.Client {
 	}}}
 }
 
-// authorizeReason asks the daemon's socket PDP for a decision and returns its
-// reason, or "" while the socket is not answering yet.
+// authorizeReason asks the daemon's socket PDP for a decision with the
+// runtime token and returns its reason, or "" while the socket has not
+// decided. An unauthenticated probe can be refused (401) before the PDP is
+// reached, and a refusal must never read as a resolved identity.
 func (r *serveRun) authorizeReason() string {
-	resp, err := r.client().Post("http://localhost/v1/authorize", "application/json",
+	req, err := http.NewRequest(http.MethodPost, "http://localhost/v1/authorize",
 		strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"web_search","resource":"query"}`))
 	if err != nil {
 		return ""
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatTestToken)
+	resp, err := r.client().Do(req)
+	if err != nil {
+		return ""
+	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body)
+	var decision struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&decision) != nil || decision.Decision == "" {
+		return ""
+	}
+	return decision.Reason
 }
 
 func (r *serveRun) identityResolved() bool {
 	reason := r.authorizeReason()
-	return reason != "" && !strings.Contains(reason, "runtime identity is not resolved yet")
+	return reason != "" && reason != "runtime identity is not resolved yet"
 }
 
 func TestServeSendsHeartbeats(t *testing.T) {
