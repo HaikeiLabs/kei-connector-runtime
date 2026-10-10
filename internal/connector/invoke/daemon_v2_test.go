@@ -135,6 +135,38 @@ func sameTestOps(a, b []policybundle.Operation) bool {
 	return true
 }
 
+func TestDaemonV2InheritsSessionFromSocketHeaderWhenBodyOmitsIt(t *testing.T) {
+	const ownerSession = "ks_owner-session"
+	var seenSession string
+	d := &Daemon{
+		Authorize: func(_ context.Context, call DaemonCall) (Grant, error) {
+			seenSession = call.Session
+			return Grant{HasSession: true, ReasonCode: "policy_deny"}, nil
+		},
+		PlanV2: func(context.Context, string, string, string, []byte, []byte, string, int) ([]policybundle.Operation, error) {
+			return nil, nil
+		},
+		ValidateV2: func(context.Context, string, string, string, string, []byte, []byte, []policybundle.Operation, string, int) error {
+			return nil
+		},
+		ConsumeV2Plan: func(context.Context, string, string, string, string, []byte, []byte, []policybundle.Operation, string, int) error {
+			return nil
+		},
+		UseCredential: func(context.Context, string, string, string, func(string) error) error { return nil },
+	}
+	body, _ := json.Marshal(daemonRequest{
+		Schema: daemonRequestSchema, ToolName: "github.repository_read", PreflightHandle: "opaque-handle",
+		Input: json.RawMessage(`{}`), Context: json.RawMessage(`{}`),
+	})
+	req := httptest.NewRequest(http.MethodPost, DaemonInvokePath, bytes.NewReader(body))
+	session.SetHeader(req, ownerSession)
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || seenSession != ownerSession {
+		t.Fatalf("status=%d session=%q body=%s", rec.Code, seenSession, rec.Body.String())
+	}
+}
+
 func TestDaemonV2RejectsMixedCallerOperationFields(t *testing.T) {
 	providerCalls := 0
 	d := &Daemon{Env: Env{ProviderTransport: roundTripFunc(func(*http.Request) (*http.Response, error) { providerCalls++; return nil, nil })}}

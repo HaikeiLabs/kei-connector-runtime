@@ -181,7 +181,10 @@ The daemon runs one governed connector call and returns only its result:
  "input":{},"trace_id":"…","agent_id":"…"}
 ```
 
-The request carries no subject and no credential. The answer is
+The request carries no subject and no credential. For a tokenless owner-session
+call, the caller omits `session_id`; the socket middleware binds the request to
+the owner session and the daemon uses that trusted session header. If a caller
+includes `session_id`, it must exactly match the bound header. The answer is
 `kei.connector-invoke-response/v1`, the same object `kei-proxy connector invoke`
 prints. Only providers whose credential is the subject's own OAuth connection
 run here: github, gmail, google_drive and linear. Connectors that need config
