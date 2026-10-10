@@ -126,11 +126,11 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 				if err != nil {
 					return nil, err
 				}
-				return &keiruntime.Identity{ID: id.ID, OrgID: id.OrgID, WorkspaceID: id.WorkspaceID}, nil
+				return identityFromRoot(id), nil
 			},
 			func(identity *keiruntime.Identity) error {
 				return SyncPolicyBundle(ctx, cfg, &RuntimeIdentity{
-					ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+					ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID, AgentID: identity.AgentID,
 				}, 10*time.Second)
 			},
 			IsRuntimeRevocation,

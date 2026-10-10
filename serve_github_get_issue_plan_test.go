@@ -35,7 +35,7 @@ func TestGitHubGetIssuePlanPermitsOnlyExactRepositoryAndIssue(t *testing.T) {
 			sessionID := rig.startNamedSession(t)
 			args := `{"repository":"` + tc.repository + `","issue_number":` + tc.number + `}`
 			contextMap := `{}`
-			pre := socketDoSession(t, rig.client, http.MethodPost, "/v1/preflight", sessionID, `{"schema":"kei.preflight-request/v1","session_id":"`+sessionID+`","tool":"github.get_issue","agent_id":"agent-fixture-0001","arguments":`+args+`,"context":`+contextMap+`}`)
+			pre := socketDoSession(t, rig.client, http.MethodPost, "/v1/preflight", sessionID, `{"schema":"kei.preflight-request/v1","session_id":"`+sessionID+`","tool":"github.get_issue","arguments":`+args+`,"context":`+contextMap+`}`)
 			if !tc.allow {
 				if pre.code != http.StatusForbidden {
 					t.Fatalf("wrong target preflight=%d %s", pre.code, pre.dump)
@@ -56,10 +56,10 @@ func TestGitHubGetIssuePlanPermitsOnlyExactRepositoryAndIssue(t *testing.T) {
 			if start < 0 || json.Unmarshal([]byte(pre.dump[start:]), &grant) != nil || grant.Handle == "" {
 				t.Fatalf("preflight response=%s", pre.dump)
 			}
-			body, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.get_issue", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-get-issue"})
+			body, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.get_issue", "preflight_handle": grant.Handle, "session_id": sessionID, "input": json.RawMessage(args), "context": json.RawMessage(contextMap), "trace_id": "trace-get-issue"})
 			// A changed model-visible repo argument cannot reuse the approved handle.
 			substitutedArgs := `{"repository":"acme/other","issue_number":7}`
-			substitutedBody, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.get_issue", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(substitutedArgs), "context": json.RawMessage(contextMap), "trace_id": "trace-substitution"})
+			substitutedBody, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.get_issue", "preflight_handle": grant.Handle, "session_id": sessionID, "input": json.RawMessage(substitutedArgs), "context": json.RawMessage(contextMap), "trace_id": "trace-substitution"})
 			substitution := socketDoSession(t, rig.client, http.MethodPost, "/v1/connectors:invoke", sessionID, string(substitutedBody))
 			if substitution.code != http.StatusOK || !strings.Contains(substitution.dump, `"decision":"deny"`) {
 				t.Fatalf("argument substitution=%d %s", substitution.code, substitution.dump)

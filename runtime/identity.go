@@ -40,6 +40,30 @@ type RuntimeAgent struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// DefaultAgentID returns the agent assigned as the default for this
+// installation. The legacy top-level field remains authoritative when set;
+// otherwise exactly one default assignment for this installation is required.
+func (i *RuntimeIdentity) DefaultAgentID() string {
+	if i == nil {
+		return ""
+	}
+	if i.AgentID != "" {
+		return i.AgentID
+	}
+
+	defaultID := ""
+	for _, agent := range i.Agents {
+		if !agent.IsDefault {
+			continue
+		}
+		if agent.InstallationID != i.ID || agent.AgentID == "" || defaultID != "" {
+			return ""
+		}
+		defaultID = agent.AgentID
+	}
+	return defaultID
+}
+
 // WhoamiFailureCategory is a coarse classification of the failure source.
 type WhoamiFailureCategory int
 

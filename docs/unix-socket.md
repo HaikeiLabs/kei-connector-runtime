@@ -195,6 +195,9 @@ run here: github, gmail, google_drive and linear. Connectors that need config
 or an opaque_ref secret deny `credential_source_not_supported`, because the
 bundle carries neither. In identity mode `kei-proxy connector invoke` is a
 thin client of this route. It needs no control plane and holds no credential.
+For v2 tool calls, `agent_id` may be omitted: the daemon uses the default
+agent assigned by the authoritative runtime `whoami` identity. If no default
+agent is assigned, preflight denies; the harness must not invent an agent ID.
 It fails closed with `daemon_unavailable` when the daemon is unreachable, and
 it rejects `--user-id`/`--provider-user`.
 

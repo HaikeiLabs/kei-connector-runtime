@@ -28,13 +28,11 @@ func runPolicy(args []string) int {
 			if err != nil {
 				return nil, err
 			}
-			return &keiruntime.Identity{
-				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
-			}, nil
+			return identityFromRoot(identity), nil
 		}
 		syncBundle := func(identity *keiruntime.Identity) error {
 			return SyncPolicyBundle(context.Background(), cfg, &RuntimeIdentity{
-				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID,
+				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID, AgentID: identity.AgentID,
 			}, 30*time.Second)
 		}
 		return keiruntime.RunPolicySync(context.Background(), args[1:], os.Stdout, os.Stderr, cfg, identityFunc, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) })

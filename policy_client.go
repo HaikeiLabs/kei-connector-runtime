@@ -40,5 +40,6 @@ func identityFromRoot(id *RuntimeIdentity) *keiruntime.Identity {
 		ID:          id.ID,
 		OrgID:       id.OrgID,
 		WorkspaceID: id.WorkspaceID,
+		AgentID:     id.DefaultAgentID(),
 	}
 }
