@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -121,9 +122,14 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 			if expiredEvent, marshalErr := json.Marshal(event); marshalErr == nil {
 				WriteAudit(cfg, expiredEvent)
 			}
-			if kind == "claude" {
-				_, _ = io.WriteString(stdout, "{\"systemMessage\":\"Kei harness permissions have expired. Run `kei harness sync` to renew them.\"}\n")
-			}
+			_ = writeNotice(stdout, kind, "Kei harness permissions have expired. Run `kei harness sync` to renew them.")
+		}
+	}
+	if phase == "pre" && cfg.SubjectSource != nil && *sessionID != "" {
+		ctx := session.WithID(context.Background(), *sessionID)
+		if subject, subErr := cfg.SubjectSource.Subject(ctx); subErr == nil && subject == "" && !recentlyNudged(cfg.RuntimeStateDir, *sessionID) {
+			_ = writeNotice(stdout, kind, "Kei: you're not signed in — run `kei login` so your calls are attributed and your user/group policies apply.")
+			_ = markNudged(cfg.RuntimeStateDir, *sessionID)
 		}
 	}
 	return 0

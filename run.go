@@ -10,6 +10,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/hooks"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
@@ -107,6 +108,7 @@ func runHook(args []string) int {
 		RuntimeStateDir: cfg.RuntimeStateDir,
 		AuditCrypto:     auditProv,
 		AppendAudit:     hooks.SpoolAppender(cfg.AuditPath, cfg.RuntimeStateDir, cfg.AuditMaxBytes),
+		SubjectSource:   session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken),
 	})
 }
 

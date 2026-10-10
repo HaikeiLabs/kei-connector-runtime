@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
 // ToolInput is the common subset of harness hook input used for reporting.
@@ -20,12 +21,14 @@ type ToolInput struct {
 	NativeDecision string          `json:"native_decision"`
 }
 
-// Config carries the minimal runtime data hooks need. AppendAudit writes one
-// record to the runtime's audit spool.
+// Config carries the runtime data hooks need. AppendAudit writes one record
+// to the runtime's audit spool. SubjectSource resolves the authenticated
+// subject for the session and is used by the login nudge.
 type Config struct {
 	RuntimeStateDir string
 	AppendAudit     func([]byte) error
 	AuditCrypto     *auditcrypto.Provider
+	SubjectSource   session.SubjectSource
 }
 
 // ReadInput safely reads and decodes one harness hook payload.
