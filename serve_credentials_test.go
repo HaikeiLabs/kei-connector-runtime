@@ -46,6 +46,7 @@ func canaryI11(t *testing.T, calls *atomic.Int32) *httptest.Server {
 		}
 		calls.Add(1)
 		if r.Header.Get("X-Kei-Subject-Token") != subjectCanary {
+			w.Header().Set("X-Request-ID", "identity-request-401")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = io.WriteString(w, `{"error":{"message":"`+credentialCanary+`"}}`)
 			return
@@ -201,7 +202,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 				responses = append(responses, socketDo(t, c, r.method, r.path, r.body))
 			}
 
-			// A failed load logs only its error class.
+			// A failed load logs only its error class and safe request metadata.
 			keychain.token = "subject-without-credentials"
 			responses = append(responses, socketDo(t, c, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"cli"}`))
 			responses = append(responses, socketDo(t, c, http.MethodDelete, "/v1/session", ""))
@@ -216,6 +217,11 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 	if calls.Load() != 3 {
 		// start, the github 401 re-fetch, and the failed second session
 		t.Fatalf("I11 calls = %d, want 3", calls.Load())
+	}
+	if log := logs.String(); !strings.Contains(log, "credential_release_host=127.0.0.1") ||
+		!strings.Contains(log, "credential_release_request_id=") ||
+		!strings.Contains(log, "credential_release_response_request_id=identity-request-401") {
+		t.Fatalf("failed credential release log missing safe correlation fields: %s", log)
 	}
 	sinks := map[string]string{"stdout": stdout, "stderr": stderr, "log": logs.String(), "audit spool": spool, "errors": strings.Join(errs, "\n")}
 	for _, r := range responses {

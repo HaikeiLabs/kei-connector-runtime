@@ -625,14 +625,22 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 
 // loadCredentials makes the session's one I11 call for a linked subject. A
 // failure leaves the session without credentials (every use denies) but does
-// not fail the session itself; only the error class is logged.
+// not fail the session itself; only the error class and safe request metadata
+// are logged.
 func (l *LocalPDP) loadCredentials(ctx context.Context, id string, sub pdp.Subject) {
 	store := l.credentialStore(id)
 	if store == nil || sub.Status != pdp.StatusLinked || sub.Token == "" {
 		return
 	}
 	if err := store.Load(ctx, sub.UserID, sub.Token); err != nil {
-		slog.Warn("session_credentials_unavailable", "error", err)
+		attrs := []any{"error", err}
+		if host, requestID, responseRequestID, ok := credrelease.RequestDiagnostics(err); ok {
+			attrs = append(attrs, "credential_release_host", host, "credential_release_request_id", requestID)
+			if responseRequestID != "" && responseRequestID != requestID {
+				attrs = append(attrs, "credential_release_response_request_id", responseRequestID)
+			}
+		}
+		slog.Warn("session_credentials_unavailable", attrs...)
 		return
 	}
 	// A DELETE or another PUT that landed before Load began must still win.
