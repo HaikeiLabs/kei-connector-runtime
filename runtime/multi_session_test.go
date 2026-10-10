@@ -236,9 +236,13 @@ func TestMultiSessionDeleteIsolation(t *testing.T) {
 func TestMultiSessionIdleTTL(t *testing.T) {
 	l, h := multiSessionPDP(t, &perSubjectI11{}, nil)
 	l.SetSessionIdleTTL(80 * time.Millisecond)
+
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	l.SetSessionNow(func() time.Time { return now })
+
 	alice, kept := createSession(t, h, "ext-alice"), createSession(t, h, "ext-bob")
 	for range 4 {
-		time.Sleep(40 * time.Millisecond)
+		now = now.Add(40 * time.Millisecond)
 		authorizeIn(t, h, kept) // use restarts the clock
 	}
 	if d, r := authorizeIn(t, h, alice); r != "session_not_found" {

@@ -95,56 +95,37 @@ func waitFor(t *testing.T, what string, done func() bool) {
 }
 
 func TestRuntimeClientClassifiesHeartbeatResponses(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasPrefix(r.Header.Get("Authorization"), "Bearer test-fail"):
-		case strings.HasPrefix(r.Header.Get("Authorization"), "Bearer test-fail-body"):
-			fmt.Fprint(w, `not-json`)
-		case strings.HasPrefix(r.Header.Get("Authorization"), "Bearer test-timeout"):
-			keiruntime.SleepContext(r.Context(), 100*time.Millisecond)
-		case strings.HasPrefix(r.Header.Get("Authorization"), "Bearer test-retryable-status"):
-			w.WriteHeader(http.StatusBadGateway)
-		case strings.HasPrefix(r.Header.Get("Authorization"), "Bearer test-terminal-status"):
-			w.WriteHeader(http.StatusBadRequest)
-		default:
-			w.WriteHeader(http.StatusNoContent)
-		}
-	}))
-	t.Cleanup(server.Close)
-
 	tests := []struct {
 		name   string
-		token  string
+		err    error
 		want   HeartbeatOutcome
 		status int
 	}{
-		{"ok", "test-ok", HeartbeatOK, 0},
-		{"no body", "test-fail", HeartbeatCatalogError, http.StatusOK},
-		{"invalid body", "test-fail-body", HeartbeatCatalogError, http.StatusOK},
-		{"timeout", "test-timeout", HeartbeatCatalogTimeout, 0},
-		{"retryable status", "test-retryable-status", HeartbeatCatalogError, http.StatusBadGateway},
-		{"terminal status", "test-terminal-status", HeartbeatCatalogRejected, http.StatusBadRequest},
+		{"ok", nil, HeartbeatOK, 0},
+		{"non-204 status", &keiruntime.HeartbeatFailure{Outcome: keiruntime.HeartbeatCatalogError, StatusCode: http.StatusOK, Wrapped: errors.New("200")}, HeartbeatCatalogError, http.StatusOK},
+		{"transport timeout", &keiruntime.HeartbeatFailure{Outcome: keiruntime.HeartbeatCatalogTimeout, Wrapped: context.DeadlineExceeded}, HeartbeatCatalogTimeout, 0},
+		{"retryable status", &keiruntime.HeartbeatFailure{Outcome: keiruntime.HeartbeatCatalogError, StatusCode: http.StatusBadGateway, Wrapped: errors.New("502")}, HeartbeatCatalogError, http.StatusBadGateway},
+		{"terminal status", &keiruntime.HeartbeatFailure{Outcome: keiruntime.HeartbeatCatalogRejected, StatusCode: http.StatusBadRequest, Wrapped: errors.New("400")}, HeartbeatCatalogRejected, http.StatusBadRequest},
+		{"unauthorized", &keiruntime.HeartbeatFailure{Outcome: keiruntime.HeartbeatUnauthorized, StatusCode: http.StatusUnauthorized, Wrapped: errors.New("401")}, HeartbeatUnauthorized, http.StatusUnauthorized},
+		{"backpressure", &keiruntime.HeartbeatFailure{Outcome: keiruntime.HeartbeatCatalogBackpressure, StatusCode: http.StatusTooManyRequests, Wrapped: errors.New("429")}, HeartbeatCatalogBackpressure, http.StatusTooManyRequests},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := NewRuntimeClient(server.URL, 20*time.Millisecond).Heartbeat(context.Background(), tc.token, HeartbeatReport{RuntimeVersion: "test"})
 			if tc.want == HeartbeatOK {
-				if err != nil {
-					t.Fatalf("Heartbeat() = %v, want nil", err)
+				if tc.err != nil {
+					t.Fatalf("Heartbeat() = %v, want nil", tc.err)
 				}
 				return
 			}
-			if err == nil {
-				t.Fatal("Heartbeat() = nil, want error")
+			f := keiruntime.ClassifyHeartbeatError(tc.err)
+			if f == nil {
+				t.Fatalf("ClassifyHeartbeatError(%v) = nil, want failure", tc.err)
 			}
-			if got := keiruntime.ClassifyHeartbeatError(err).Outcome; got != tc.want {
-				t.Errorf("Heartbeat() outcome = %s, want %s", got, tc.want)
+			if f.Outcome != tc.want {
+				t.Errorf("Outcome = %s, want %s", f.Outcome, tc.want)
 			}
-			var failure *keiruntime.HeartbeatFailure
-			if errors.As(err, &failure) {
-				if failure.StatusCode != tc.status {
-					t.Errorf("StatusCode = %d, want %d", failure.StatusCode, tc.status)
-				}
+			if f.StatusCode != tc.status {
+				t.Errorf("StatusCode = %d, want %d", f.StatusCode, tc.status)
 			}
 		})
 	}
