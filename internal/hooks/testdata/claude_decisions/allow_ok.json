@@ -1,0 +1,8 @@
+{"events":[
+  {"tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"s-allow-ok","tool_use_id":"tu1","hook_event_name":"PreToolUse","native_decision":"ask"},
+  {"tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"s-allow-ok","tool_use_id":"tu1","hook_event_name":"PostToolUse"}
+],"expect":[
+  {"phase":"pre","native_decision":"unknown","tool_use_id":"tu1"},
+  {"phase":"decision","native_decision":"allow","tool_use_id":"tu1"},
+  {"phase":"post","native_decision":"executed","tool_use_id":"tu1"}
+]}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
@@ -31,20 +32,36 @@ type Config struct {
 	SubjectSource   session.SubjectSource
 }
 
-// ReadInput safely reads and decodes one harness hook payload.
+// sesionLevelEvent reports whether eventName is a harness event that carries
+// no tool (Stop, SessionEnd, SessionStart). These events are valid hook
+// invocations but have no tool_name, tool_input or tool_use_id.
+func sessionLevelEvent(eventName string) bool {
+	switch strings.ToLower(eventName) {
+	case "stop", "sessionend", "sessionstart", "notification":
+		return true
+	}
+	return false
+}
+
+// ReadInput safely reads and decodes one harness hook payload. It requires a
+// tool_name for tool-level events; session-level events (Stop, SessionEnd,
+// SessionStart, Notification) are accepted without one.
 func ReadInput(r io.Reader) (ToolInput, error) {
 	data, err := io.ReadAll(io.LimitReader(r, 1<<20))
 	if err != nil {
 		return ToolInput{}, err
 	}
 	var in ToolInput
-	if err := json.Unmarshal(data, &in); err != nil || in.ToolName == "" {
+	if err := json.Unmarshal(data, &in); err != nil {
+		return ToolInput{}, errors.New("invalid harness hook input")
+	}
+	if in.ToolName == "" && !sessionLevelEvent(in.EventName) {
 		return ToolInput{}, errors.New("invalid harness hook input")
 	}
 	if len(in.ToolInput) == 0 {
 		in.ToolInput = json.RawMessage(`{}`)
 	}
-	if CanonicalJSON(in.ToolInput) == nil {
+	if in.ToolName != "" && CanonicalJSON(in.ToolInput) == nil {
 		return ToolInput{}, errors.New("invalid harness tool input")
 	}
 	return in, nil

@@ -37,6 +37,7 @@ type permissionEvent struct {
 	RecipientKeyIDs []string  `json:"recipient_key_ids,omitempty"`
 	NativeDecision  string    `json:"native_decision"`
 	Argv0           string    `json:"argv0,omitempty"`
+	Failed          bool      `json:"failed,omitempty"`
 	ObservedAt      time.Time `json:"observed_at"`
 }
 
@@ -112,6 +113,10 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 	tool, argv0 := reportedTool(in.ToolName, in.ToolInput)
 	skill := activeSkillFor(kind, in.SessionID, in.ToolName, in.ToolInput, cfg.RuntimeStateDir)
 	registered := harnessRegisteredFor(cfg.RuntimeStateDir, *harnessID, kind)
+	if kind == "claude" && in.EventName != "" {
+		ctx := newClaudeEventContext(in, kind, harnessID, sessionID, tool, argv0, skill, registered, argsDigest, digestKeyID, argsCiphertext, recipientKeyIDs)
+		return handleClaudeEvent(in, ctx, stdout, cfg)
+	}
 	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: registered, HarnessSessionID: in.SessionID, SessionID: *sessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {

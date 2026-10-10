@@ -1,0 +1,10 @@
+{"events":[
+  {"tool_name":"Bash","tool_input":{"command":"write"},"session_id":"s-interactive-ask","tool_use_id":"tu1","hook_event_name":"PreToolUse","native_decision":"ask"},
+  {"tool_name":"Bash","tool_input":{"command":"write"},"session_id":"s-interactive-ask","hook_event_name":"PermissionRequest"},
+  {"tool_name":"Bash","tool_input":{"command":"write"},"session_id":"s-interactive-ask","tool_use_id":"tu1","hook_event_name":"PostToolUse"}
+],"expect":[
+  {"phase":"pre","native_decision":"unknown","tool_use_id":"tu1"},
+  {"phase":"decision","native_decision":"ask","tool_use_id":"tu1"},
+  {"phase":"permission_reply","native_decision":"approved","tool_use_id":"tu1"},
+  {"phase":"post","native_decision":"executed","tool_use_id":"tu1"}
+]}
