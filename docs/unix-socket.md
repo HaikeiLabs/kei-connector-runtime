@@ -153,8 +153,11 @@ for the exact installation-owner user; the daemon uses that identity's subject
 token, never the installation token or caller input. Missing linked identity or
 subject token means no credentials are loaded and connector use denies. The call
 goes to `KEI_CREDENTIAL_RELEASE_URL`, or to the runtime control plane when that
-is unset. Credentials live only in each session's daemon-memory store
-(ADR-034, owner option A). Ending a session, owner-session reconciliation on
+is unset. I11 requests carry a generated `X-Request-ID`; failed-load warnings
+include only the target hostname and safe request IDs for log correlation. The
+client does not follow redirects, so runtime and subject credentials cannot be
+forwarded to a redirect target. Credentials live only in each session's daemon-
+memory store (ADR-034, owner option A). Ending a session, owner-session reconciliation on
 bundle refresh, revocation, or daemon exit zeroes and drops that session's
 credentials. A provider 401 triggers one single-provider re-fetch and one retry,
 and after that the call is denied. The daemon sets `RLIMIT_CORE=0` so it never

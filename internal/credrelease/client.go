@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ResolvePath is the identity service's I11 credential release method.
@@ -31,6 +33,27 @@ var (
 	// ErrUnavailable is any other I11 failure (transport, 4xx, 5xx, bad body).
 	ErrUnavailable = errors.New("credrelease: identity service unavailable")
 )
+
+// RequestError adds safe transport metadata to an I11 failure. Its Error and
+// String forms expose only the underlying error, never request headers or body.
+type RequestError struct {
+	cause             error
+	TargetHost        string
+	RequestID         string
+	ResponseRequestID string
+}
+
+func (e *RequestError) Error() string { return e.cause.Error() }
+func (e *RequestError) Unwrap() error { return e.cause }
+
+// RequestDiagnostics extracts the safe host and request IDs from an I11 error.
+func RequestDiagnostics(err error) (targetHost, requestID, responseRequestID string, ok bool) {
+	var requestErr *RequestError
+	if !errors.As(err, &requestErr) {
+		return "", "", "", false
+	}
+	return requestErr.TargetHost, requestErr.RequestID, requestErr.ResponseRequestID, true
+}
 
 // Failure reasons returned by I11 for one provider.
 const (
@@ -53,7 +76,12 @@ func NewClient(baseURL, runtimeToken string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		runtimeToken: runtimeToken,
-		httpClient:   &http.Client{Timeout: timeout},
+		httpClient: &http.Client{
+			Timeout: timeout,
+			// I11 carries runtime and subject credentials. Never follow a
+			// redirect that could move them to a different host.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 
@@ -92,33 +120,35 @@ func (c *Client) resolve(ctx context.Context, subjectToken string, providers []s
 	if err != nil {
 		return resolved{}, ErrUnavailable
 	}
+	requestID := uuid.NewString()
 	req.Header.Set("Authorization", "Bearer "+c.runtimeToken)
 	req.Header.Set("X-Kei-Subject-Token", subjectToken)
+	req.Header.Set("X-Request-ID", requestID)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return resolved{}, fmt.Errorf("%w: request failed", ErrUnavailable)
+		return resolved{}, requestError(fmt.Errorf("%w: request failed", ErrUnavailable), req, requestID, nil)
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusUnauthorized:
-		return resolved{}, ErrUnauthenticated
+		return resolved{}, requestError(ErrUnauthenticated, req, requestID, resp)
 	case http.StatusForbidden:
-		return resolved{}, ErrSubjectUnlinked
+		return resolved{}, requestError(ErrSubjectUnlinked, req, requestID, resp)
 	default:
-		return resolved{}, fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
+		return resolved{}, requestError(fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode), req, requestID, resp)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResolveResponse))
 	if err != nil {
-		return resolved{}, ErrUnavailable
+		return resolved{}, requestError(ErrUnavailable, req, requestID, resp)
 	}
 	defer zero(raw)
 	var decoded resolveResponse
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		// The decode error may quote the body, so it is dropped.
-		return resolved{}, fmt.Errorf("%w: malformed response", ErrUnavailable)
+		return resolved{}, requestError(fmt.Errorf("%w: malformed response", ErrUnavailable), req, requestID, resp)
 	}
 	out := resolved{tokens: map[string][]byte{}, failures: map[string]string{}}
 	for _, f := range decoded.Failures {
@@ -137,6 +167,35 @@ func (c *Client) resolve(ctx context.Context, subjectToken string, providers []s
 		delete(out.failures, cr.Provider)
 	}
 	return out, nil
+}
+
+func requestError(cause error, req *http.Request, requestID string, resp *http.Response) *RequestError {
+	targetHost := ""
+	if req != nil && req.URL != nil {
+		targetHost = req.URL.Hostname()
+	}
+	responseRequestID := ""
+	if resp != nil {
+		responseRequestID = safeRequestID(resp.Header.Get("X-Request-ID"))
+	}
+	return &RequestError{
+		cause:             cause,
+		TargetHost:        targetHost,
+		RequestID:         requestID,
+		ResponseRequestID: responseRequestID,
+	}
+}
+
+func safeRequestID(value string) string {
+	if len(value) == 0 || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return ""
+		}
+	}
+	return value
 }
 
 func zero(b []byte) {
