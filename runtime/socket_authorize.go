@@ -161,33 +161,59 @@ func (l *LocalPDP) SetTokenlessOwnerSession(enabled bool) {
 
 func (l *LocalPDP) reconcileOwnerSession() {
 	l.ownerMu.Lock()
-	defer l.ownerMu.Unlock()
 	if !l.tokenlessOwnerSession {
+		l.ownerMu.Unlock()
 		return
 	}
 	e := l.evaluator.Load()
 	if e == nil {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.ownerMu.Unlock()
 		return
 	}
 	bundleSubject, ok := e.BundleInstallationSubject()
 	if !ok {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.ownerMu.Unlock()
 		return
 	}
 	// Recreate on every successful refresh so email/groups never outlive the
 	// currently verified installation subject.
 	l.endOwnerSessionLocked()
+	// The owner session's policy principal comes from the installation subject.
+	// Credential release, when enabled, still requires user evidence: reuse a
+	// matching linked identity's subject token from this fresh verified bundle.
+	// Never infer credentials from the installation token or from a caller.
 	sub := pdp.Subject{UserID: bundleSubject.UserID, Email: bundleSubject.Email, Groups: bundleSubject.Groups, Status: pdp.StatusLinked, Source: "installation_owner", ExternalID: bundleSubject.UserID}
+	if linked, ok := e.LookupLinkedUser(bundleSubject.UserID); ok {
+		sub.Token = linked.SubjectToken
+	}
 	id, err := l.Sessions.CreatePinned(sub)
 	if err != nil {
 		l.ownerUnavailable = true
+		l.ownerMu.Unlock()
 		return
 	}
 	l.ownerID = id
 	l.ownerUnavailable = false
+	if l.creds != nil {
+		l.sessionCreds.Store(id, l.creds.NewSession())
+		if !l.Sessions.Exists(id) {
+			l.dropSessionCredentials(id)
+			l.ownerID = ""
+			l.ownerUnavailable = true
+			l.ownerMu.Unlock()
+			return
+		}
+	}
+	l.ownerMu.Unlock()
+	if l.creds != nil {
+		// Don't hold the socket-binding lock during the bounded I11 request.
+		// A concurrent bundle refresh ends this session and flushes a late load.
+		l.loadCredentials(context.Background(), id, sub)
+	}
 }
 
 func (l *LocalPDP) endOwnerSessionLocked() {
@@ -236,9 +262,10 @@ func (l *LocalPDP) deprecate(route string) {
 func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
 
 // SetCredentialStore turns on session credential release
-// (KEI_CREDENTIAL_RELEASE=identity): a linked PUT /v1/session fetches the
-// subject's connector credentials into store, and every session end flushes
-// it. Without a store (legacy) sessions hold no credentials.
+// (KEI_CREDENTIAL_RELEASE=identity): linked named sessions and the tokenless
+// owner session fetch credentials only from subject tokens in verified bundle
+// identities. Each session has its own store and every session end flushes it.
+// Without a store (legacy) sessions hold no credentials.
 func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = store }
 
 // errCredentialReleaseOff is returned by UseCredential in legacy mode.

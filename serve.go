@@ -207,9 +207,10 @@ type serveSeams struct {
 }
 
 // newServeLocalPDP builds the daemon's local PDP: decision audit goes to the
-// spool and, with KEI_CREDENTIAL_RELEASE=identity, linked sessions hold their
-// connector credentials in its store and POST /v1/connectors:invoke runs
-// governed connector calls with them. The caller must Close it on exit.
+// spool and, with KEI_CREDENTIAL_RELEASE=identity, linked sessions and an
+// owner session with matching linked bundle identity hold connector credentials
+// in session stores; POST /v1/connectors:invoke runs governed calls with them.
+// The caller must Close it on exit.
 func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error) {
 	creds, err := newSessionCredentialStore(cfg)
 	if err != nil {

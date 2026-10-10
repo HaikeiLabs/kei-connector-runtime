@@ -361,6 +361,16 @@ func (e *Evaluator) ResolveBundleIdentity(source, externalID string) (policybund
 	return v.LookupIdentity(source, externalID, e.now().UTC())
 }
 
+// LookupLinkedUser resolves one fresh linked identity by user ID. The identity
+// may carry a subject token used only by the daemon's credential store.
+func (e *Evaluator) LookupLinkedUser(userID string) (policybundle.Identity, bool) {
+	v, _, err := e.check()
+	if err != nil {
+		return policybundle.Identity{}, false
+	}
+	return v.LookupLinkedUser(userID, e.now().UTC())
+}
+
 // BundleIdentities returns the identities from the current verified bundle,
 // or nil when the bundle is missing, invalid, expired, or has no identities.
 func (e *Evaluator) BundleIdentities() []policybundle.Identity {
