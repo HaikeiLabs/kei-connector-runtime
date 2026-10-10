@@ -150,9 +150,18 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "request must be a "+daemonRequestSchema+" object with no unknown fields")
 		return
 	}
-	if req.ToolName != "" && (req.SessionID == "" || session.FromRequest(r) != req.SessionID) {
-		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "v2 invoke requires the matching named session")
-		return
+	if req.ToolName != "" {
+		// The authenticated socket middleware may bind a tokenless owner
+		// request to its pinned session. Let that trusted session header supply
+		// the body field; callers must not need to discover the opaque owner ID.
+		boundSession := session.FromRequest(r)
+		if req.SessionID == "" {
+			req.SessionID = boundSession
+		}
+		if req.SessionID == "" || boundSession != req.SessionID {
+			writeDaemonError(w, http.StatusBadRequest, "invalid_request", "v2 invoke requires the matching named session")
+			return
+		}
 	}
 	if req.ToolName == "" && len(body) > maxLegacyDaemonRequestBytes {
 		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "legacy request exceeds the size limit")

@@ -145,16 +145,20 @@ before: a v1 PUT replaces it, and it has no idle TTL. The daemon logs
 ### Session credentials (`KEI_CREDENTIAL_RELEASE=identity`)
 
 With `KEI_CREDENTIAL_RELEASE=identity` (default `legacy`, which changes
-nothing), a `PUT /v1/session` that resolves a linked subject makes one call to
-the identity service's `POST /api/v1/connectorCredentials:resolve` (ADR-032 I11)
-with the runtime token and the subject's token in `X-Kei-Subject-Token`. The
-call goes to `KEI_CREDENTIAL_RELEASE_URL`, or to the runtime control plane when
-that is unset. The connector credentials it returns live only in the daemon's
-memory (ADR-034, owner option A), in a store of the session's own. Ending a
-session (`DELETE /v1/session`, idle expiry, a v1 PUT for the default session),
-a revocation and daemon exit zero and drop that session's credentials. A provider 401 triggers one single-provider
-re-fetch and one retry, and after that the call is denied. The daemon sets
-`RLIMIT_CORE=0` so it never core-dumps them.
+nothing), a linked `PUT /v1/session` makes one call to the identity service's
+`POST /api/v1/connectorCredentials:resolve` (ADR-032 I11) with the runtime token
+and the subject's token in `X-Kei-Subject-Token`. A tokenless owner session may
+also load credentials when the fresh verified bundle contains a linked identity
+for the exact installation-owner user; the daemon uses that identity's subject
+token, never the installation token or caller input. Missing linked identity or
+subject token means no credentials are loaded and connector use denies. The call
+goes to `KEI_CREDENTIAL_RELEASE_URL`, or to the runtime control plane when that
+is unset. Credentials live only in each session's daemon-memory store
+(ADR-034, owner option A). Ending a session, owner-session reconciliation on
+bundle refresh, revocation, or daemon exit zeroes and drops that session's
+credentials. A provider 401 triggers one single-provider re-fetch and one retry,
+and after that the call is denied. The daemon sets `RLIMIT_CORE=0` so it never
+core-dumps them.
 
 **No socket route returns a credential.** Any process running as the proxy's
 OS user can reach the owner-only socket. Only the explicitly configured owner
@@ -181,7 +185,10 @@ The daemon runs one governed connector call and returns only its result:
  "input":{},"trace_id":"…","agent_id":"…"}
 ```
 
-The request carries no subject and no credential. The answer is
+The request carries no subject and no credential. For a tokenless owner-session
+call, the caller omits `session_id`; the socket middleware binds the request to
+the owner session and the daemon uses that trusted session header. If a caller
+includes `session_id`, it must exactly match the bound header. The answer is
 `kei.connector-invoke-response/v1`, the same object `kei-proxy connector invoke`
 prints. Only providers whose credential is the subject's own OAuth connection
 run here: github, gmail, google_drive and linear. Connectors that need config

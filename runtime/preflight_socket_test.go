@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -233,6 +234,83 @@ func TestTokenlessOwnerSocketBindsVerifiedBundleSubjectAndKeepsSessionRoutesToke
 	disabled := call("/v1/authorize", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo"}`)
 	if disabled.Code != http.StatusUnauthorized {
 		t.Fatalf("disabled tokenless status=%d", disabled.Code)
+	}
+}
+
+func TestTokenlessOwnerSessionLoadsCredentialsFromMatchingLinkedIdentity(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	var gotSubjectToken string
+	i11 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != credrelease.ResolvePath || r.Header.Get("Authorization") != "Bearer runtime-token" {
+			t.Errorf("credential release request path=%q authorization=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		gotSubjectToken = r.Header.Get("X-Kei-Subject-Token")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"credentials": []map[string]string{{"provider": "github", "access_token": "github-fixture-token", "token_type": "Bearer"}},
+		})
+	}))
+	defer i11.Close()
+
+	local := NewLocalPDP(cfg, nil)
+	defer local.Close()
+	local.SetTokenlessOwnerSession(true)
+	local.SetCredentialStore(credrelease.NewStore(credrelease.NewClient(i11.URL, "runtime-token", time.Second)))
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	local.SetIdentity(identity)
+	var doc map[string]any
+	if err := json.Unmarshal(v2PreflightBundle(t, now), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["subject"] = map[string]any{"user_id": "user-alice", "email": "alice@example.test", "groups": []string{"members"}}
+	doc["identities"] = []any{map[string]any{
+		"source": "discord", "external_id": "discord-alice", "user_id": "user-alice", "status": "linked", "subject_token": "alice-linked-subject-token",
+	}}
+	bundle, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	local.AfterSync(nil)
+	if gotSubjectToken != "alice-linked-subject-token" {
+		t.Fatalf("I11 subject token = %q, want the owner's linked identity token", gotSubjectToken)
+	}
+	var gotCredential string
+	ownerSession := local.ownerID
+	if err := local.UseCredential(context.Background(), ownerSession, "user-alice", "github", func(token string) error {
+		gotCredential = token
+		return nil
+	}); err != nil || gotCredential != "github-fixture-token" {
+		t.Fatalf("owner credential = %q, err=%v", gotCredential, err)
+	}
+
+	// A refresh without a linked identity ends the old owner session, flushes
+	// its credentials, and leaves the new owner session without credentials.
+	doc["bundle_version"] = 43
+	doc["identities"] = []any{}
+	refreshed, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(refreshed, identity.ID, identity.OrgID, *identity.WorkspaceID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	local.AfterSync(nil)
+	if local.ownerID == ownerSession || local.Sessions.Exists(ownerSession) {
+		t.Fatal("owner session survived credential refresh")
+	}
+	if err := local.UseCredential(context.Background(), local.ownerID, "user-alice", "github", func(string) error {
+		t.Fatal("credential was available without a linked identity")
+		return nil
+	}); err == nil {
+		t.Fatal("credential use without linked identity unexpectedly succeeded")
 	}
 }
 
