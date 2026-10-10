@@ -145,6 +145,10 @@ func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 // (KEI_SESSION_IDLE_TTL). The default session never expires.
 func (l *LocalPDP) SetSessionIdleTTL(d time.Duration) { l.Sessions.SetIdleTTL(d) }
 
+// SetSessionNow replaces the session time source (for tests). A nil fn
+// panics on use.
+func (l *LocalPDP) SetSessionNow(fn func() time.Time) { l.Sessions.SetNow(fn) }
+
 // SetTokenlessOwnerSession controls tokenless access on the owner-only socket.
 func (l *LocalPDP) SetTokenlessOwnerSession(enabled bool) {
 	l.ownerMu.Lock()

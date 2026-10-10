@@ -82,6 +82,9 @@ func NewSessions() *Sessions {
 	return s
 }
 
+// SetNow replaces the time source (for tests). A nil fn panics on use.
+func (s *Sessions) SetNow(fn func() time.Time) { s.now = fn }
+
 // SetIdleTTL sets how long an id session lives without use (> 0). The
 // default session never expires.
 func (s *Sessions) SetIdleTTL(d time.Duration) {
