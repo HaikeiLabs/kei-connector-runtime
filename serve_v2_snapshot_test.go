@@ -87,9 +87,11 @@ func TestV2ModelAuthorizationIsTheAgentAssignment(t *testing.T) {
 		{name: "no agent", agent: "", profile: "profile-gpt", subject: &linkedDiscordSubject, issuedAgo: time.Second, reason: policybundle.ReasonModelNotAssigned},
 		{name: "assigned profile disabled", agent: "agent-review", profile: "profile-claude", subject: &linkedDiscordSubject, issuedAgo: time.Second, reason: policybundle.ReasonModelProfileInactive},
 		{name: "no session subject", agent: "agent-chat", profile: "profile-gpt", issuedAgo: time.Second, reason: "subject_unlinked"},
-		{name: "pending subject", agent: "agent-chat", profile: "profile-gpt", subject: &pdp.Subject{UserID: "kei-user-123", Source: "discord", ExternalID: "discord-user-123", Status: pdp.StatusPending}, issuedAgo: time.Second, reason: "subject_pending"},
+		{name: "pending subject", agent: "agent-chat", profile: "profile-gpt", subject: &pdp.Subject{UserID: "kei-user-123", Source: "discord", ExternalID: "discord-user-999", Status: pdp.StatusPending}, issuedAgo: time.Second, reason: "subject_pending"},
 		{name: "subject absent from snapshot", agent: "agent-chat", profile: "profile-gpt", subject: &pdp.Subject{UserID: "kei-user-999", Source: "discord", ExternalID: "discord-user-999", Status: pdp.StatusLinked}, issuedAgo: time.Second, reason: "subject_unlinked"},
-		{name: "stale snapshot", agent: "agent-chat", profile: "profile-gpt", subject: &linkedDiscordSubject, issuedAgo: 31 * time.Second, reason: "subject_snapshot_stale"},
+		// HAI-452: the snapshot is fresh for the bundle lifetime;
+		// a snapshot issued 31s ago is not stale.
+		{name: "snapshot always fresh", agent: "agent-chat", profile: "profile-gpt", subject: &linkedDiscordSubject, issuedAgo: 31 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

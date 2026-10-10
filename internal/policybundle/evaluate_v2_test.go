@@ -114,9 +114,9 @@ func TestEvaluateV2HarnessToolRequiresFreshLinkedSessionAndPolicy(t *testing.T) 
 			t.Fatalf("decision = %+v", d)
 		}
 	})
-	t.Run("stale", func(t *testing.T) {
+	t.Run("stale snapshot is now fresh", func(t *testing.T) {
 		v := v2HarnessBundle(t, now, "linked", "permit")
-		if d := v.EvaluateV2HarnessTool("github.review_pr", "", subject, now.Add(30*time.Second)); d.ReasonCode != "subject_snapshot_stale" {
+		if d := v.EvaluateV2HarnessTool("github.review_pr", "", subject, now.Add(30*time.Second)); d.Outcome != "allow" || d.PolicyID != "harness-policy" {
 			t.Fatalf("decision = %+v", d)
 		}
 	})
@@ -189,13 +189,15 @@ func TestV2DirectCapabilityPermitDoesNotImplyToolPermit(t *testing.T) {
 	}
 }
 
-func TestEvaluateV2PlanDeniesExpiredSnapshotAndRefreshSubstitution(t *testing.T) {
+func TestEvaluateV2PlanAcceptsSnapshotAndRefreshSubstitution(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	v := v2ToolBundle(t, now, []any{v2Permit("p1", "pull_request.read"), v2Permit("p2", "check.read")})
 	subject := &SessionSubject{UserID: "user-alice", Source: "discord", ExternalID: "ext-alice", Status: SubjectLinked}
 	ops := v2TestPlanOps()
-	if d := v.EvaluateV2Plan("github.review_pr", "agent-a", subject, ops, now.Add(30*time.Second)); d.ReasonCode != "subject_snapshot_stale" {
-		t.Fatalf("stale decision = %+v", d)
+	// HAI-452: snapshot is fresh for the bundle lifetime, so plan evaluation
+	// proceeds and all permits allow.
+	if d := v.EvaluateV2Plan("github.review_pr", "agent-a", subject, ops, now.Add(30*time.Second)); d.Outcome != "allow" {
+		t.Fatalf("fresh snapshot decision = %+v", d)
 	}
 	v.Payload.Identities[0].ExternalID = "changed-identity"
 	if d := v.EvaluateV2Plan("github.review_pr", "agent-a", subject, ops, now); d.ReasonCode != "subject_unlinked" {

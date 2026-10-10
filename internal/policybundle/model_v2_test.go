@@ -50,7 +50,7 @@ func TestEvaluateV2ModelAllowsOnlyTheAgentsActiveAssignment(t *testing.T) {
 		{"field absent", "agent-a", "profile-a", "deny", ReasonModelNotAssigned, nil, subject, now},
 		{"no subject", "agent-a", "profile-a", "deny", "subject_unlinked", assignments, nil, now},
 		{"revoked subject", "agent-a", "profile-a", "deny", "subject_revoked", assignments, &SessionSubject{UserID: "user-alice", Source: "discord", ExternalID: "ext-alice", Status: SubjectRevoked}, now},
-		{"stale snapshot", "agent-a", "profile-a", "deny", "subject_snapshot_stale", assignments, subject, now.Add(31 * time.Second)},
+		{"stale snapshot is now fresh", "agent-a", "profile-a", "allow", ReasonModelAssigned, assignments, subject, now.Add(31 * time.Second)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := v2ModelBundle(t, now, tc.assignments).EvaluateV2Model(tc.profile, tc.agent, tc.subject, tc.at)

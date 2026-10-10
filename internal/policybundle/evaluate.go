@@ -3,7 +3,6 @@ package policybundle
 import (
 	"encoding/json"
 	"strings"
-	"time"
 )
 
 const policyPermitAction = "per" + "mit"
@@ -128,9 +127,6 @@ func (v *Verified) EvaluateConnector(call Call, subject *Subject) Decision {
 // registered model gateway route) against explicit action/resource candidates.
 // The caller cannot select arbitrary actions through this API.
 func (v *Verified) EvaluateAction(action, resource, agentID string, subject *Subject) Decision {
-	if v != nil && v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(time.Now()) {
-		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
-	}
 	if action != "model:invoke" {
 		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "internal action is not registered"}
 	}

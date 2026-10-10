@@ -155,9 +155,6 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	}
 	switch payload.SubjectResolution.Mode {
 	case "online":
-		if payload.SubjectResolution.MaxCacheSeconds > 60 {
-			return nil, ErrBundleUnsupported
-		}
 	case "bundle":
 	default:
 		return nil, ErrBundleUnsupported
@@ -221,7 +218,7 @@ func ValidateV2(bundleBytes []byte, installationID, orgID, workspaceID string, h
 	if payload.NotAfter.After(payload.IssuedAt.Add(24*time.Hour)) || !payload.NotAfter.After(payload.IssuedAt) {
 		return nil, errors.New("invalid policy bundle v2 validity window")
 	}
-	if payload.SubjectResolution.Mode != "bundle" || payload.SubjectResolution.MaxCacheSeconds < 1 || payload.SubjectResolution.MaxCacheSeconds > 60 || payload.Identities == nil {
+	if payload.SubjectResolution.Mode != "bundle" || payload.Identities == nil {
 		return nil, ErrBundleUnsupported
 	}
 	if err := validatePolicySetV2(payload.PolicySet); err != nil {

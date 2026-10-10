@@ -304,7 +304,7 @@ func TestBundleValidateRejectsUnsupportedMode(t *testing.T) {
 	}
 }
 
-func TestBundleValidateRejectsOnlineWithHighMaxCache(t *testing.T) {
+func TestBundleValidateAcceptsOnlineWithHighMaxCache(t *testing.T) {
 	raw := `{
 		"schema": "kei.policy-bundle/v1",
 		"bundle_id": "bundle-001",
@@ -320,8 +320,12 @@ func TestBundleValidateRejectsOnlineWithHighMaxCache(t *testing.T) {
 		"agent_connector_bindings": []
 	}`
 	SetSchemaValidator(func([]byte) error { return nil })
-	if _, err := Validate([]byte(raw), "inst-001", "org-001", "ws-001", 41, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)); err != ErrBundleUnsupported {
-		t.Fatalf("expected ErrBundleUnsupported, got %v", err)
+	v, err := Validate([]byte(raw), "inst-001", "org-001", "ws-001", 41, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if v.Payload.SubjectResolution.MaxCacheSeconds != 120 {
+		t.Fatalf("unexpected max_cache_seconds: %d", v.Payload.SubjectResolution.MaxCacheSeconds)
 	}
 }
 

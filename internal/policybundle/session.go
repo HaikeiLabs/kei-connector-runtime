@@ -124,14 +124,15 @@ func statusReasonCode(status string) string {
 	}
 }
 
-// SubjectSnapshotFresh reports whether a v2 identity table is within the
-// bundle's configured freshness window. V1 semantics intentionally remain
-// unchanged.
+// SubjectSnapshotFresh reports whether the bundle subject snapshot is usable.
+// HAI-452: the snapshot is trusted for the session lifetime — no
+// max_cache_seconds window is enforced. Returns true when the bundle
+// itself has been issued (IssuedAt ≤ now).
 func (v *Verified) SubjectSnapshotFresh(now time.Time) bool {
-	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || v.Payload.SubjectResolution.MaxCacheSeconds < 1 || v.Payload.SubjectResolution.MaxCacheSeconds > 60 || v.Payload.Identities == nil {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || v.Payload.Identities == nil {
 		return false
 	}
-	return !v.Payload.IssuedAt.After(now) && now.Before(v.Payload.IssuedAt.Add(time.Duration(v.Payload.SubjectResolution.MaxCacheSeconds)*time.Second))
+	return !v.Payload.IssuedAt.After(now)
 }
 
 // LookupIdentity resolves an external session key against the verified
