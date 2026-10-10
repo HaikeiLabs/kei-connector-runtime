@@ -219,6 +219,16 @@ type CRMInvestorList = providers.InvestorListPayload
 // contract's (providers.InvestorUpdatePayload.Validate).
 type CRMInvestorUpdate = providers.InvestorUpdatePayload
 
+// LinearIssueCreate is the linear/issue.create input. Its bounds are the
+// contract's (providers.LinearIssueCreatePayload.Validate); team_id is the
+// issue's parent and must equal the linear/team/<team> resource.
+type LinearIssueCreate = providers.LinearIssueCreatePayload
+
+// LinearCommentCreate is the linear/comment.create input. Its bounds are the
+// contract's (providers.LinearCommentCreatePayload.Validate); issue_id is the
+// comment's parent and must equal the linear/issue/<issue> resource.
+type LinearCommentCreate = providers.LinearCommentCreatePayload
+
 // HTTPRequest is the http_api/http.get and http.head input. Method comes from
 // the capability, never from the input.
 type HTTPRequest struct {
@@ -343,6 +353,18 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 		return in, nil
 	case "crm/investor.update":
 		var in CRMInvestorUpdate
+		if strict(raw, &in) != nil || in.Validate() != nil {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "linear/issue.create":
+		var in LinearIssueCreate
+		if strict(raw, &in) != nil || in.Validate() != nil {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "linear/comment.create":
+		var in LinearCommentCreate
 		if strict(raw, &in) != nil || in.Validate() != nil {
 			return nil, ErrInvalid
 		}

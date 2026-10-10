@@ -816,17 +816,47 @@ How the values flow:
   `secrets.Store.Validate` (new behavior) before the connector becomes `active`.
 - Validation errors name the field and never echo a submitted value.
 
-## 10. Writes (a later layer)
+## 10. Writes
 
-Writes (Linear `issue.create`/`issue.update`, GitHub mutations, CRM
-`lead.create`/`lead.update`) are not implemented in layer 2. Drive `share` is
-not in the capability registry (see the HAI-207 contract gap). Rules for that
-layer (updated per ADR-027, kei #671, merged):
+The runtime executes a write only where the contract's api mode lists it
+(`access.APIWrite` in kei-connector-contracts): every CRM write, and Linear
+`issue.create` and `comment.create`. Every other write capability (Linear
+`issue.update`, GitHub mutations) is denied with `capability_not_supported`.
+Drive `share` is not in the capability registry (see the HAI-207 contract gap).
+Rules (updated per ADR-027, kei #671, merged):
 
-- `--idempotency-key` is required. Per-call approval transport (`--approval-id`)
-  has been removed from the runtime by ADR-027; writes will use an alternative
-  mechanism (TBD).
-- The runtime never retries a write.
+- Both entry points apply the same gate (`prepare`). A per-user connector's
+  write comes from a harness as the JSON body of the serve daemon's
+  `POST /v1/connectors:invoke` on the Unix socket (ADR-034), for example
+  `{"schema":"kei.connector-invoke-request/v1","connector_id":"<id>","capability":"issue.create","action":"create","resource":"linear/team/ENG","idempotency_key":"<key>","input":{"team_id":"ENG","title":"..."}}`.
+  The `kei-proxy connector invoke` flags are the same call: a thin client of
+  that route when `KEI_CREDENTIAL_RELEASE=identity`, otherwise the direct
+  path for shared connectors.
+
+- `--idempotency-key` is required for a Linear write (`input_invalid`
+  otherwise), and the catalog envelope must carry the same key
+  (`descriptor_invalid` otherwise). The contract client derives the new
+  issue's or comment's Linear id from it, so a replay cannot create a
+  duplicate. Per-call approval transport (`--approval-id`) has been removed
+  from the runtime by ADR-027.
+- The runtime never retries a write. If a Linear mutation fails, one read of
+  the derived id returns an entity that a previous call already created.
+- A write's resource is its parent (Haikei semantics rule), and the input's
+  parent identifier must equal it:
+
+| Provider | Capability | Resource | Input | Result |
+| --- | --- | --- | --- | --- |
+| linear | `issue.create` | `linear/team/<team>` | `{team_id, title, description?, priority?}`; `team_id` is the team key or UUID and equals `<team>`; title 1–256 runes on one line; description ≤ 12 KiB; priority 0–4 | `{id, identifier, team_key, url}` |
+| linear | `comment.create` | `linear/issue/<issue>` | `{issue_id, body}`; `issue_id` equals `<issue>`; body ≤ 12 KiB | `{id, issue_id, url}` |
+
+- Audit is metadata only, as for reads (section 8): `input_digest`,
+  `result_digest`, `idempotency_key`, and the `connector:linear:<capability>`
+  tool name. The title, description and comment body never leave the runtime
+  except in the provider call.
+- The connector's Linear OAuth grant needs `issues:create` / `comments:create`
+  (the bridge requests `read,write,issues:create,comments:create`). When the
+  connector's `scopes` are Linear OAuth scopes, a missing write scope is
+  denied before the provider is called.
 
 ## 11. Catalog changes (layer 3, HAI-241)
 

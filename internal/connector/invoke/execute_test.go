@@ -552,9 +552,24 @@ func TestConnectorInvokeFailsClosedWithoutCallingTheProvider(t *testing.T) {
 		{"delegation not yet", func(h *execHarness) {
 			h.catalogBody = allowJSON(gmailEnv, descriptorJSON("gmail", "opaque_ref", "domain_delegation", "", gmailCaps, `,"config":{"impersonate_email":"events@example.com"}`), "")
 		}, nil, "account_model_not_supported"},
-		{"write capability", func(h *execHarness) {
-			h.catalogBody = allowJSON(envelopeJSON("issue.create", "create", "linear/team/ENG", execUser), descriptorJSON("linear", "oauth", "per_user", "", `[{"name":"issue.create","action":"create"}]`, ""), oauthJSON(now.Add(time.Minute)))
-		}, []string{"--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG"}, "capability_not_supported"},
+		{"write capability not executed", func(h *execHarness) {
+			h.catalogBody = allowJSON(envelopeJSON("issue.update", "update", "linear/issue/ENG-1", execUser), descriptorJSON("linear", "oauth", "per_user", "", `[{"name":"issue.update","action":"update"}]`, ""), oauthJSON(now.Add(time.Minute)))
+		}, []string{"--capability", "issue.update", "--action", "update", "--resource", "linear/issue/ENG-1"}, "capability_not_supported"},
+		{"linear write without idempotency key", func(h *execHarness) {
+			h.catalogBody = allowJSON(envelopeJSON("issue.create", "create", "linear/team/ENG", execUser), linearWriteDescriptor(), oauthJSON(now.Add(time.Minute)))
+		}, []string{"--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG", "--input", `{"team_id":"ENG","title":"t"}`}, "input_invalid"},
+		{"linear write envelope drops the idempotency key", func(h *execHarness) {
+			h.catalogBody = allowJSON(envelopeJSON("issue.create", "create", "linear/team/ENG", execUser), linearWriteDescriptor(), oauthJSON(now.Add(time.Minute)))
+		}, []string{"--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG", "--idempotency-key", "idem-1", "--input", `{"team_id":"ENG","title":"t"}`}, "descriptor_invalid"},
+		{"linear issue.create team_id differs from resource", func(h *execHarness) {
+			h.catalogBody = allowJSON(linearWriteEnvelope("issue.create", "linear/team/ENG"), linearWriteDescriptor(), oauthJSON(now.Add(time.Minute)))
+		}, []string{"--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG", "--idempotency-key", "idem-1", "--input", `{"team_id":"OPS","title":"t"}`}, "input_invalid"},
+		{"linear issue.create unknown field", func(h *execHarness) {
+			h.catalogBody = allowJSON(linearWriteEnvelope("issue.create", "linear/team/ENG"), linearWriteDescriptor(), oauthJSON(now.Add(time.Minute)))
+		}, []string{"--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG", "--idempotency-key", "idem-1", "--input", `{"team_id":"ENG","title":"t","labels":"bug"}`}, "input_invalid"},
+		{"linear write scope not granted", func(h *execHarness) {
+			h.catalogBody = allowJSON(linearWriteEnvelope("issue.create", "linear/team/ENG"), strings.Replace(linearWriteDescriptor(), `"scopes":["read","issues:create","comments:create"]`, `"scopes":["read"]`, 1), oauthJSON(now.Add(time.Minute)))
+		}, []string{"--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG", "--idempotency-key", "idem-1", "--input", `{"team_id":"ENG","title":"t"}`}, "input_invalid"},
 		{"unknown input field", func(h *execHarness) { h.catalogBody = allowJSON(gmailEnv, gmailDesc, oauthJSON(now.Add(time.Minute))) },
 			[]string{"--capability", "message.search", "--action", "read", "--resource", "gmail/messages", "--input", `{"query":"x","body":true}`}, "input_invalid"},
 		{"page size too large", func(h *execHarness) { h.catalogBody = allowJSON(gmailEnv, gmailDesc, oauthJSON(now.Add(time.Minute))) },
@@ -891,4 +906,153 @@ func TestConnectorInvokeRejectsASecretRefForAnotherName(t *testing.T) {
 	}
 	out, code := h.run("--capability", "event.list", "--action", "read", "--resource", "tito/acme/events", "--user", execUser, "--input", `{"status":"upcoming"}`)
 	h.assertDeny(out, code, "descriptor_invalid")
+}
+
+// linearWriteDescriptor is a per_user Linear connector that declares the
+// executed writes and whose scopes are the Linear OAuth scopes they need.
+func linearWriteDescriptor() string {
+	caps := `[{"name":"team.read","action":"read"},{"name":"issue.create","action":"create"},{"name":"comment.create","action":"create"}]`
+	return strings.Replace(descriptorJSON("linear", "oauth", "per_user", "", caps, ""), `"scopes":["read"]`, `"scopes":["read","issues:create","comments:create"]`, 1)
+}
+
+// linearWriteEnvelope is the catalog envelope for a write, carrying the
+// request's idempotency key.
+func linearWriteEnvelope(capability, resource string) string {
+	return strings.Replace(envelopeJSON(capability, "create", resource, execUser), `"trace_id":`, `"idempotency_key":"idem-1","trace_id":`, 1)
+}
+
+// fakeLinearGraphQL serves the Linear GraphQL operations the writes use and
+// records each operation name and its variables.
+type fakeLinearGraphQL struct {
+	t          *testing.T
+	operations []string
+	inputs     []map[string]any
+	answers    map[string]string
+}
+
+func (f *fakeLinearGraphQL) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.Path != "/graphql" || r.Header.Get("Authorization") != "Bearer "+execToken {
+		f.t.Errorf("linear request = %s %s auth %q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+	}
+	var body struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		f.t.Errorf("decode linear request: %v", err)
+	}
+	fields := strings.Fields(body.Query)
+	op := strings.SplitN(fields[1], "(", 2)[0]
+	f.operations = append(f.operations, op)
+	input, _ := body.Variables["input"].(map[string]any)
+	f.inputs = append(f.inputs, input)
+	answer, ok := f.answers[op]
+	if !ok {
+		_, _ = io.WriteString(w, `{"data":null,"errors":[{"message":"not found"}]}`)
+		return
+	}
+	_, _ = io.WriteString(w, answer)
+}
+
+const linearTeamUUID = "7586c601-2c9f-4764-bbc5-6132791c68c9"
+
+func TestConnectorInvokeLinearIssueCreate(t *testing.T) {
+	h := newExecHarness(t)
+	h.catalogBody = allowJSON(linearWriteEnvelope("issue.create", "linear/team/ENG"), linearWriteDescriptor(), oauthJSON(h.now.Add(time.Minute)))
+	fake := &fakeLinearGraphQL{t: t, answers: map[string]string{
+		"TeamID": `{"data":{"teams":{"nodes":[{"id":"` + linearTeamUUID + `","key":"ENG"}]}}}`,
+	}}
+	h.transport.routes["api.linear.app"] = func(w http.ResponseWriter, r *http.Request) {
+		if len(fake.operations) == 1 {
+			// The issue id is the write id derived from the idempotency key.
+			id := fake.inputsAfter(r)
+			fake.answers["IssueCreate"] = `{"data":{"issueCreate":{"success":true,"issue":{"id":"` + id + `","identifier":"ENG-42","url":"https://linear.app/acme/issue/ENG-42","team":{"key":"ENG"}}}}}`
+		}
+		fake.serve(w, r)
+	}
+	input := `{"team_id":"ENG","title":"Login crashes","description":"private-bug-body","priority":2}`
+	out, code := h.run("--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG", "--user", execUser, "--idempotency-key", "idem-1", "--input", input)
+	if code != 0 {
+		t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
+	}
+	result := out["result"].(map[string]any)
+	if result["identifier"] != "ENG-42" || result["team_key"] != "ENG" || result["url"] != "https://linear.app/acme/issue/ENG-42" {
+		t.Fatalf("result = %v", result)
+	}
+	if got := strings.Join(fake.operations, ","); got != "TeamID,IssueCreate" {
+		t.Fatalf("linear operations = %s (the mutation must run exactly once)", got)
+	}
+	sent := fake.inputs[1]
+	if sent["teamId"] != linearTeamUUID || sent["title"] != "Login crashes" || sent["description"] != "private-bug-body" || sent["priority"] != float64(2) || sent["id"] != result["id"] {
+		t.Fatalf("issueCreate input = %v", sent)
+	}
+	rec := h.auditRecord()
+	if rec["decision"] != "allow" || rec["tool_name"] != "connector:linear:issue.create" || rec["idempotency_key"] != "idem-1" || rec["input_digest"] == nil || rec["result_digest"] == nil {
+		t.Fatalf("audit = %v", rec)
+	}
+	for _, line := range append(h.lastAuditLines, h.lastStdout) {
+		for _, private := range []string{"private-bug-body", "Login crashes", execToken} {
+			if strings.Contains(line, private) {
+				t.Fatalf("output or audit carries %q: %s", private, line)
+			}
+		}
+	}
+}
+
+func TestConnectorInvokeLinearCommentCreate(t *testing.T) {
+	h := newExecHarness(t)
+	h.catalogBody = allowJSON(linearWriteEnvelope("comment.create", "linear/issue/ENG-42"), linearWriteDescriptor(), oauthJSON(h.now.Add(time.Minute)))
+	fake := &fakeLinearGraphQL{t: t, answers: map[string]string{}}
+	h.transport.routes["api.linear.app"] = func(w http.ResponseWriter, r *http.Request) {
+		id := fake.inputsAfter(r)
+		fake.answers["CommentCreate"] = `{"data":{"commentCreate":{"success":true,"comment":{"id":"` + id + `","url":"https://linear.app/acme/issue/ENG-42#comment-1","issue":{"id":"issue-uuid"}}}}}`
+		fake.serve(w, r)
+	}
+	out, code := h.run("--capability", "comment.create", "--action", "create", "--resource", "linear/issue/ENG-42", "--user", execUser, "--idempotency-key", "idem-1", "--input", `{"issue_id":"ENG-42","body":"private-comment-body"}`)
+	if code != 0 {
+		t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
+	}
+	if result := out["result"].(map[string]any); result["issue_id"] != "issue-uuid" {
+		t.Fatalf("result = %v", result)
+	}
+	if got := strings.Join(fake.operations, ","); got != "CommentCreate" {
+		t.Fatalf("linear operations = %s", got)
+	}
+	for _, line := range append(h.lastAuditLines, h.lastStdout) {
+		if strings.Contains(line, "private-comment-body") {
+			t.Fatalf("output or audit carries the comment body: %s", line)
+		}
+	}
+}
+
+func TestConnectorInvokeLinearIssueCreateFailureDoesNotRetry(t *testing.T) {
+	h := newExecHarness(t)
+	h.catalogBody = allowJSON(linearWriteEnvelope("issue.create", "linear/team/ENG"), linearWriteDescriptor(), oauthJSON(h.now.Add(time.Minute)))
+	fake := &fakeLinearGraphQL{t: t, answers: map[string]string{
+		"TeamID": `{"data":{"teams":{"nodes":[{"id":"` + linearTeamUUID + `","key":"ENG"}]}}}`,
+	}}
+	h.transport.routes["api.linear.app"] = fake.serve
+	out, code := h.run("--capability", "issue.create", "--action", "create", "--resource", "linear/team/ENG", "--user", execUser, "--idempotency-key", "idem-1", "--input", `{"team_id":"ENG","title":"t","description":"private-bug-body"}`)
+	h.assertDeny(out, code, "provider_error")
+	if got := strings.Join(fake.operations, ","); got != "TeamID,IssueCreate,IssueRef" {
+		t.Fatalf("linear operations = %s (one mutation, then one replay read)", got)
+	}
+	if strings.Contains(h.lastStdout, "private-bug-body") {
+		t.Fatalf("deny carries the description: %s", h.lastStdout)
+	}
+}
+
+// inputsAfter peeks at the request's input id without consuming the body.
+func (f *fakeLinearGraphQL) inputsAfter(r *http.Request) string {
+	raw, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	var body struct {
+		Variables struct {
+			Input struct {
+				ID string `json:"id"`
+			} `json:"input"`
+		} `json:"variables"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	return body.Variables.Input.ID
 }
