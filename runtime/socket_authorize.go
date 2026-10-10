@@ -138,6 +138,14 @@ func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, preflight: newPreflightService(), stopSweep: make(chan struct{})}
 	// A named session's credentials go with it, however it ends.
 	l.Sessions.OnEnd(l.dropSessionCredentials)
+	// A session recycled by max-age also emits a lifecycle event.
+	l.Sessions.OnRecycle(func(id string) {
+		_ = AppendLifecycleEvent(cfg.PolicyAuditPath(), cfg.PolicyAuditMaxBytes(), LifecycleEvent{
+			EventType:  "session_recycled",
+			ObservedAt: time.Now().UTC(),
+			Attrs:      map[string]string{"session_id": id},
+		})
+	})
 	return l
 }
 

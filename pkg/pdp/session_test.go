@@ -216,3 +216,126 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionsMaxAge: a named session is recycled after 8 hours (max age)
+// regardless of use; the next sessionLive check returns session_revalidation_required;
+// onRecycle and onEnd both fire; the default session is not affected.
+func TestSessionsMaxAge(t *testing.T) {
+	s := NewSessions()
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	s.SetNow(func() time.Time { return now })
+	s.SetIdleTTL(time.Minute)
+
+	var ended atomic.Int32    // onEnd fires for any session end
+	var recycled atomic.Int32 // onRecycle fires only for max-age recycle
+	s.OnEnd(func(string) { ended.Add(1) })
+	s.OnRecycle(func(string) { recycled.Add(1) })
+
+	young, _ := s.Create(Subject{UserID: "u-young", Status: StatusLinked})
+	old, _ := s.Create(Subject{UserID: "u-old", Status: StatusLinked})
+	_ = s.Start(Subject{UserID: "u-default", Status: StatusLinked})
+
+	// Both are still live before 8 h.
+	if _, ok := s.Get(young); !ok {
+		t.Fatal("young session expired before max age")
+	}
+	if _, ok := s.Get(old); !ok {
+		t.Fatal("old session expired before max age")
+	}
+
+	// Advance 8 h + 1 s so both exceed max age.
+	now = now.Add(SessionMaxAge + time.Second)
+
+	// Accessing old recycles it: onEnd + onRecycle fire, recycled recorded.
+	if _, ok := s.Get(old); ok {
+		t.Fatal("old session should have been recycled")
+	}
+	if ended.Load() != 1 {
+		t.Errorf("onEnd ran %d times, want 1", ended.Load())
+	}
+	if recycled.Load() != 1 {
+		t.Errorf("onRecycle ran %d times, want 1", recycled.Load())
+	}
+
+	// ConsumeRecycled reports true exactly once.
+	if !s.ConsumeRecycled(old) {
+		t.Error("ConsumeRecycled(old) should be true")
+	}
+	if s.ConsumeRecycled(old) {
+		t.Error("ConsumeRecycled(old) should be false after consumption")
+	}
+	if s.Exists(old) {
+		t.Error("old session should not exist after recycle")
+	}
+
+	// Young is still live (not yet accessed after max age).
+	if _, ok := s.Get(young); ok {
+		t.Fatal("young session should also have been recycled on access")
+	}
+	if ended.Load() != 2 {
+		t.Errorf("onEnd ran %d times, want 2", ended.Load())
+	}
+	if recycled.Load() != 2 {
+		t.Errorf("onRecycle ran %d times, want 2", recycled.Load())
+	}
+
+	// Default session is never recycled.
+	now = now.Add(SessionMaxAge + time.Second)
+	if _, ok := s.Current(); !ok {
+		t.Error("the default session must never be recycled")
+	}
+	if ended.Load() != 2 {
+		t.Errorf("default session must not trigger onEnd")
+	}
+	if recycled.Load() != 2 {
+		t.Errorf("default session must not trigger onRecycle")
+	}
+}
+
+// TestSessionsMaxAgeRecycleReason: calling Evaluate/EvaluateConnector/
+// AuthorizeV2Model/AuthorizeV2HarnessTool on a recycled session returns
+// session_revalidation_required exactly once, then session_not_found.
+func TestSessionsMaxAgeRecycleReason(t *testing.T) {
+	useValidator(t, schemaValidator(t))
+	s := NewSessions()
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	s.SetNow(func() time.Time { return now })
+	s.OnEnd(func(string) {})
+	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), s)
+
+	sid, _ := s.Create(Subject{UserID: "u-alice", Status: StatusLinked})
+	now = now.Add(SessionMaxAge + time.Second)
+
+	// First call sees session_revalidation_required.
+	d, err := e.Evaluate(context.Background(), Request{Session: sid, Tool: "github.create_issue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.ReasonCode != ReasonSessionRevalidationRequired {
+		t.Errorf("first Evaluate after max age: reasonCode %q, want %s", d.ReasonCode, ReasonSessionRevalidationRequired)
+	}
+	if d.Allow {
+		t.Error("recycled session must deny")
+	}
+
+	// Second call sees session_not_found (recycled entry consumed).
+	d, err = e.Evaluate(context.Background(), Request{Session: sid, Tool: "github.create_issue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.ReasonCode != ReasonSessionNotFound {
+		t.Errorf("second Evaluate after max age: reasonCode %q, want %s", d.ReasonCode, ReasonSessionNotFound)
+	}
+
+	// Connector grant also returns session_revalidation_required once.
+	sid2, _ := s.Create(Subject{UserID: "u-bob", Status: StatusLinked})
+	now = now.Add(SessionMaxAge + time.Second)
+	g, _ := e.EvaluateConnector(context.Background(), Request{Session: sid2, Connector: &ConnectorTarget{ConnectorID: "c", Capability: "x"}})
+	if g.ReasonCode != ReasonSessionRevalidationRequired {
+		t.Errorf("EvaluateConnector after max age: reasonCode %q, want %s", g.ReasonCode, ReasonSessionRevalidationRequired)
+	}
+	g, _ = e.EvaluateConnector(context.Background(), Request{Session: sid2, Connector: &ConnectorTarget{ConnectorID: "c", Capability: "x"}})
+	if g.ReasonCode != ReasonSessionNotFound {
+		t.Errorf("EvaluateConnector second call: reasonCode %q, want %s", g.ReasonCode, ReasonSessionNotFound)
+	}
+}
