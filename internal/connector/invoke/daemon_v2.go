@@ -15,6 +15,7 @@ import (
 
 type preparedOperation struct {
 	operation policybundle.Operation
+	secret    *policybundle.Connector
 	meta      contract.Metadata
 	inv       contract.Invocation
 	conn      connector.Connector
@@ -84,7 +85,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 		operationRequest.ToolName, operationRequest.PreflightHandle = dr.ToolName, dr.PreflightHandle
 		operationRequest.InputDigest = op.InputDigest
 		operationRequest.InvokingSubject = grant.Subject
-		meta, inv, denied := sessionCall(grant, opReq)
+		meta, inv, secret, denied := daemonCall(grant, opReq)
 		if denied != nil {
 			return finish(denied)
 		}
@@ -92,7 +93,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 		if denied != nil {
 			return finish(denied)
 		}
-		prepared = append(prepared, preparedOperation{operation: op, meta: meta, inv: inv, conn: conn, input: decoded})
+		prepared = append(prepared, preparedOperation{operation: op, secret: secret, meta: meta, inv: inv, conn: conn, input: decoded})
 	}
 
 	// Confirm the caller did not substitute, omit, or add a plan item before
@@ -108,7 +109,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	for _, item := range prepared {
 		exec := &execution{provider: item.meta.Provider, meta: &item.meta, invocation: &item.inv, credentialSubject: contract.CredentialSubject(item.meta, item.inv)}
 		var runDenial *denial
-		err := d.UseCredential(ctx, dr.SessionID, grant.Subject, string(item.meta.Provider), func(token string) error {
+		err := d.useCredential(ctx, dr.SessionID, grant.Subject, item.meta, item.secret, func(token string) error {
 			status, denied := d.Env.run(ctx, item.conn, item.meta, item.inv, item.input, token, exec)
 			runDenial = denied
 			if denied != nil && status == http.StatusUnauthorized {
@@ -137,7 +138,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 		}
 		result = encoded
 	}
-	out.Decision, out.Provider, out.Result = "allow", grant.Provider, result
+	out.Decision, out.Provider, out.Result = "allow", string(prepared[0].meta.Provider), result
 	out.ConnectorID = grant.ConnectorID
 	out.Audit.ResultDigest, out.Audit.ResultBytes = sha256Digest(result), len(result)
 	d.Env.emitAudit(plan, lastExec, out, time.Since(started))

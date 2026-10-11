@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
+	"github.com/HaikeiLabs/kei-connector-contracts/setup"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
@@ -40,19 +41,28 @@ const (
 	// daemonCredentialRef names where a session connector's credential comes
 	// from in its synthesized metadata; it is a label, not a reference.
 	daemonCredentialRef = "kei-session-credential"
+	// descriptorCredentialRef is the same label for an opaque_ref descriptor,
+	// whose credential the daemon resolves through SecretResolver.
+	descriptorCredentialRef = "kei-bundle-descriptor-credential"
 )
 
-// IsSessionProvider reports whether provider's credential is the session
-// subject's own OAuth connection, released by I11 under the same name. Only
-// these run in the daemon; every other provider needs connector config and a
-// credential the bundle does not carry.
-func IsSessionProvider(provider string) bool { return sessionProviders[contract.Provider(provider)] }
-
-var sessionProviders = map[contract.Provider]bool{
-	contract.ProviderGitHub: true,
-	contract.ProviderGmail:  true,
-	contract.ProviderGoogle: true,
-	contract.ProviderLinear: true,
+// IsSessionProvider reports whether provider's default credential is the
+// session subject's own OAuth connection, released by I11 under the same
+// name: its kei-connector-contracts setup schema offers oauth with per_user as
+// the default account model. A bundle without connector descriptors (an
+// older catalog) runs only these in the daemon, as before HAI-378; with
+// descriptors, each connector's credential_source and account_model decide.
+func IsSessionProvider(provider string) bool {
+	schema, ok := setup.SetupSchemaFor(contract.Provider(provider))
+	if !ok {
+		return false
+	}
+	for _, auth := range schema.Auth {
+		if auth.CredentialSource == contract.CredentialSourceOAuth && auth.DefaultAccountModel == contract.AccountModelPerUser {
+			return true
+		}
+	}
+	return false
 }
 
 // Grant is the daemon's local decision for one connector call.
@@ -74,6 +84,12 @@ type Grant struct {
 	Capabilities []string
 	TenantID     string
 	WorkspaceID  string
+	// Connector is the bundle's descriptor for the connector (HAI-378), from
+	// the same bundle as the decision, or nil. Descriptors reports whether the
+	// bundle carries descriptors at all: without them the daemon keeps its
+	// session-OAuth-only behavior.
+	Connector   *policybundle.Connector
+	Descriptors bool
 }
 
 // DaemonCall is what the daemon asks its PDP to decide. Session is the id of
@@ -104,6 +120,8 @@ type Daemon struct {
 	ConsumeV2Plan func(context.Context, string, string, string, string, []byte, []byte, []policybundle.Operation, string, int) error
 	// UseCredential runs fn with the named session credential for subject/provider.
 	UseCredential func(ctx context.Context, session, subject, provider string, fn func(token string) error) error
+	// Secrets resolves opaque_ref descriptors' credentials (HAI-378).
+	Secrets SecretResolver
 }
 
 // daemonRequest is the route's body. It names the call only: the subject
@@ -248,7 +266,7 @@ func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest)
 	}
 
 	exec = &execution{provider: contract.Provider(grant.Provider)}
-	meta, inv, dn := sessionCall(grant, dr)
+	meta, inv, secret, dn := daemonCall(grant, dr)
 	if dn != nil {
 		return finish(dn)
 	}
@@ -259,7 +277,7 @@ func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest)
 	}
 	exec.credentialSubject = contract.CredentialSubject(meta, inv)
 
-	err = d.UseCredential(ctx, sessionID, grant.Subject, string(meta.Provider), func(token string) error {
+	err = d.useCredential(ctx, sessionID, grant.Subject, meta, secret, func(token string) error {
 		status, runDenial := d.Env.run(ctx, conn, meta, inv, in, token, exec)
 		dn = runDenial
 		if runDenial != nil && status == http.StatusUnauthorized {
@@ -283,20 +301,78 @@ func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest)
 	return finish(nil)
 }
 
+// daemonCall builds the metadata and invocation for a granted call, and
+// names the descriptor whose tenant-stored secret the call needs (nil: the
+// session's own OAuth credential). A bundle with connector descriptors
+// decides by each descriptor's credential_source and account_model; a bundle
+// without them keeps the pre-descriptor session-provider rule.
+func daemonCall(g Grant, dr daemonRequest) (contract.Metadata, contract.Invocation, *policybundle.Connector, *denial) {
+	if g.Descriptors {
+		return descriptorCall(g, dr)
+	}
+	meta, inv, dn := sessionCall(g, dr)
+	return meta, inv, nil, dn
+}
+
+// descriptorCall builds the call from the connector's bundle descriptor
+// (ADR-034, HAI-378). The descriptor is consulted only after an allow; the
+// contract checks in prepare (setup.ValidateMetadata, http_api validation)
+// still run on the metadata it yields.
+func descriptorCall(g Grant, dr daemonRequest) (contract.Metadata, contract.Invocation, *policybundle.Connector, *denial) {
+	c := g.Connector
+	if c == nil || c.ID != dr.ConnectorID || (g.ConnectorID != "" && c.ID != g.ConnectorID) || c.Provider == "" {
+		return contract.Metadata{}, contract.Invocation{}, nil, deny("descriptor_invalid", "the policy bundle has no descriptor for this connector")
+	}
+	if contract.AccountModel(c.AccountModel) == contract.AccountModelDomainDelegation {
+		return contract.Metadata{}, contract.Invocation{}, nil, deny("account_model_not_supported", "domain-wide delegation is not executed yet")
+	}
+	provider := contract.Provider(c.Provider)
+	declared := make([]string, 0, len(c.Capabilities))
+	for _, capability := range c.Capabilities {
+		declared = append(declared, capability.Name)
+	}
+	meta, inv, dn := callMetadata(g, dr, provider, declared)
+	if dn != nil {
+		return contract.Metadata{}, contract.Invocation{}, nil, dn
+	}
+	if c.Name != "" {
+		meta.Name = c.Name
+	}
+	meta.Config, meta.HTTPAPI, meta.Grafana = c.Config, c.HTTPAPI, c.Grafana
+	switch contract.CredentialSource(c.CredentialSource) {
+	case contract.CredentialSourceOAuth:
+		if contract.AccountModel(c.AccountModel) != contract.AccountModelPerUser {
+			return contract.Metadata{}, contract.Invocation{}, nil, deny("credential_source_not_supported", "the daemon runs oauth connectors only with the session's own connection")
+		}
+		return meta, inv, nil, nil
+	case contract.CredentialSourceOpaqueRef:
+		// The account is the connector's own (contract.CredentialSubject is
+		// its shared subject); the contract's account models apply to oauth.
+		meta.CredentialSource, meta.AccountModel, meta.CredentialRef = contract.CredentialSourceOpaqueRef, "", descriptorCredentialRef
+		return meta, inv, c, nil
+	}
+	return contract.Metadata{}, contract.Invocation{}, nil, deny("descriptor_invalid", "the descriptor's credential source is not supported")
+}
+
 // sessionCall builds the per_user OAuth metadata and invocation for a granted
-// call from the bundle's connector entry and the installation audience. Only
-// session providers qualify, and only capabilities both the bundle and the
-// contract declare.
+// call from a bundle without connector descriptors. Only session providers
+// qualify.
 func sessionCall(g Grant, dr daemonRequest) (contract.Metadata, contract.Invocation, *denial) {
-	provider := contract.Provider(g.Provider)
 	if g.Provider == "" {
 		return contract.Metadata{}, contract.Invocation{}, deny("descriptor_invalid", "the policy bundle does not describe this connector")
 	}
-	if !sessionProviders[provider] {
+	if !IsSessionProvider(g.Provider) {
 		return contract.Metadata{}, contract.Invocation{}, deny("credential_source_not_supported", "the daemon runs only connectors that use the session's own OAuth connection")
 	}
+	return callMetadata(g, dr, contract.Provider(g.Provider), g.Capabilities)
+}
+
+// callMetadata builds per_user OAuth session metadata and the invocation for
+// provider. Only capabilities both the bundle and this runtime's contracts
+// version declare are kept, and the requested one must be among them.
+func callMetadata(g Grant, dr daemonRequest, provider contract.Provider, declaredNames []string) (contract.Metadata, contract.Invocation, *denial) {
 	declared := map[string]bool{}
-	for _, name := range g.Capabilities {
+	for _, name := range declaredNames {
 		declared[name] = true
 	}
 	var caps []contract.Capability
@@ -334,6 +410,30 @@ func sessionCall(g Grant, dr daemonRequest) (contract.Metadata, contract.Invocat
 	return meta, inv, nil
 }
 
+// useCredential runs fn with the call's credential: the session's own OAuth
+// credential, or, for an opaque_ref descriptor, the tenant-stored secret
+// SecretResolver reads. A rejected secret is not re-fetched: the provider's
+// 401 stays the call's denial.
+func (d *Daemon) useCredential(ctx context.Context, sessionID, subject string, meta contract.Metadata, secret *policybundle.Connector, fn func(token string) error) error {
+	if secret == nil {
+		return d.UseCredential(ctx, sessionID, subject, string(meta.Provider), fn)
+	}
+	return UseSecret(ctx, d.Secrets, *secret, fn)
+}
+
+// UseSecret runs fn with descriptor c's tenant-stored credential. The value
+// is in scope only while fn runs.
+func UseSecret(ctx context.Context, r SecretResolver, c policybundle.Connector, fn func(value string) error) error {
+	value, err := r.Resolve(ctx, c)
+	if err != nil {
+		return err
+	}
+	if err := fn(value); err != nil && !errors.Is(err, credrelease.ErrProviderUnauthorized) {
+		return err
+	}
+	return nil
+}
+
 // CredentialDenial maps a credential store refusal to a reason code and
 // reason, and to a connect hint when reconnecting the provider would fix it.
 func CredentialDenial(err error) (code, reason string, connect *json.RawMessage) {
@@ -342,6 +442,10 @@ func CredentialDenial(err error) (code, reason string, connect *json.RawMessage)
 }
 
 func credentialDenial(err error) (*denial, *json.RawMessage) {
+	var se *SecretError
+	if errors.As(err, &se) {
+		return deny(se.Code, se.Reason), nil
+	}
 	var de *credrelease.DeniedError
 	if !errors.As(err, &de) {
 		return deny("credential_unavailable", "session credential is not available"), nil

@@ -172,24 +172,45 @@ func (l *LocalPDP) ConsumeV2Plan(ctx context.Context, handle, sessionID, toolNam
 	return l.preflight.store.ConsumePlan(handle, binding, ops, l)
 }
 
-func (l *LocalPDP) DescribeV2Tool(sessionID, toolName, agentID string) (provider, connectorID string, capabilities []string, subject, trustedAgentID string, tenantID, workspaceID string, ok bool) {
+// V2ToolTarget is what the daemon needs to run a registered v2 connector
+// tool: the routed connector, its descriptor when the bundle carries one, the
+// linked session subject and the trusted agent.
+type V2ToolTarget struct {
+	// Provider is the tool's source; with a descriptor the descriptor's
+	// provider is authoritative.
+	Provider     string
+	ConnectorID  string
+	Capabilities []string
+	Subject      string
+	AgentID      string
+	TenantID     string
+	WorkspaceID  string
+	Connector    *policybundle.Connector
+	Descriptors  bool
+}
+
+func (l *LocalPDP) DescribeV2Tool(sessionID, toolName, agentID string) (V2ToolTarget, bool) {
 	e, identity := l.evaluator.Load(), l.identity.Load()
 	if e == nil || identity == nil || identity.WorkspaceID == nil {
-		return "", "", nil, "", "", "", "", false
+		return V2ToolTarget{}, false
 	}
 	agentID = trustedDefaultAgentID(agentID, identity.AgentID)
 	if agentID == "" {
-		return "", "", nil, "", "", "", "", false
+		return V2ToolTarget{}, false
 	}
 	ctx, found := e.V2PlanContext(toolName)
 	if !found || ctx.Tool.Route.ConnectorBinding == nil {
-		return "", "", nil, "", "", "", "", false
+		return V2ToolTarget{}, false
 	}
 	session, found := l.Sessions.Get(sessionID)
 	if !found || session.Status != pdp.StatusLinked || session.UserID == "" {
-		return "", "", nil, "", "", "", "", false
+		return V2ToolTarget{}, false
 	}
-	return ctx.Tool.Source, ctx.Tool.Route.ConnectorBinding.ConnectorID, append([]string(nil), ctx.Tool.RequiredCapabilities...), session.UserID, agentID, identity.OrgID, *identity.WorkspaceID, true
+	return V2ToolTarget{
+		Provider: ctx.Tool.Source, ConnectorID: ctx.Tool.Route.ConnectorBinding.ConnectorID,
+		Capabilities: append([]string(nil), ctx.Tool.RequiredCapabilities...), Subject: session.UserID, AgentID: agentID,
+		TenantID: identity.OrgID, WorkspaceID: *identity.WorkspaceID, Connector: ctx.Connector, Descriptors: ctx.Descriptors,
+	}, true
 }
 
 func (l *LocalPDP) AuthorizePlan(binding BindingContext, ops []Operation) (string, int64, bool, error) {
