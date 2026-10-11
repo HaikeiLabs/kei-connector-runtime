@@ -148,6 +148,67 @@ func shortSocketTempDir(t *testing.T) string {
 	return dir
 }
 
+func TestPiAuthorizeDecisionUsesDefaultSpoolAndShipsDigestOnly(t *testing.T) {
+	var shipped string
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/audit/flush" {
+			t.Errorf("flush path = %q", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read flush body: %v", err)
+		}
+		shipped = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"upserted":1}`)
+	}))
+	defer controlPlane.Close()
+
+	stateDir := t.TempDir()
+	cfg := Config{
+		RuntimeToken:           "kh_live_runtime_token_1234567890",
+		RuntimeControlPlaneURL: controlPlane.URL,
+		RuntimeStateDir:        stateDir,
+		AuditMaxBytes:          defaultAuditMaxBytes,
+	}
+	local, err := newServeLocalPDP(cfg, serveSeams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	_, socketHandler := newServeHandlers(cfg, local)
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"pi.shell","framework":"pi","tool_args_digest":"sha256:0123456789abcdef","resource":"command"}`))
+	req.Header.Set("Authorization", "Bearer kh_live_runtime_token_1234567890")
+	resp := httptest.NewRecorder()
+	socketHandler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("authorize status = %d: %s", resp.Code, resp.Body.String())
+	}
+
+	auditPath := filepath.Join(stateDir, "audit", "harness-tool.jsonl")
+	spool, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read default decision spool %s: %v", auditPath, err)
+	}
+	if !strings.Contains(string(spool), `"framework":"pi"`) || !strings.Contains(string(spool), `"tool_name":"pi.shell"`) || !strings.Contains(string(spool), `"tool_args_digest":"sha256:0123456789abcdef"`) {
+		t.Fatalf("spool missing Pi decision metadata: %s", spool)
+	}
+	if strings.Contains(string(spool), "raw command") || strings.Contains(string(spool), `"command":`) {
+		t.Fatalf("spool contains raw command data: %s", spool)
+	}
+
+	collector := keiruntime.NewCollector(auditPath, keiruntime.NewABACFlushClientFromConfig(cfg, time.Second), 100)
+	if _, err := collector.Run(context.Background()); err != nil {
+		t.Fatalf("ship decision audit: %v", err)
+	}
+	if !strings.Contains(shipped, `"framework":"pi"`) || !strings.Contains(shipped, `"tool_name":"pi.shell"`) || !strings.Contains(shipped, `"tool_args_digest":"sha256:0123456789abcdef"`) {
+		t.Fatalf("shipped payload missing Pi decision metadata: %s", shipped)
+	}
+	if strings.Contains(shipped, "raw command") || strings.Contains(shipped, `"command":`) {
+		t.Fatalf("shipped payload contains raw command data: %s", shipped)
+	}
+}
+
 func TestSocketAuthorizeUsesOwnerOnlySocketWithoutRuntimeToken(t *testing.T) {
 	cfg := Config{
 		RuntimeToken:           "kh_live_12345678901234567890",

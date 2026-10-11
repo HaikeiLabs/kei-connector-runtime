@@ -216,11 +216,12 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 	if err != nil {
 		return nil, err
 	}
+	auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir)
 	emitFunc := func(data json.RawMessage) {
-		if cfg.AuditPath == "" {
+		if auditPath == "" {
 			return
 		}
-		_ = keiruntime.NewAuditSpool(cfg.AuditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
+		_ = keiruntime.NewAuditSpool(auditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
 	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
