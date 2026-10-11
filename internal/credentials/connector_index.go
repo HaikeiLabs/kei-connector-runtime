@@ -32,6 +32,10 @@ type connectorReferenceIndex struct {
 
 var ErrConnectorReferenceNotFound = errors.New("connector credential reference not found")
 
+// ErrConnectorReferenceMismatch reports an index entry whose secret reference
+// names another connector or field than the one asked for.
+var ErrConnectorReferenceMismatch = errors.New("connector credential reference names another connector or field")
+
 // WriteConnectorReference atomically inserts or replaces one connector field
 // lookup in a 0600 index. The index holds no credential values.
 func WriteConnectorReference(path string, entry ConnectorReference) error {
@@ -92,10 +96,19 @@ func ReadConnectorReference(path, connectorID, field string) (ConnectorReference
 	if !ok {
 		return ConnectorReference{}, ErrConnectorReferenceNotFound
 	}
-	if validateConnectorReference(entry) != nil || entry.ConnectorID != connectorID || entry.Field != field {
+	if entry.ConnectorID != connectorID || entry.Field != field || !connectorSecretRefNamesField(entry.SecretRef, connectorID, field) {
+		return ConnectorReference{}, ErrConnectorReferenceMismatch
+	}
+	if validateConnectorReference(entry) != nil {
 		return ConnectorReference{}, errors.New("credential index entry is invalid")
 	}
 	return entry, nil
+}
+
+// ConnectorIndexPath is the connector reference index kei-proxy credential
+// sync writes in stateDir.
+func ConnectorIndexPath(stateDir string) string {
+	return filepath.Join(stateDir, "connector-credentials.json")
 }
 
 func connectorReferenceKey(connectorID, field string) string { return connectorID + "/" + field }

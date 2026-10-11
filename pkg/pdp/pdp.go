@@ -131,6 +131,10 @@ type ConnectorGrant struct {
 	Decision
 	// Connector is the bundle's entry for the requested connector, if any.
 	Connector *Connector
+	// Descriptors is true when the bundle carries connector descriptors
+	// (HAI-378): Connector is then the connector's descriptor, and a missing
+	// entry is a broken bundle rather than an older catalog.
+	Descriptors bool
 	// Subject is the session subject the decision was made for (no token);
 	// HasSession is false when there was no session.
 	Subject    Subject
@@ -163,6 +167,7 @@ func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (Connect
 	if c, ok := v.Connector(req.Connector.ConnectorID); ok {
 		g.Connector = &c
 	}
+	g.Descriptors = v.CarriesConnectorDescriptors()
 	return g, nil
 }
 
@@ -292,6 +297,11 @@ type V2PlanContext struct {
 	BundleDigest  string
 	BundleVersion int64
 	Tool          policybundle.V2Tool
+	// Connector is the descriptor of the tool's routed connector, from the
+	// same bundle, when the bundle carries one; Descriptors reports whether
+	// the bundle carries descriptors at all.
+	Connector   *Connector
+	Descriptors bool
 }
 
 func (e *Evaluator) V2PlanContext(toolName string) (V2PlanContext, bool) {
@@ -303,7 +313,11 @@ func (e *Evaluator) V2PlanContext(toolName string) (V2PlanContext, bool) {
 	if !ok {
 		return V2PlanContext{}, false
 	}
-	return V2PlanContext{v.Digest, v.Payload.BundleVersion, tool}, true
+	planContext := V2PlanContext{BundleDigest: v.Digest, BundleVersion: v.Payload.BundleVersion, Tool: tool, Descriptors: v.CarriesConnectorDescriptors()}
+	if c, ok := v.Connector(tool.Route.ConnectorBinding.ConnectorID); ok {
+		planContext.Connector = &c
+	}
+	return planContext, true
 }
 func (e *Evaluator) AuthorizeV2Plan(sessionID, installationID, subjectID, source, externalID, agentID, tool string, ops []policybundle.Operation) (string, int64, bool, error) {
 	if installationID != e.aud.InstallationID || sessionID == "" || subjectID == "" || agentID == "" || tool == "" || len(ops) == 0 || e.sessions == nil {

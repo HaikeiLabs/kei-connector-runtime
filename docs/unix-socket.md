@@ -193,10 +193,33 @@ call, the caller omits `session_id`; the socket middleware binds the request to
 the owner session and the daemon uses that trusted session header. If a caller
 includes `session_id`, it must exactly match the bound header. The answer is
 `kei.connector-invoke-response/v1`, the same object `kei-proxy connector invoke`
-prints. Only providers whose credential is the subject's own OAuth connection
-run here: github, gmail, google_drive and linear. Connectors that need config
-or an opaque_ref secret deny `credential_source_not_supported`, because the
-bundle carries neither. In identity mode `kei-proxy connector invoke` is a
+prints. Which connectors run here depends on the bundle
+(ADR-034, HAI-378 amendment):
+
+- **The v2 bundle carries `policy_set.connectors`.** Each connector's
+  non-secret descriptor decides. `oauth` with `account_model: per_user` uses
+  the session's own credential. `opaque_ref` (for example an `http_api`
+  connector named `crm`) reads its secret inside the daemon: the descriptor's
+  `kei://connectors/<id>/<field>` reference is looked up in the connector
+  reference index that `kei-proxy credential sync` writes, the index entry's
+  backend must equal `credential_backend` (else
+  `credential_backend_mismatch`), and the value is read from the tenant
+  secret store (AWS Secrets Manager or Azure Key Vault) with the runtime's own
+  cloud identity. It goes only on the provider request (for `http_api`, the
+  `credential_injection` header), and a provider response that contains it
+  denies `provider_error`. A routed connector without a descriptor, or one
+  that fails the contract, denies `descriptor_invalid`; `domain_delegation`
+  denies `account_model_not_supported`; shared `oauth` denies
+  `credential_source_not_supported`; a secret that was never delivered or
+  cannot be read denies `credential_unavailable`. There is no retry and no
+  fallback to the catalog.
+- **No `connectors` section (an older catalog).** Only providers whose
+  default credential is the subject's own OAuth connection run (github,
+  gmail, google_drive and linear, from the kei-connector-contracts setup
+  schemas). Connectors that need config or an opaque_ref secret deny
+  `credential_source_not_supported`.
+
+In identity mode `kei-proxy connector invoke` is a
 thin client of this route. It needs no control plane and holds no credential.
 For v2 tool calls, `agent_id` may be omitted: the daemon uses the default
 agent assigned by the authoritative runtime `whoami` identity. If no default
@@ -218,9 +241,14 @@ unresolved. The daemon:
    catalog decides on the legacy path. The bundle must register a
    `credential` tool and binding for the connector, and a policy must permit
    it.
-2. **Resolves each reference** from the session-held credential. Only the
-   `token`/`access_token` field of a session OAuth provider (github, gmail,
-   google_drive, linear) resolves; anything else denies.
+2. **Resolves each reference.** With connector descriptors in the bundle,
+   an `opaque_ref` reference must equal the descriptor's `credential_ref` and
+   resolves from the tenant secret store exactly as for
+   `POST /v1/connectors:invoke`, with the same deny codes; a `per_user`
+   `oauth` reference resolves from the session-held credential. Without
+   descriptors, only the `token`/`access_token` field of a session OAuth
+   provider (github, gmail, google_drive, linear) resolves; anything else
+   denies.
 3. **Spawns the child** with exactly the request's `env`, with the resolved
    values in place of the references. The daemon's own environment is never
    added. A bare command name is looked up on that env's `PATH`, in `dir`.

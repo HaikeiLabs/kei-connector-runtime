@@ -22,6 +22,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
@@ -229,6 +230,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
 	local.SetTokenlessOwnerSession(cfg.TokenlessOwnerSession)
 	if creds != nil {
+		secretResolver := invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: connectorSecretStore()}
 		local.SetCredentialStore(creds)
 		local.SetConnectorInvoker(&invoke.Daemon{
 			Env: invoke.Env{
@@ -239,7 +241,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 					return nil
 				},
 			},
-			Authorize: connectorAuthorizer(local),
+			Authorize: local.ConnectorGrant,
 			PlanV2: func(ctx context.Context, sessionID, tool, agent string, args, contextValues []byte, parent string, depth int) ([]policybundle.Operation, error) {
 				_, ops, err := local.PlanV2(ctx, sessionID, tool, agent, args, contextValues, parent, depth)
 				return ops, err
@@ -247,10 +249,12 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 			ValidateV2:    local.ValidateV2Plan,
 			ConsumeV2Plan: local.ConsumeV2Plan,
 			UseCredential: local.UseCredential,
+			Secrets:       secretResolver,
 		})
 		local.SetCommandRunner(&runcommand.Daemon{
-			Authorize:     connectorAuthorizer(local),
+			Authorize:     local.ConnectorGrant,
 			UseCredential: local.UseCredential,
+			Secrets:       secretResolver,
 			AppendAudit: func(record []byte) error {
 				emitFunc(record)
 				return nil
@@ -259,46 +263,6 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		})
 	}
 	return local, nil
-}
-
-// connectorAuthorizer adapts the local PDP's connector decision to the
-// daemon's invoke route.
-func connectorAuthorizer(local *keiruntime.LocalPDP) func(context.Context, invoke.DaemonCall) (invoke.Grant, error) {
-	return func(ctx context.Context, c invoke.DaemonCall) (invoke.Grant, error) {
-		if c.ToolName != "" {
-			subjectSnapshot, hasSession := local.Sessions.Get(c.Session)
-			if !hasSession {
-				return invoke.Grant{ReasonCode: pdp.ReasonSessionNotFound}, nil
-			}
-			provider, connectorID, capabilities, subject, agentID, tenantID, workspaceID, ok := local.DescribeV2Tool(c.Session, c.ToolName, c.AgentID)
-			if subject != subjectSnapshot.UserID {
-				ok = false
-			}
-			return invoke.Grant{V2Tool: ok, HasSession: true, Subject: subject, AgentID: agentID, Provider: provider, ConnectorID: connectorID, Capabilities: capabilities, TenantID: tenantID, WorkspaceID: workspaceID}, nil
-		}
-		g, id, err := local.AuthorizeConnector(ctx, pdp.Request{
-			Session:  c.Session,
-			Resource: c.Resource, AgentID: c.AgentID,
-			Connector: &pdp.ConnectorTarget{ConnectorID: c.ConnectorID, Capability: c.Capability},
-		})
-		if err != nil {
-			return invoke.Grant{}, err
-		}
-		out := invoke.Grant{Allow: g.Allow, ReasonCode: g.ReasonCode, Reason: g.Reason, Enrollment: g.Enrollment, HasSession: g.HasSession}
-		if g.HasSession && g.Subject.Status == pdp.StatusLinked {
-			out.Subject = g.Subject.UserID
-		}
-		if g.Connector != nil {
-			out.Provider = g.Connector.Provider
-			for _, capability := range g.Connector.Capabilities {
-				out.Capabilities = append(out.Capabilities, capability.Name)
-			}
-		}
-		if id != nil && id.WorkspaceID != nil {
-			out.TenantID, out.WorkspaceID = id.OrgID, *id.WorkspaceID
-		}
-		return out, nil
-	}
 }
 
 // newServeHandlers builds the TCP handler and the Unix socket handler (the

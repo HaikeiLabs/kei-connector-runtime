@@ -32,8 +32,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 )
 
@@ -65,6 +67,9 @@ type Daemon struct {
 	UseCredential func(ctx context.Context, session, subject, provider string, fn func(token string) error) error
 	AppendAudit   func([]byte) error
 	AuditCrypto   *auditcrypto.Provider
+	// Secrets resolves references to opaque_ref connectors from the bundle's
+	// connector descriptors (HAI-378).
+	Secrets invoke.SecretResolver
 }
 
 // daemonRunRequest is the route's body. Env is the caller's environment as
@@ -155,11 +160,14 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = frames.write(runFrame{Done: &done})
 }
 
-// resolvedRef is one authorized reference waiting for its credential.
+// resolvedRef is one authorized reference waiting for its credential: the
+// session's OAuth credential for provider, or the tenant-stored secret of an
+// opaque_ref descriptor.
 type resolvedRef struct {
 	key      string
 	ref      connectorCredentialRef
 	provider string
+	secret   *policybundle.Connector
 }
 
 func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest, frames *frameWriter) runDone {
@@ -212,12 +220,22 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 			return deny(grant.ReasonCode, grant.Reason, 1, connectorIDs, fields)
 		case grant.Subject == "" || (subject != "" && grant.Subject != subject):
 			return deny("subject_unlinked", "the session subject is not linked", 1, connectorIDs, fields)
-		case grant.Provider == "":
-			return deny("unresolved_reference", "the policy bundle does not describe this connector", 1, connectorIDs, fields)
-		case !invoke.IsSessionProvider(grant.Provider):
-			return deny("credential_source_not_supported", "the daemon resolves only the session's own OAuth connections", 1, connectorIDs, fields)
-		case !sessionCredentialFields[ref.field]:
-			return deny("unresolved_reference", "a session credential provides only the token field", 1, connectorIDs, fields)
+		}
+		if grant.Descriptors {
+			secret, code, reason := descriptorReference(grant.Connector, ref)
+			if code != "" {
+				return deny(code, reason, 1, connectorIDs, fields)
+			}
+			refs[i].secret = secret
+		} else {
+			switch {
+			case grant.Provider == "":
+				return deny("unresolved_reference", "the policy bundle does not describe this connector", 1, connectorIDs, fields)
+			case !invoke.IsSessionProvider(grant.Provider):
+				return deny("credential_source_not_supported", "the daemon resolves only the session's own OAuth connections", 1, connectorIDs, fields)
+			case !sessionCredentialFields[ref.field]:
+				return deny("unresolved_reference", "a session credential provides only the token field", 1, connectorIDs, fields)
+			}
 		}
 		subject, refs[i].provider = grant.Subject, grant.Provider
 	}
@@ -253,11 +271,44 @@ func (d *Daemon) withCredentials(ctx context.Context, sessionID, subject string,
 			fn(env, secrets)
 			return nil
 		}
-		return d.UseCredential(ctx, sessionID, subject, refs[i].provider, func(token string) error {
+		use := func(token string) error {
 			return enter(i+1, append(env, refs[i].key+"="+token), append(secrets, token))
-		})
+		}
+		if refs[i].secret != nil {
+			return invoke.UseSecret(ctx, d.Secrets, *refs[i].secret, use)
+		}
+		return d.UseCredential(ctx, sessionID, subject, refs[i].provider, use)
 	}
 	return enter(0, append([]string(nil), env...), nil)
+}
+
+// descriptorReference checks a kei://connectors reference against the
+// connector's bundle descriptor (ADR-034, HAI-378). It returns the descriptor
+// whose tenant-stored secret fills the reference, nil for the session's own
+// OAuth credential, or a denial code and reason.
+func descriptorReference(c *policybundle.Connector, ref connectorCredentialRef) (*policybundle.Connector, string, string) {
+	if c == nil || c.ID != ref.connectorID {
+		return nil, "descriptor_invalid", "the policy bundle has no descriptor for this connector"
+	}
+	if contract.AccountModel(c.AccountModel) == contract.AccountModelDomainDelegation {
+		return nil, "account_model_not_supported", "domain-wide delegation is not executed yet"
+	}
+	switch contract.CredentialSource(c.CredentialSource) {
+	case contract.CredentialSourceOAuth:
+		if contract.AccountModel(c.AccountModel) != contract.AccountModelPerUser {
+			return nil, "credential_source_not_supported", "the daemon resolves oauth connectors only with the session's own connection"
+		}
+		if !sessionCredentialFields[ref.field] {
+			return nil, "unresolved_reference", "a session credential provides only the token field"
+		}
+		return nil, "", ""
+	case contract.CredentialSourceOpaqueRef:
+		if c.CredentialRef != "kei://connectors/"+ref.connectorID+"/"+ref.field {
+			return nil, "unresolved_reference", "the reference does not name the connector's credential field"
+		}
+		return c, "", ""
+	}
+	return nil, "descriptor_invalid", "the descriptor's credential source is not supported"
 }
 
 // spawn runs argv with exactly env in dir, streaming redacted output as

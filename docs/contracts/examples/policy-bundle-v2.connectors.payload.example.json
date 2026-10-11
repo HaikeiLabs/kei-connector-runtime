@@ -1,0 +1,161 @@
+{
+  "schema": "kei.policy-bundle/v2",
+  "bundle_id": "bundle-v2-connectors-fixture",
+  "bundle_version": 3,
+  "policy_revision": 8,
+  "issuer": "kei-policy-catalog",
+  "audience": {
+    "installation_id": "inst-v2",
+    "org_id": "org-v2",
+    "workspace_id": "ws-v2"
+  },
+  "issued_at": "2026-10-05T12:00:00Z",
+  "not_after": "2026-10-05T23:00:00Z",
+  "refresh": {
+    "poll_interval_seconds": 60,
+    "stale_after_seconds": 300
+  },
+  "subject_resolution": {
+    "mode": "bundle",
+    "max_cache_seconds": 30
+  },
+  "policy_set": {
+    "schema": "kei.policy-set/v2",
+    "org_id": "org-v2",
+    "workspace_id": "ws-v2",
+    "match_semantics": "kei.match/v2",
+    "evaluation": {
+      "precedence": [
+        "priority_desc",
+        "deny_before_permit",
+        "policy_id_asc"
+      ],
+      "checks": "per_capability_first_match_and",
+      "default": "deny"
+    },
+    "tools": [],
+    "connectors": [
+      {
+        "id": "conn-crm",
+        "name": "crm",
+        "provider": "http_api",
+        "capabilities": [
+          {
+            "name": "http.get",
+            "mutating": false
+          },
+          {
+            "name": "http.patch",
+            "mutating": true
+          },
+          {
+            "name": "http.post",
+            "mutating": true
+          }
+        ],
+        "credential_source": "opaque_ref",
+        "account_model": "shared",
+        "credential_ref": "kei://connectors/conn-crm/api_key",
+        "credential_backend": "aws-secrets-manager",
+        "http_api": {
+          "registered_base_url": "https://crm.example.invalid/api",
+          "registered_hostname": "crm.example.invalid",
+          "allowed_methods": [
+            "GET",
+            "POST",
+            "PATCH"
+          ],
+          "allowed_path_patterns": [
+            "/leads/*",
+            "/customers/*"
+          ],
+          "query_allowlist": [
+            "limit",
+            "cursor"
+          ],
+          "request_max_bytes": 65536,
+          "response_max_bytes": 1048576,
+          "timeout_ms": 10000,
+          "allow_redirects": false,
+          "max_redirects": 0,
+          "allow_cross_host_redirects": false,
+          "credential_injection": {
+            "location": "header",
+            "name": "Authorization",
+            "scheme": "Bearer"
+          },
+          "redaction": {
+            "headers": [
+              "Authorization"
+            ],
+            "query_parameters": [],
+            "response_fields": [
+              "email",
+              "phone"
+            ]
+          }
+        }
+      },
+      {
+        "id": "conn-github",
+        "name": "github",
+        "provider": "github",
+        "capabilities": [
+          {
+            "name": "repository.read",
+            "mutating": false
+          }
+        ],
+        "credential_source": "oauth",
+        "account_model": "per_user"
+      }
+    ],
+    "checks": [],
+    "tool_policies": [],
+    "harness_match_semantics": "kei.harness-match/v1",
+    "harness_policies": []
+  },
+  "agent_connector_bindings": [
+    {
+      "agent_id": "agent-chat",
+      "connector_id": "conn-crm",
+      "capabilities": [
+        "http.get",
+        "http.post"
+      ]
+    },
+    {
+      "agent_id": "agent-chat",
+      "connector_id": "conn-github",
+      "capabilities": [
+        "repository.read"
+      ]
+    }
+  ],
+  "agent_model_profiles": [
+    {
+      "agent_id": "agent-chat",
+      "profile_id": "profile-gpt",
+      "status": "active"
+    },
+    {
+      "agent_id": "agent-review",
+      "profile_id": "profile-claude",
+      "status": "disabled"
+    }
+  ],
+  "identities": [
+    {
+      "source": "discord",
+      "external_id": "discord-user-123",
+      "user_id": "kei-user-123",
+      "status": "linked",
+      "groups": [
+        "members"
+      ],
+      "org_roles": [
+        "member"
+      ]
+    }
+  ]
+}

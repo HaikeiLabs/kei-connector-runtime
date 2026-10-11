@@ -105,6 +105,8 @@ type v2PolicySet struct {
 	ToolPolicies          []v2Check         `json:"tool_policies"`
 	HarnessMatchSemantics string            `json:"harness_match_semantics"`
 	HarnessPolicies       []v2HarnessPolicy `json:"harness_policies"`
+	// Connectors is the optional descriptor section (HAI-378); see Connector.
+	Connectors []Connector `json:"connectors,omitempty"`
 }
 
 // v2HarnessPolicy is one ADR-029 harness policy row as the catalog emits it

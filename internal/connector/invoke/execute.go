@@ -8,6 +8,7 @@ package invoke
 // contract reason code and no data.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,6 +37,8 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/linear"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/notion"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/tito"
+	runtimecredentials "github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
 const (
@@ -53,6 +56,82 @@ type Descriptor struct {
 	// CredentialSecretRef is where the control plane's connector secret
 	// delivery wrote the credential (HAI-262), when it did.
 	CredentialSecretRef string `json:"credential_secret_ref,omitempty"`
+}
+
+// SecretResolver resolves an opaque_ref bundle descriptor's credential inside
+// the serve daemon (ADR-034, HAI-378 amendment). The descriptor names only a
+// kei://connectors/<id>/<field> reference and a backend kind; the
+// backend-qualified location comes from the connector reference index that
+// `kei-proxy credential sync` wrote, and the value from the tenant secret
+// store, read with the runtime's own cloud identity. The value is returned to
+// the caller that applies it to the provider request and is never logged,
+// encoded, or part of an error.
+type SecretResolver struct {
+	// IndexPath is the connector reference index (credentials.ConnectorIndexPath).
+	IndexPath string
+	Store     credentials.Store
+	// Timeout bounds one secret-store read; zero means credentials.DefaultTimeout.
+	Timeout time.Duration
+}
+
+// SecretError is a fail-closed descriptor credential outcome with a reason
+// code from the ADR-034 failure table. It never carries a reference or value.
+type SecretError struct {
+	Code   string
+	Reason string
+}
+
+func (e *SecretError) Error() string { return e.Code + ": " + e.Reason }
+
+const connectorRefPrefix = "kei://connectors/"
+
+// ParseConnectorRef splits a kei://connectors/<connector id>/<field> reference.
+func ParseConnectorRef(ref string) (connectorID, field string, ok bool) {
+	rest, found := strings.CutPrefix(ref, connectorRefPrefix)
+	if !found {
+		return "", "", false
+	}
+	connectorID, field, found = strings.Cut(rest, "/")
+	if !found || connectorID == "" || field == "" || strings.Contains(field, "/") {
+		return "", "", false
+	}
+	return connectorID, field, true
+}
+
+// Resolve returns the credential value for descriptor c, or a *SecretError.
+// Nothing is retried, and no other backend is tried.
+func (r SecretResolver) Resolve(ctx context.Context, c policybundle.Connector) (string, error) {
+	if contract.CredentialSource(c.CredentialSource) != contract.CredentialSourceOpaqueRef {
+		return "", &SecretError{"descriptor_invalid", "the connector does not use a tenant-stored credential"}
+	}
+	connectorID, field, ok := ParseConnectorRef(c.CredentialRef)
+	if !ok || connectorID != c.ID || c.CredentialBackend == "" {
+		return "", &SecretError{"descriptor_invalid", "the descriptor's credential reference does not name this connector"}
+	}
+	if r.IndexPath == "" || r.Store == nil {
+		return "", &SecretError{"credential_unavailable", "the connector credential is not available"}
+	}
+	entry, err := runtimecredentials.ReadConnectorReference(r.IndexPath, connectorID, field)
+	if errors.Is(err, runtimecredentials.ErrConnectorReferenceMismatch) {
+		return "", &SecretError{"credential_backend_mismatch", "the delivered credential does not match the descriptor"}
+	}
+	if err != nil {
+		return "", &SecretError{"credential_unavailable", "the connector credential has not been delivered to this runtime"}
+	}
+	if entry.SecretBackend != c.CredentialBackend {
+		return "", &SecretError{"credential_backend_mismatch", "the delivered credential does not match the descriptor"}
+	}
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = credentials.DefaultTimeout
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	value, err := r.Store.Get(lookupCtx, entry.SecretBackend, entry.SecretRef)
+	if err != nil || value == nil || *value == "" {
+		return "", &SecretError{"credential_unavailable", "the connector credential is not available"}
+	}
+	return *value, nil
 }
 
 // connectors maps each provider Kei builds to its connector (contract
@@ -218,8 +297,30 @@ func (e Env) run(ctx context.Context, conn connector.Connector, meta contract.Me
 	if len(result) > maxResultBytes {
 		return status, deny("result_too_large", "result exceeds the size limit")
 	}
+	// A provider that echoes the credential back would carry it out of the
+	// daemon in the result (ADR-034, HAI-378 no-leak rule): fail closed.
+	if carriesCredential(result, credential) {
+		return status, deny("provider_error", "the provider response contained the credential")
+	}
 	exec.result = result
 	return status, nil
+}
+
+// minEchoCheckBytes is the shortest credential checked for in a result;
+// shorter values would match ordinary data.
+const minEchoCheckBytes = 8
+
+// carriesCredential reports whether result contains credential, raw or as it
+// is escaped inside a JSON string.
+func carriesCredential(result []byte, credential string) bool {
+	if len(credential) < minEchoCheckBytes {
+		return false
+	}
+	if bytes.Contains(result, []byte(credential)) {
+		return true
+	}
+	encoded, err := json.Marshal(credential)
+	return err == nil && bytes.Contains(result, encoded[1:len(encoded)-1])
 }
 
 func declaredCapability(meta contract.Metadata, name string) (contract.Capability, bool) {
