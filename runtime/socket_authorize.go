@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,9 @@ type socketAuthorizeRequest struct {
 	DelegationDepth int                       `json:"delegation_depth,omitempty"`
 	Framework       string                    `json:"framework,omitempty"`
 	ToolArgsDigest  string                    `json:"tool_args_digest,omitempty"`
+	// ShellCommand is accepted only over the tenant-local socket and is used
+	// solely to evaluate shell: policies. It is never copied to audit events.
+	ShellCommand string `json:"shell_command,omitempty"`
 }
 
 type socketAuthorizeConnector struct {
@@ -834,9 +838,18 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
 	} else if e := l.evaluator.Load(); e != nil {
 		var err error
-		if e.IsV2HarnessTool(req.Tool) {
+		switch {
+		case req.Tool == "pi.bash":
+			if !validArgumentDigest(req.ToolArgsDigest) {
+				d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
+			} else {
+				d, err = e.AuthorizePiShell(r.Context(), req.ShellCommand, req.AgentID)
+			}
+		case req.ShellCommand != "":
+			d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
+		case e.IsV2HarnessTool(req.Tool):
 			d, err = e.AuthorizeV2HarnessTool(r.Context(), preq)
-		} else {
+		default:
 			d, err = e.Evaluate(r.Context(), preq)
 		}
 		if err != nil {
@@ -917,6 +930,18 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID strin
 	}
 	data, _ := json.Marshal(e)
 	return data
+}
+
+func validArgumentDigest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return false
+	}
+	for _, r := range value[len("sha256:"):] {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func jsonJSONObject(raw json.RawMessage) bool {

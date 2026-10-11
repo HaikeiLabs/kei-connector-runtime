@@ -7,6 +7,12 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
 )
 
+func init() {
+	// Pi uses the same argv-prefix shell policy dialect as the other local
+	// coding harnesses. Register its source kind with the shared matcher.
+	harnessmatch.Kinds["pi"] = true
+}
+
 // HarnessCall is one tool call of a pre-built harness, described by the
 // inputs kei.harness-match/v1 matches on (ADR-029 §1.2, §1.3).
 type HarnessCall = harnessmatch.Call
