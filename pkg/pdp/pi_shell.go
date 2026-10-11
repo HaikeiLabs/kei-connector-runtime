@@ -9,35 +9,45 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-// AuthorizePiShell applies harness shell-prefix policies to one deliberately
-// small shell grammar. Unsupported shell syntax fails closed.
-func (e *Evaluator) AuthorizePiShell(ctx context.Context, command, agentID string) (Decision, error) {
+// AuthorizePiShell applies v2 shell-prefix policies to one deliberately small
+// shell grammar. Subject and membership come only from the live local session
+// and verified bundle; agentID must be the daemon's trusted default assignment.
+func (e *Evaluator) AuthorizePiShell(ctx context.Context, sessionID, command, agentID string) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
+	}
+	if live, reason := e.sessionLive(sessionID); !live {
+		return sessionDenial(reason), nil
+	}
+	if e.sessions == nil {
+		return Decision{ReasonCode: ReasonSessionNotFound, DenySource: "identity", Reason: "the session subject is unavailable"}, nil
+	}
+	current, ok := e.sessions.Get(sessionID)
+	if !ok {
+		return Decision{ReasonCode: ReasonSessionNotFound, DenySource: "identity", Reason: "the session subject is unavailable"}, nil
+	}
+	if agentID == "" {
+		return Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}, nil
 	}
 	argv, ok := parseSimpleShellCommand(command)
 	if !ok {
 		return Decision{ReasonCode: "unsupported_shell_syntax", DenySource: "policy", Reason: "command is not one supported simple shell command"}, nil
 	}
-	result, err := e.EvaluateHarness(ctx, HarnessCall{Kind: "pi", AgentID: agentID, Argv: argv})
+	v, state, err := e.check()
 	if err != nil {
-		return Decision{}, err
+		return stateDenial(state), nil
 	}
-	d := Decision{PolicyID: result.PolicyID, ReasonCode: result.Reason, DenySource: "policy"}
-	switch result.Outcome {
-	case policybundle.HarnessPermit:
-		d.Allow = true
-	case policybundle.HarnessDeny:
-		d.ReasonCode = "policy_deny"
-	case policybundle.HarnessUnmatched:
-		d.ReasonCode = "policy_unmatched"
-		d.Reason = "no matching shell policy"
-	default:
-		d.ReasonCode = "shell_policy_unavailable"
-		d.Reason = "shell policy could not be evaluated"
-		d.DenySource = "runtime_state"
+	subject := &policybundle.SessionSubject{
+		UserID: current.UserID, Email: current.Email, Source: current.Source,
+		ExternalID: current.ExternalID, Groups: current.Groups, Status: string(current.Status),
 	}
-	return d, nil
+	decision := v.EvaluateV2PiShell(argv, agentID, subject, e.now().UTC())
+	return Decision{
+		Allow: decision.Outcome == "allow", Reason: decision.Reason, ReasonCode: decision.ReasonCode,
+		DenySource: denySource(decision.ReasonCode), PolicyID: decision.PolicyID,
+		BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest,
+		PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state),
+	}, nil
 }
 
 // parseSimpleShellCommand tokenizes words with single/double quotes and

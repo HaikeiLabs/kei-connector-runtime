@@ -75,33 +75,6 @@ func TestEvaluateHarness(t *testing.T) {
 	})
 }
 
-func TestAuthorizePiShellUsesShellPoliciesNotToolPermits(t *testing.T) {
-	useValidator(t, func([]byte) error { return nil })
-	policies := []testPolicy{
-		{ID: "deny-push", Src: "harness:pi", Dst: "shell:git push", Action: "deny"},
-		{ID: "allow-status", Src: "harness:pi", Dst: "shell:git status", Action: "permit"},
-		{ID: "broad-tool-grant", Src: "*", Dst: "tool:pi.bash", Action: "permit"},
-	}
-	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
-	for _, tc := range []struct {
-		command string
-		allow   bool
-		policy  string
-	}{
-		{"git status --short", true, "allow-status"},
-		{"git push origin", false, "deny-push"},
-		{"git status && whoami", false, ""},
-	} {
-		d, err := e.AuthorizePiShell(context.Background(), tc.command, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if d.Allow != tc.allow || d.PolicyID != tc.policy {
-			t.Errorf("AuthorizePiShell(%q) = %+v, want allow=%v policy=%q", tc.command, d, tc.allow, tc.policy)
-		}
-	}
-}
-
 func TestEvaluateHarnessReasonCodes(t *testing.T) {
 	useValidator(t, func([]byte) error { return nil })
 

@@ -842,8 +842,12 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		case req.Tool == "pi.bash":
 			if !validArgumentDigest(req.ToolArgsDigest) {
 				d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
+			} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
+				d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
 			} else {
-				d, err = e.AuthorizePiShell(r.Context(), req.ShellCommand, req.AgentID)
+				// Never use the caller's optional AgentID; the authenticated
+				// runtime identity supplies the installation's assigned default.
+				d, err = e.AuthorizePiShell(r.Context(), sessionID, req.ShellCommand, identity.AgentID)
 			}
 		case req.ShellCommand != "":
 			d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
@@ -859,7 +863,15 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 	}
 	resp := socketAuthorizeResponseForDecision(d, includeEnrollment)
 	if l.emit != nil {
-		data := l.decisionEventJSON(req, sessionID, d)
+		auditReq := req
+		if req.Tool == "pi.bash" {
+			// The request's AgentID is untrusted. Record the same assigned
+			// default identity used for the shell policy decision.
+			if identity := l.identity.Load(); identity != nil {
+				auditReq.AgentID = identity.AgentID
+			}
+		}
+		data := l.decisionEventJSON(auditReq, sessionID, d)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
