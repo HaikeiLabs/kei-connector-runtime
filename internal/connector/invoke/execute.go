@@ -1,6 +1,6 @@
 package invoke
 
-// Tenant-side execution of an allowed connector read
+// Tenant-side execution of an allowed connector call
 // (docs/connector-execution-contract.md). On a catalog allow the runtime
 // checks the descriptor against the request, decodes the input strictly,
 // resolves the credential by exactly one path, runs the provider's connector
@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/access"
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-contracts/setup"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector"
@@ -113,6 +114,7 @@ func (e Env) execute(ctx context.Context, req Request, raw json.RawMessage, resp
 	exec.provider, exec.meta, exec.invocation = meta.Provider, &meta, &inv
 	if meta.ID != req.ConnectorID || inv.ConnectorID != req.ConnectorID || inv.Capability != req.Capability ||
 		string(inv.Action) != req.Action || inv.Resource != req.Resource || inv.TraceID != req.TraceID ||
+		inv.IdempotencyKey != req.IdempotencyKey ||
 		inv.TenantID != meta.TenantID || inv.WorkspaceID != meta.WorkspaceID {
 		return exec, deny("descriptor_invalid", "descriptor does not match the request")
 	}
@@ -157,8 +159,17 @@ func (e Env) prepare(req Request, raw json.RawMessage, meta contract.Metadata, i
 	if !ok {
 		return nil, nil, deny("descriptor_invalid", "capability is not declared on the connector")
 	}
-	if capability.Action != contract.ActionRead && meta.Provider != contract.ProviderCRM {
-		return nil, nil, deny("capability_not_supported", "only read capabilities are executed")
+	// Writes run only where the contract's api mode lists them (every crm
+	// write; linear issue.create and comment.create). A Linear write needs an
+	// idempotency key: the connector derives the new entity's id from it, so
+	// a replay cannot create a duplicate (contract section 10).
+	if capability.Action != contract.ActionRead {
+		if !access.APIWrite(meta.Provider, capability.Name) {
+			return nil, nil, deny("capability_not_supported", "this write capability is not executed")
+		}
+		if meta.Provider != contract.ProviderCRM && inv.IdempotencyKey == "" {
+			return nil, nil, deny("input_invalid", "writes require an idempotency key")
+		}
 	}
 	if meta.AccountModel == contract.AccountModelDomainDelegation {
 		return nil, nil, deny("account_model_not_supported", "domain-wide delegation is not executed yet")

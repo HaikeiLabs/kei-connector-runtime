@@ -289,3 +289,31 @@ func TestDecodeRejectsInvalidGrafanaInput(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeLinearWrites(t *testing.T) {
+	in, err := Decode("linear", "issue.create", []byte(`{"team_id":"ENG","title":"Crash","description":"d","priority":1}`))
+	if err != nil {
+		t.Fatalf("issue.create: %v", err)
+	}
+	issue := in.(LinearIssueCreate)
+	if issue.TeamID != "ENG" || issue.Title != "Crash" || issue.Priority == nil || *issue.Priority != 1 {
+		t.Fatalf("issue.create = %+v", issue)
+	}
+	if c, err := Decode("linear", "comment.create", []byte(`{"issue_id":"ENG-1","body":"b"}`)); err != nil || c.(LinearCommentCreate).IssueID != "ENG-1" {
+		t.Fatalf("comment.create = %+v, %v", c, err)
+	}
+	for _, tc := range []struct{ capability, raw string }{
+		{"issue.create", `{"title":"t"}`},
+		{"issue.create", `{"team_id":"ENG","title":""}`},
+		{"issue.create", `{"team_id":"ENG","title":"t","priority":5}`},
+		{"issue.create", `{"team_id":"ENG","title":"t","labels":"bug"}`},
+		{"issue.create", `{"team_key":"ENG","title":"t"}`},
+		{"comment.create", `{"issue_id":"ENG-1"}`},
+		{"comment.create", `{"issue_id":"ENG-1","body":"b","team_id":"ENG"}`},
+		{"issue.update", `{}`},
+	} {
+		if _, err := Decode("linear", tc.capability, []byte(tc.raw)); err == nil {
+			t.Errorf("%s %s decoded", tc.capability, tc.raw)
+		}
+	}
+}
