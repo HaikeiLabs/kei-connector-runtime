@@ -1,10 +1,12 @@
 package connectorruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
@@ -146,6 +149,124 @@ func shortSocketTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+func TestPiAuthorizeDecisionUsesDefaultSpoolAndShipsDigestOnly(t *testing.T) {
+	var shipped string
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/audit/flush" {
+			t.Errorf("flush path = %q", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read flush body: %v", err)
+		}
+		shipped = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"upserted":1}`)
+	}))
+	defer controlPlane.Close()
+
+	stateDir := t.TempDir()
+	cfg := Config{
+		RuntimeToken:           "kh_live_runtime_token_1234567890",
+		RuntimeControlPlaneURL: controlPlane.URL,
+		RuntimeStateDir:        stateDir,
+		AuditMaxBytes:          defaultAuditMaxBytes,
+	}
+	local, err := newServeLocalPDP(cfg, serveSeams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	_, socketHandler := newServeHandlers(cfg, local)
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"pi.shell","framework":"pi","tool_args_digest":"sha256:0123456789abcdef","resource":"command"}`))
+	req.Header.Set("Authorization", "Bearer kh_live_runtime_token_1234567890")
+	resp := httptest.NewRecorder()
+	socketHandler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("authorize status = %d: %s", resp.Code, resp.Body.String())
+	}
+
+	auditPath := filepath.Join(stateDir, "audit", "harness-tool.jsonl")
+	spool, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read default decision spool %s: %v", auditPath, err)
+	}
+	if !strings.Contains(string(spool), `"framework":"pi"`) || !strings.Contains(string(spool), `"tool_name":"pi.shell"`) || !strings.Contains(string(spool), `"tool_args_digest":"sha256:0123456789abcdef"`) {
+		t.Fatalf("spool missing Pi decision metadata: %s", spool)
+	}
+	if strings.Contains(string(spool), "raw command") || strings.Contains(string(spool), `"command":`) {
+		t.Fatalf("spool contains raw command data: %s", spool)
+	}
+
+	collector := keiruntime.NewCollector(auditPath, keiruntime.NewABACFlushClientFromConfig(cfg, time.Second), 100)
+	if _, err := collector.Run(context.Background()); err != nil {
+		t.Fatalf("ship decision audit: %v", err)
+	}
+	if !strings.Contains(shipped, `"framework":"pi"`) || !strings.Contains(shipped, `"tool_name":"pi.shell"`) || !strings.Contains(shipped, `"tool_args_digest":"sha256:0123456789abcdef"`) {
+		t.Fatalf("shipped payload missing Pi decision metadata: %s", shipped)
+	}
+	if strings.Contains(shipped, "raw command") || strings.Contains(shipped, `"command":`) {
+		t.Fatalf("shipped payload contains raw command data: %s", shipped)
+	}
+}
+
+func TestPiAuthorizeAppendFailureIsLoggedWithoutDecisionPayload(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "audit"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		RuntimeToken:           "kh_live_runtime_token_1234567890",
+		RuntimeControlPlaneURL: "https://kei.example",
+		RuntimeStateDir:        stateDir,
+		AuditMaxBytes:          defaultAuditMaxBytes,
+	}
+	local, err := newServeLocalPDP(cfg, serveSeams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	_, socketHandler := newServeHandlers(cfg, local)
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"pi.shell","framework":"pi","tool_args_digest":"sha256:0123456789abcdef"}`))
+	req.Header.Set("Authorization", "Bearer kh_live_runtime_token_1234567890")
+	resp := httptest.NewRecorder()
+	socketHandler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("authorize status = %d: %s", resp.Code, resp.Body.String())
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, "runtime decision audit append failed") || !strings.Contains(logOutput, filepath.Join(stateDir, "audit", "harness-tool.jsonl")) {
+		t.Fatalf("append failure not observable in safe diagnostic: %s", logOutput)
+	}
+	if strings.Contains(logOutput, "sha256:0123456789abcdef") || strings.Contains(logOutput, `"tool_name"`) || strings.Contains(logOutput, `"command":`) {
+		t.Fatalf("audit error log leaked decision payload: %s", logOutput)
+	}
+}
+
+func TestDefaultAuditPathUsesConfiguredPlatformStateDirectory(t *testing.T) {
+	t.Setenv("KEI_RUNTIME_STATE_DIR", "")
+	t.Setenv("KEI_PROXY_AUDIT", "")
+	cfg := configFromEnv()
+	wantStateDir := statedir.DefaultPathOS()
+	if cfg.RuntimeStateDir != wantStateDir {
+		t.Fatalf("runtime state dir = %q, want platform default %q", cfg.RuntimeStateDir, wantStateDir)
+	}
+	wantAuditPath := filepath.Join(wantStateDir, "audit", "harness-tool.jsonl")
+	if got := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir); got != wantAuditPath {
+		t.Fatalf("default audit path = %q, want %q", got, wantAuditPath)
+	}
+	override := filepath.Join(t.TempDir(), "explicit-audit.jsonl")
+	if got := keiruntime.ResolveAuditPath(override, cfg.RuntimeStateDir); got != override {
+		t.Fatalf("explicit audit override = %q, want %q", got, override)
+	}
 }
 
 func TestSocketAuthorizeUsesOwnerOnlySocketWithoutRuntimeToken(t *testing.T) {

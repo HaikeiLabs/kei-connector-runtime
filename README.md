@@ -158,7 +158,12 @@ flags. The retired `--key` and `--harness-key` inputs are not supported.
 
 `authorize` appends one JSON line per decision to `KEI_PROXY_AUDIT`, and
 `kei-proxy collector` ships those lines to the catalog's audit flush endpoint.
-The spool is bounded (ADR-022):
+When `KEI_PROXY_AUDIT` is unset, `kei-proxy serve` appends local `/v1/authorize`
+decisions to `$KEI_RUNTIME_STATE_DIR/audit/harness-tool.jsonl` (or the platform
+default runtime state directory) and runs its in-process collector against the
+same path. An explicit `KEI_PROXY_AUDIT` path overrides this default. Decision
+events retain the framework, tool, and argument digest; raw command/tool input
+is not recorded. The spool is bounded (ADR-022):
 
 - **Cap.** The active file plus its sealed segments never exceed
   `KEI_PROXY_AUDIT_MAX_BYTES` (default 104857600, 100 MiB). The active file is
