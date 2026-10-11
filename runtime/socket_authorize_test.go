@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -555,6 +557,76 @@ func bundleWithPolicy(t *testing.T, ids []policybundle.Identity, policies string
 		"agent_connector_bindings":[],
 		"identities":%s
 	}`, now.Format(time.RFC3339), now.Add(12*time.Hour).Format(time.RFC3339), policies, string(idJSON)))
+}
+
+func TestPiShellAuthorizeUsesTrustedDefaultAgentNotRequestAgentID(t *testing.T) {
+	now := time.Now().UTC()
+	raw, err := os.ReadFile(filepath.Join("..", "internal", "policybundle", "testdata", "catalog-v2-bundle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle map[string]any
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	bundle["issued_at"] = now.Format(time.RFC3339Nano)
+	bundle["not_after"] = now.Add(12 * time.Hour).Format(time.RFC3339Nano)
+	audience := bundle["audience"].(map[string]any)
+	audience["installation_id"], audience["org_id"], audience["workspace_id"] = "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001"
+	identities := bundle["identities"].([]any)
+	identity := identities[0].(map[string]any)
+	identity["source"], identity["external_id"] = "discord", "ext-pi"
+	set := bundle["policy_set"].(map[string]any)
+	set["org_id"], set["workspace_id"] = "org-fixture-0001", "ws-fixture-0001"
+	set["harness_policies"] = []any{map[string]any{
+		"policy_id": "trusted-agent-policy", "name": "trusted default agent shell",
+		"src_pattern": "agent:trusted-default", "dst_pattern": "shell:git status",
+		"action": "permit", "priority": 50,
+		"scope": map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": "trusted-default"},
+	}}
+	raw, err = json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	activateBundle(t, dir, raw)
+	var auditEvent json.RawMessage
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
+	}, func(event json.RawMessage) { auditEvent = append(json.RawMessage(nil), event...) })
+	l.SetIdentity(&keiruntime.Identity{
+		ID: "inst-fixture-0001", OrgID: "org-fixture-0001",
+		WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "trusted-default",
+	})
+	h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-pi"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
+	}
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	body := `{"schema":"kei.authorize-request/v1","tool":"pi.bash","agent_id":"attacker-agent","framework":"pi","shell_command":"git status --short","tool_args_digest":"` + digest + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+	var response struct {
+		Decision string `json:"decision"`
+		PolicyID string `json:"policy_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || response.Decision != "permit" || response.PolicyID != "trusted-agent-policy" {
+		t.Fatalf("request AgentID overrode trusted assignment: status=%d response=%+v body=%s", rec.Code, response, rec.Body.String())
+	}
+	var audit struct {
+		AgentID        string  `json:"agent_id"`
+		ToolArgsDigest *string `json:"tool_args_digest"`
+	}
+	if err := json.Unmarshal(auditEvent, &audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.AgentID != "trusted-default" || audit.ToolArgsDigest == nil || *audit.ToolArgsDigest != digest || strings.Contains(string(auditEvent), "git status --short") {
+		t.Fatalf("audit did not retain trusted agent and digest-only metadata: %s", auditEvent)
+	}
 }
 
 func TestSocketSessionAuthorizeAfterBundleLinkedSession(t *testing.T) {

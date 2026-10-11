@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,9 @@ type socketAuthorizeRequest struct {
 	DelegationDepth int                       `json:"delegation_depth,omitempty"`
 	Framework       string                    `json:"framework,omitempty"`
 	ToolArgsDigest  string                    `json:"tool_args_digest,omitempty"`
+	// ShellCommand is accepted only over the tenant-local socket and is used
+	// solely to evaluate shell: policies. It is never copied to audit events.
+	ShellCommand string `json:"shell_command,omitempty"`
 }
 
 type socketAuthorizeConnector struct {
@@ -834,9 +838,22 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
 	} else if e := l.evaluator.Load(); e != nil {
 		var err error
-		if e.IsV2HarnessTool(req.Tool) {
+		switch {
+		case req.Tool == "pi.bash":
+			if !validArgumentDigest(req.ToolArgsDigest) {
+				d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
+			} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
+				d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+			} else {
+				// Never use the caller's optional AgentID; the authenticated
+				// runtime identity supplies the installation's assigned default.
+				d, err = e.AuthorizePiShell(r.Context(), sessionID, req.ShellCommand, identity.AgentID)
+			}
+		case req.ShellCommand != "":
+			d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
+		case e.IsV2HarnessTool(req.Tool):
 			d, err = e.AuthorizeV2HarnessTool(r.Context(), preq)
-		} else {
+		default:
 			d, err = e.Evaluate(r.Context(), preq)
 		}
 		if err != nil {
@@ -846,7 +863,15 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 	}
 	resp := socketAuthorizeResponseForDecision(d, includeEnrollment)
 	if l.emit != nil {
-		data := l.decisionEventJSON(req, sessionID, d)
+		auditReq := req
+		if req.Tool == "pi.bash" {
+			// The request's AgentID is untrusted. Record the same assigned
+			// default identity used for the shell policy decision.
+			if identity := l.identity.Load(); identity != nil {
+				auditReq.AgentID = identity.AgentID
+			}
+		}
+		data := l.decisionEventJSON(auditReq, sessionID, d)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -917,6 +942,18 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID strin
 	}
 	data, _ := json.Marshal(e)
 	return data
+}
+
+func validArgumentDigest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return false
+	}
+	for _, r := range value[len("sha256:"):] {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func jsonJSONObject(raw json.RawMessage) bool {
