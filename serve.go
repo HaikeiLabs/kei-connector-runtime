@@ -221,7 +221,9 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		if auditPath == "" {
 			return
 		}
-		_ = keiruntime.NewAuditSpool(auditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data)
+		if err := keiruntime.NewAuditSpool(auditPath, cfg.AuditMaxBytes).Append(keiruntime.EventClassDecision, data); err != nil {
+			slog.Error("runtime decision audit append failed", "path", auditPath, "error", err)
+		}
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
 	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
