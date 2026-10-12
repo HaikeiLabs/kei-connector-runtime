@@ -254,6 +254,7 @@ var emptyInput = map[string]bool{
 	"discord/thread.list": true, "discord/message.read": true, "discord/role.list": true,
 	"grafana/folder.read": true, "grafana/dashboard.read": true, "grafana/datasource.list": true,
 	"grafana/datasource.read": true, "grafana/alert_rule.list": true,
+	"skills_repo/skills.list": true, "skills_repo/skills.fetch": true,
 }
 
 // Decode strictly decodes a canonical input for one provider capability.

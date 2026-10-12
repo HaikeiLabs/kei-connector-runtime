@@ -37,6 +37,14 @@ type Connector interface {
 	Execute(ctx context.Context, call Call) (any, error)
 }
 
+// ResultLimiter is implemented by a connector whose results for a capability
+// may exceed the invoke flow's default result limit (for example an inline
+// archive). MaxResultBytes returns that capability's limit, or 0 for the
+// default; the invoke flow still applies its own ceiling.
+type ResultLimiter interface {
+	MaxResultBytes(capability string) int
+}
+
 var (
 	// ErrConfig means the connector's descriptor lacks what execution needs
 	// (reason code descriptor_invalid).

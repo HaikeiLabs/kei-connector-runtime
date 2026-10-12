@@ -36,6 +36,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/linear"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/notion"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/skillsrepo"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/tito"
 	runtimecredentials "github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
@@ -44,8 +45,11 @@ import (
 const (
 	maxProviderResponseBytes = 4 << 20
 	maxResultBytes           = 1 << 20
-	catalogTimeout           = 10 * time.Second
-	providerTimeout          = 15 * time.Second
+	// maxConnectorResultBytes caps a connector's own result limit
+	// (connector.ResultLimiter), whatever it declares.
+	maxConnectorResultBytes = 12 << 20
+	catalogTimeout          = 10 * time.Second
+	providerTimeout         = 15 * time.Second
 )
 
 // Descriptor is the catalog's non-secret connector metadata on an allow, plus
@@ -139,16 +143,17 @@ func (r SecretResolver) Resolve(ctx context.Context, c policybundle.Connector) (
 // resolved.
 func (e Env) connectors() map[contract.Provider]connector.Connector {
 	return map[contract.Provider]connector.Connector{
-		contract.ProviderGmail:   gmail.Connector{},
-		contract.ProviderGoogle:  googledrive.Connector{},
-		contract.ProviderLinear:  linear.Connector{},
-		contract.ProviderGitHub:  github.Connector{},
-		contract.ProviderTito:    tito.Connector{},
-		contract.ProviderNotion:  notion.Connector{},
-		contract.ProviderDiscord: discord.Connector{},
-		contract.ProviderGrafana: grafana.Connector{},
-		contract.ProviderCRM:     crm.Connector{Store: e.Store, Key: e.AssertionKey},
-		contract.ProviderHTTPAPI: httpapi.Connector{},
+		contract.ProviderGmail:      gmail.Connector{},
+		contract.ProviderGoogle:     googledrive.Connector{},
+		contract.ProviderLinear:     linear.Connector{},
+		contract.ProviderGitHub:     github.Connector{},
+		contract.ProviderTito:       tito.Connector{},
+		contract.ProviderNotion:     notion.Connector{},
+		contract.ProviderDiscord:    discord.Connector{},
+		contract.ProviderGrafana:    grafana.Connector{},
+		contract.ProviderCRM:        crm.Connector{Store: e.Store, Key: e.AssertionKey},
+		contract.ProviderHTTPAPI:    httpapi.Connector{},
+		contract.ProviderSkillsRepo: skillsrepo.Connector{},
 	}
 }
 
@@ -294,7 +299,7 @@ func (e Env) run(ctx context.Context, conn connector.Connector, meta contract.Me
 	if err != nil {
 		return status, deny("provider_error", "result could not be encoded")
 	}
-	if len(result) > maxResultBytes {
+	if len(result) > resultLimit(conn, inv.Capability) {
 		return status, deny("result_too_large", "result exceeds the size limit")
 	}
 	// A provider that echoes the credential back would carry it out of the
@@ -304,6 +309,17 @@ func (e Env) run(ctx context.Context, conn connector.Connector, meta contract.Me
 	}
 	exec.result = result
 	return status, nil
+}
+
+// resultLimit is the largest encoded result conn may return for capability:
+// maxResultBytes, or the connector's own larger limit up to
+// maxConnectorResultBytes.
+func resultLimit(conn connector.Connector, capability string) int {
+	limiter, ok := conn.(connector.ResultLimiter)
+	if !ok {
+		return maxResultBytes
+	}
+	return min(max(limiter.MaxResultBytes(capability), maxResultBytes), maxConnectorResultBytes)
 }
 
 // minEchoCheckBytes is the shortest credential checked for in a result;

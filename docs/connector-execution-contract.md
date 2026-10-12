@@ -40,6 +40,7 @@ is resolved.
 | `notion` | shared secret (path 1): a Notion internal integration token | n/a | supported (HAI-216); OAuth is not offered |
 | `discord` | shared secret (path 1): a Discord bot token | n/a | supported (HAI-310); OAuth is not offered |
 | `grafana` | shared secret (path 1): a Grafana service-account token, against the connector's `grafana.base_url` (`Metadata.Grafana`) | n/a | supported (HAI-311); OAuth is not offered |
+| `skills_repo` | OAuth token proxied by the catalog (path 2): the invoking user's GitHub token; or shared secret (path 1): a GitHub token with read access to the repository's contents | per-user (oauth); n/a (opaque_ref) | supported (HAI-431): reads a workspace's agent skills from a GitHub repository |
 | `s3` | n/a | n/a | **removed**: S3 is storage, not a connector. The runtime denies it; removing the provider code and the catalog CHECK value is a separate ticket. |
 | `freshbooks`, `mercury` | n/a | n/a | not supported (present in `kei-connector-contracts`, not built) |
 
@@ -414,6 +415,7 @@ Only for `gmail` and `google_drive` on a Google Workspace domain.
 | google_drive | yes | yes | yes | per_user |
 | linear | yes | yes | no | per_user |
 | github | yes | yes | no | per_user |
+| skills_repo | yes | no | no | per_user |
 
 Connectors used from chat harnesses (WhatsApp, Discord, Teams) default to
 per-user. Shared and delegation are opt-in by an admin, per connector.
@@ -476,6 +478,8 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | crm | `lead.read` | `leads`, `leads/<id>`, `customers`, `customers/<id>` | `{}` | `{records: [Lead]}` or `{record: Lead}` |
 | crm | `investor.list` (HAI-210) | `investors` | `{stage?: prospect \| contacted \| meeting \| diligence \| committed \| passed, q?: ≤200 chars, limit?: 1-100 (default 20), cursor?: ≤128 chars}`, sent to the Worker as `{"data": <input>}` | `{records: [Investor], next_cursor: string \| null, has_more}` |
 | crm | `investor.read` (HAI-210) | `investors/<id>` | `{}` | `{record: Investor}` |
+| skills_repo | `skills.list` | `skills` | `{}` | `{ref, commit, skills: [{name, version?, description?, harnesses, path}]}`; at most 500 skills, read from the connector's `config` (`repo_url`, `ref`, `subdirectory`) |
+| skills_repo | `skills.fetch` | `skills/<name>` (one segment of letters, digits, `-`, `_`; anything else is `input_invalid` before any provider call) | `{}` | `{skill, commit, format: "tar+gzip", digest: "sha256:<hex>", size, archive}`; `archive` is the base64 encoded skill folder, at most 8 MiB, and must match `size` and `digest` or the call fails closed. Its result limit is the archive bound, not 1 MiB |
 | http_api | `http.get`, `http.head` | the exact request path, e.g. `/contacts/1` (no query) | `{path: string (must equal the resource exactly), query?: {name: [values]} (names must be in query_allowlist)}` | `{status_code, headers, body}`, with headers and JSON fields redacted per the connector's `redaction` rules and the body capped at `response_max_bytes` |
 
 Redaction per capability:
@@ -672,7 +676,9 @@ credential paths), and one package per connector: `gmail`, `googledrive`,
 after the contract's `providers.Guard`), `notion` (the Notion REST backend behind the
 contract's `providers.NotionBackend` seam, since the module has only an
 in-memory one), `crm` (the MarketingSite Worker client and the D3
-assertion signing), and `httpapi` (the governed HTTP executor). Each connector
+assertion signing), `httpapi` (the governed HTTP executor), and
+`skillsrepo` (the contract's skills repository client and GitHub backend,
+plus the archive digest and size check). Each connector
 package wraps its `kei-connector-contracts/providers` client and applies that
 connector's redaction.
 
@@ -712,7 +718,7 @@ unchanged. "Runtime" codes are decided locally. A catalog deny without a
 | `provider_rate_limited` | runtime | Provider 429 |
 | `provider_error` | runtime | Other provider failure; only the status class is recorded |
 | `provider_timeout` | runtime | Provider deadline exceeded |
-| `result_too_large` | runtime | Raw provider response over 4 MiB, or redacted result over 1 MiB |
+| `result_too_large` | runtime | Raw provider response over 4 MiB, or redacted result over 1 MiB (or over the connector's own limit, at most 12 MiB, where it declares one: `skills_repo` `skills.fetch` declares the 8 MiB archive bound) |
 
 Timeouts, all inside the `--timeout` budget (default 30s): catalog 10s,
 credential resolution 5s, provider 15s. Reads are not retried in layer 2,
