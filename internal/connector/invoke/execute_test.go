@@ -775,6 +775,43 @@ func TestConnectorInvokeHTTPAPIGet(t *testing.T) {
 	}
 }
 
+// http_api writes run through the same governed path: the declared JSON
+// body reaches the provider intact beside the shared-secret header, and
+// neither the body nor the secret lands in stdout, stderr, or audit. The
+// runtime sends the canonical input the catalog authorized by digest (sorted
+// keys, numbers as written), so body is already canonical here.
+func TestConnectorInvokeHTTPAPIPostAndPatchSendTheBody(t *testing.T) {
+	const body = `{"amount":1.50,"name":"Ada","note":"private-body-marker","stage":"seed"}`
+	for capability, action := range map[string]string{"http.post": "create", "http.patch": "update"} {
+		t.Run(capability, func(t *testing.T) {
+			h := newExecHarness(t)
+			h.store.values[execBackend+"|"+execSecretRef] = execCRMKey
+			block := strings.Replace(httpAPIBlock, `"allowed_methods":["GET"]`, `"allowed_methods":["GET","POST","PATCH"]`, 1)
+			descriptor := strings.Replace(descriptorJSON("http_api", "opaque_ref", "", "", `[{"name":"http.get","action":"read"},{"name":"http.post","action":"create"},{"name":"http.patch","action":"update"}]`, block),
+				`"allowed_actions":["read"]`, `"allowed_actions":["read","create","update"]`, 1)
+			envelope := strings.Replace(envelopeJSON(capability, action, "/leads", execUser), `"trace_id":`, `"idempotency_key":"idem-1","trace_id":`, 1)
+			h.catalogBody = allowJSON(envelope, descriptor, "")
+			method := strings.ToUpper(strings.TrimPrefix(capability, "http."))
+			h.transport.routes["api.example.com"] = func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				if r.Method != method || r.URL.Path != "/v1/leads" || string(raw) != body || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("X-API-Key") != execCRMKey {
+					t.Errorf("http_api request = %s %s %q %v", r.Method, r.URL, raw, r.Header)
+				}
+				_, _ = io.WriteString(w, `{"id":7}`)
+			}
+			out, code := h.run("--capability", capability, "--action", action, "--resource", "/leads", "--user", execUser, "--idempotency-key", "idem-1", "--input", `{"path":"/leads","body":`+body+`}`)
+			if code != 0 || out["decision"] != "allow" || h.transport.callCount() != 1 {
+				t.Fatalf("outcome = %d %v (stderr %q)", code, out, h.lastStderr)
+			}
+			for name, text := range map[string]string{"stdout": h.lastStdout, "stderr": h.lastStderr, "audit": strings.Join(h.lastAuditLines, "\n")} {
+				if strings.Contains(text, "private-body-marker") {
+					t.Fatalf("%s carried the request body: %s", name, text)
+				}
+			}
+		})
+	}
+}
+
 // The catalog authorizes one resource: the exact request path. The runtime
 // must call that path and no other, or a harness could get an allow for
 // /contacts/1 and read /contacts/999 (HAI-256). A mismatch denies before any

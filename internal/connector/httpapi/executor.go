@@ -9,6 +9,7 @@ package httpapi
 // missing credential all abort the call with an error.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -111,6 +112,11 @@ func (e HTTPExecutor) ExecuteHTTP(ctx context.Context, metadata contract.Metadat
 	if err := contract.ValidateCall(metadata, in); err != nil {
 		return nil, fmt.Errorf("%w: %w", errHTTPInvocationDenied, err)
 	}
+	// The contract caps the request body too; the runtime re-checks before it
+	// resolves a credential so an oversize body never reaches the provider.
+	if int64(len(in.HTTP.Body)) > metadata.HTTPAPI.RequestMaxBytes {
+		return nil, fmt.Errorf("%w: request body exceeds the configured limit", errHTTPInvocationDenied)
+	}
 	if err := contract.ValidateCredentialRef(metadata.CredentialRef); err != nil {
 		return nil, errors.New("invalid credential reference")
 	}
@@ -145,9 +151,17 @@ func (e HTTPExecutor) ExecuteHTTP(ctx context.Context, metadata contract.Metadat
 	timeout := time.Duration(h.TimeoutMS) * time.Millisecond
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, string(in.HTTP.Method), joined.String(), nil)
+	// A bytes.Reader body lets a same-host 307/308 redirect replay it.
+	var reqBody io.Reader
+	if len(in.HTTP.Body) != 0 {
+		reqBody = bytes.NewReader(in.HTTP.Body)
+	}
+	req, err := http.NewRequestWithContext(requestCtx, string(in.HTTP.Method), joined.String(), reqBody)
 	if err != nil {
 		return nil, errors.New("build HTTP request failed")
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", in.HTTP.ContentType)
 	}
 	value := secret
 	if h.CredentialInjection.Scheme != "" {
