@@ -194,6 +194,16 @@ state directory when that variable is unset. That directory is created `0700`
 and the spool files `0600`. The hook never blocks the harness: it always exits
 0, including when the spool cannot be written.
 
+The hook reads one JSON object on stdin. Claude Code and Codex send their
+native hook input (`session_id`, `tool_name`, `tool_use_id`, `tool_input`,
+`hook_event_name`). The OpenCode plugin that `kei harness sync` installs sends
+`{phase, tool_name, session_id, tool_use_id, tool_input}`, where `phase` is
+`pre`, `post`, `ask` or `permission_reply`. Session lifecycle events
+(`hook_event_name` `SessionStart`, `Stop` or `SessionEnd`, with `session_id`)
+are accepted from Codex and OpenCode but write no tool record; `SessionEnd`
+clears OpenCode's active-skill attribution for that session. Golden fixtures
+for each payload are under `internal/hooks/testdata/hooks/`.
+
 The collector sends each `harness_tool` record to two places:
 
 - `POST /api/v1/runtime/harness-tool-events:batchCreate`, the

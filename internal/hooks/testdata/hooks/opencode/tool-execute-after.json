@@ -1,0 +1,1 @@
+{"phase":"post","tool_name":"bash","session_id":"ses_fixture01","tool_use_id":"call_fixture01","tool_input":{"command":"git status --short","description":"Show working tree status"}}
