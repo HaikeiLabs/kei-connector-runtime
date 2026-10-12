@@ -188,7 +188,7 @@ func TestExecuteHTTPEnforcesMethodPathQuery(t *testing.T) {
 			in := runtimeInvocation()
 			in.HTTP.Method = "POST"
 			return in
-		}(), "HTTP method is not allowed"},
+		}(), "HTTP method does not match capability"},
 		"path outside allowlist": {func() contract.Invocation {
 			in := runtimeInvocation()
 			in.HTTP.Path = "/users/1"

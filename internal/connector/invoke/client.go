@@ -23,8 +23,8 @@ import (
 )
 
 // maxDaemonResponseBytes bounds the daemon's answer; a result is at most
-// maxResultBytes plus its envelope.
-const maxDaemonResponseBytes = maxResultBytes + 64<<10
+// maxConnectorResultBytes plus its envelope.
+const maxDaemonResponseBytes = maxConnectorResultBytes + 64<<10
 
 func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) int {
 	out := output{TraceID: plan.req.TraceID, ConnectorID: plan.req.ConnectorID, Capability: plan.req.Capability}

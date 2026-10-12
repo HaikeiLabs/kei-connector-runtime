@@ -138,6 +138,9 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 		}
 		result = encoded
 	}
+	if len(result) > maxConnectorResultBytes {
+		return finish(deny("result_too_large", "result exceeds the size limit"))
+	}
 	out.Decision, out.Provider, out.Result = "allow", string(prepared[0].meta.Provider), result
 	out.ConnectorID = grant.ConnectorID
 	out.Audit.ResultDigest, out.Audit.ResultBytes = sha256Digest(result), len(result)
