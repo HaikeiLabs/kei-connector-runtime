@@ -117,6 +117,10 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 		ctx := newClaudeEventContext(in, kind, harnessID, sessionID, tool, argv0, skill, registered, argsDigest, digestKeyID, argsCiphertext, recipientKeyIDs)
 		return handleClaudeEvent(in, ctx, stdout, cfg)
 	}
+	if in.ToolName == "" {
+		handleSessionEvent(kind, in, cfg)
+		return 0
+	}
 	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: registered, HarnessSessionID: in.SessionID, SessionID: *sessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {
@@ -139,6 +143,22 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 		}
 	}
 	return 0
+}
+
+// handleSessionEvent accepts a Codex or OpenCode session lifecycle event
+// (SessionStart, Stop, SessionEnd; see the HAI-497 hook envelope). These
+// carry no tool, so no harness_tool record is written: the collector would
+// drop a tool-less record. SessionEnd closes the session's opencode skill
+// attribution. Codex is deliberately not routed through the Claude
+// pending-call inference: Codex fires PostToolUse only for successful calls,
+// so closing undecided calls at Stop would record failed calls as denies.
+func handleSessionEvent(kind string, in ToolInput, cfg Config) {
+	if kind != "opencode" || cfg.RuntimeStateDir == "" || !strings.EqualFold(in.EventName, "SessionEnd") {
+		return
+	}
+	if store, err := OpenActiveSkillStore(cfg.RuntimeStateDir); err == nil {
+		_ = store.Clear(in.SessionID)
+	}
 }
 
 func reportedTool(name string, raw json.RawMessage) (string, string) {

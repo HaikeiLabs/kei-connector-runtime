@@ -147,3 +147,21 @@ func (s *ActiveSkillStore) Get(sessionID string) (string, error) {
 	})
 	return skill, err
 }
+
+// Clear drops the active skill for sessionID when the session ends.
+func (s *ActiveSkillStore) Clear(sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	return s.withLock(func() error {
+		st, err := s.load()
+		if err != nil {
+			return err
+		}
+		if _, ok := st.Sessions[sessionID]; !ok {
+			return nil
+		}
+		delete(st.Sessions, sessionID)
+		return s.save(st)
+	})
+}
