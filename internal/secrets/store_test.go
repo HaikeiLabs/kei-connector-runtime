@@ -142,3 +142,17 @@ func TestNewSecretStoreFromEmptyRegistry(t *testing.T) {
 		t.Fatalf("nil registry = %v, want ErrUnavailable", err)
 	}
 }
+
+func TestDefaultRegistryResolvesGCPBackend(t *testing.T) {
+	// The default registry must resolve the GCP backend by its control-plane
+	// name. The factory never fails and the GCP client is created only on
+	// the first call, so this needs no live GCP or GCP credentials.
+	reg := DefaultBackendRegistry()
+	store, err := reg.store("gcp-secret-manager")
+	if err != nil {
+		t.Fatalf("registry did not resolve gcp-secret-manager: %v", err)
+	}
+	if store == nil {
+		t.Fatal("resolved GCP store is nil")
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"math"
 	"regexp"
 	"strings"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets/gcp"
 )
 
 // Reference validation for customer-managed secret references.
@@ -85,6 +87,11 @@ func validateSecretRefFormat(backend, ref string) error {
 		return nil
 	case "aws-secrets-manager":
 		if _, _, err := parseAWSSecretRef(ref); err != nil {
+			return fmt.Errorf("%w: %s", ErrRefMalformed, backend)
+		}
+		return nil
+	case "gcp-secret-manager":
+		if _, _, err := gcp.ParseSecretRef(ref); err != nil {
 			return fmt.Errorf("%w: %s", ErrRefMalformed, backend)
 		}
 		return nil
