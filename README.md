@@ -455,6 +455,30 @@ the module resolves through the public proxy and is verified against the public
 checksum database. Do not reintroduce `GOPRIVATE` or credential plumbing for
 this dependency.
 
+## GCP Secret Manager backend
+
+The runtime's tenant secret store supports `gcp-secret-manager` alongside
+`aws-secrets-manager` and `azure-key-vault`. A reference is the secret's
+resource name, `projects/{project}/secrets/{secret}`, optionally with
+`/versions/{version}`. Each delivered secret is written as a new secret
+version (a rotation generation); reads return the latest version.
+
+The backend authenticates with Application Default Credentials (workload
+identity) and reads no key files. On GKE the pod's service account is used
+directly; elsewhere set `GOOGLE_APPLICATION_CREDENTIALS` for local
+development. The secrets must already exist in the customer's project —
+creating secrets is a setup step, not something the runtime does.
+
+Grant the workload identity, on each specific secret (the least-privilege
+level both roles support):
+
+- `roles/secretmanager.secretVersionAdder` — to write delivered versions
+- `roles/secretmanager.secretAccessor` — to read them
+
+Failures are closed and redacted: a missing secret is `secret not found`, a
+missing role or unreachable GCP is `secret store unavailable` with the role
+names above, and a secret value never appears in an error or log line.
+
 ## Runtime heartbeat (liveness)
 
 A harness needs only `KEI_RUNTIME_TOKEN` (plus the control-plane URL).

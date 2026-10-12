@@ -1,32 +1,39 @@
 // Package secrets is the runtime's tenant secret store: the Store interface,
-// the pluggable backend registry, the built-in Azure Key Vault and AWS Secrets
-// Manager backends, and the reference validation every backend call passes
-// through first. It knows nothing about how a secret was delivered.
+// the pluggable backend registry, the built-in Azure Key Vault, AWS Secrets
+// Manager, and GCP Secret Manager backends, and the reference validation every
+// backend call passes through first. It knows nothing about how a secret was
+// delivered.
 package secrets
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets/errdef"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets/gcp"
 )
 
+// The sentinels are defined in errdef, a leaf both this package and the
+// backend subpackages import (a backend cannot import this package back,
+// because the registry below imports it).
 var (
 	// ErrNotFound reports that the reference names no readable secret.
-	ErrNotFound = errors.New("secret not found")
+	ErrNotFound = errdef.ErrNotFound
 	// ErrUnavailable reports that the backend is unknown, could not be built,
 	// or failed the call.
-	ErrUnavailable = errors.New("secret store unavailable")
+	ErrUnavailable = errdef.ErrUnavailable
 	// ErrExists reports a write that conflicts with an existing secret.
-	ErrExists = errors.New("secret already exists")
+	ErrExists = errdef.ErrExists
 )
 
 // Store is the interface for external credential backends.
-// It supports both Azure Key Vault and AWS Secrets Manager, and any backend
-// registered through the pluggable BackendRegistry.
+// It supports Azure Key Vault, AWS Secrets Manager, and GCP Secret Manager,
+// and any backend registered through the pluggable BackendRegistry.
 type Store interface {
 	// Get retrieves a secret value from the specified backend.
-	// backend is either "azure-key-vault" or "aws-secrets-manager"
+	// backend is one of the registered backend names, e.g.
+	// "azure-key-vault", "aws-secrets-manager", or "gcp-secret-manager"
 	// secretRef is a backend-specific reference string
 	Get(ctx context.Context, backend, secretRef string) (*string, error)
 
@@ -107,18 +114,19 @@ func (r *BackendRegistry) store(name string) (Store, error) {
 	return instance, nil
 }
 
-// DefaultBackendRegistry returns the built-in backends. Both authenticate with
-// workload / managed identity; neither reads static cloud credentials.
+// DefaultBackendRegistry returns the built-in backends. All authenticate with
+// workload / managed identity; none reads static cloud credentials.
 func DefaultBackendRegistry() *BackendRegistry {
 	reg := NewBackendRegistry()
 	reg.Register("azure-key-vault", func() (Store, error) { return NewAzureKeyVaultStore() })
 	reg.Register("aws-secrets-manager", func() (Store, error) { return NewAWSSecretsManagerStore() })
+	reg.Register("gcp-secret-manager", func() (Store, error) { return gcp.NewStore(), nil })
 	return reg
 }
 
-// NewStore returns the default composite store (Azure Key Vault and AWS
-// Secrets Manager). Backends are constructed lazily, so this does not fail
-// because an unused backend's credentials are absent.
+// NewStore returns the default composite store (Azure Key Vault, AWS Secrets
+// Manager, and GCP Secret Manager). Backends are constructed lazily, so this
+// does not fail because an unused backend's credentials are absent.
 func NewStore() (Store, error) {
 	return NewStoreFromRegistry(DefaultBackendRegistry())
 }

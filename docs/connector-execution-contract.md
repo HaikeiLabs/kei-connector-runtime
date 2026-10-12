@@ -194,9 +194,11 @@ through the same store, but it belongs to the installation, not to a connector
   The runtime reads `secrets.Store.Get(credential_backend,
   credential_secret_ref)` instead, and only when that location ends in
   `"/" + credential_ref`; any other value is `descriptor_invalid`.
-- The runtime has no GCP backend yet (HAI-137 is catalog-only), so a
-  `gcp-secret-manager` connector denies `credential_backend_unavailable` until
-  that runtime slice lands.
+- The `gcp-secret-manager` backend (HAI-268) reads the latest version of the
+  named secret through the pod's workload identity (Application Default
+  Credentials); a missing secret or a missing
+  `roles/secretmanager.secretAccessor` grant denies
+  `credential_unavailable` or `credential_backend_unavailable` respectively.
 - The secret value never enters the catalog, the invoke response, or audit.
   Setup writes it through sealed credential delivery (section 9).
 
