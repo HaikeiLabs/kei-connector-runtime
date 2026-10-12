@@ -20,14 +20,17 @@ type staticRef string
 
 func (s staticRef) Resolve(context.Context, string) (string, error) { return string(s), nil }
 
-// Execute runs one http.get or http.head.
+// Execute runs one http.get, http.head, http.post, or http.patch.
 func (Connector) Execute(ctx context.Context, call connector.Call) (any, error) {
 	in, ok := call.Input.(input.HTTPRequest)
 	if !ok {
 		return nil, connector.ErrInput
 	}
 	inv := call.Invocation
-	inv.HTTP = &contract.HTTPInvocation{Method: contract.HTTPMethod(in.Method), Path: in.Path, Query: in.Query}
+	inv.HTTP = &contract.HTTPInvocation{Method: contract.HTTPMethod(in.Method), Path: in.Path, Query: in.Query, Body: in.Body}
+	if len(in.Body) != 0 {
+		inv.HTTP.ContentType = contract.HTTPContentTypeJSON
+	}
 	out, err := HTTPExecutor{Credentials: staticRef(call.Credential), Client: call.HTTPClient, LookupIP: call.LookupIP}.ExecuteHTTP(ctx, call.Meta, inv)
 	switch {
 	case errors.Is(err, errHTTPResponseTooLarge):

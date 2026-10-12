@@ -94,6 +94,12 @@ func TestDecodeReturnsTypedInputs(t *testing.T) {
 	if h, _ := Decode("http_api", "http.head", []byte(`{"path":"/leads"}`)); h.(HTTPRequest).Method != "HEAD" {
 		t.Fatalf("http_api head method = %#v", h)
 	}
+	for capability, method := range map[string]string{"http.post": "POST", "http.patch": "PATCH"} {
+		h, err := Decode("http_api", capability, []byte(`{"path":"/leads","body":{"name":"Ada","n":[1,2]}}`))
+		if req, ok := h.(HTTPRequest); err != nil || !ok || req.Method != method || string(req.Body) != `{"name":"Ada","n":[1,2]}` {
+			t.Fatalf("http_api %s = %#v, %v", capability, h, err)
+		}
+	}
 	for _, key := range [][2]string{
 		{"linear", "issue.read"}, {"linear", "team.read"}, {"github", "repository.read"}, {"github", "workflow.read"},
 		{"google_drive", "docs.read"}, {"tito", "ticket.summary"}, {"crm", "lead.read"}, {"crm", "investor.read"},
@@ -124,6 +130,13 @@ func TestDecodeRejectsInvalidInput(t *testing.T) {
 		{"tito", "event.list", `{"page":-1}`},
 		{"http_api", "http.get", `{}`},
 		{"http_api", "http.get", `{"path":"/x","method":"POST"}`},
+		{"http_api", "http.get", `{"path":"/x","body":{"a":1}}`},
+		{"http_api", "http.head", `{"path":"/x","body":{"a":1}}`},
+		{"http_api", "http.post", `{"path":"/x"}`},
+		{"http_api", "http.post", `{"path":"/x","body":null}`},
+		{"http_api", "http.post", `{"path":"/x","body":[1]}`},
+		{"http_api", "http.patch", `{"path":"/x","body":"text"}`},
+		{"http_api", "http.delete", `{"path":"/x"}`},
 		{"linear", "issue.read", `{"id":"ENG-1"}`},
 		{"crm", "lead.create", `{"data":{}}`},
 		{"crm", "investor.read", `{"investor_id":"7"}`},

@@ -1,9 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -189,6 +194,7 @@ func TestExecuteHTTPEnforcesMethodPathQuery(t *testing.T) {
 			in.HTTP.Method = "POST"
 			return in
 		}(), "HTTP method does not match capability"},
+		"method not configured on the connector": {writeInvocation(contract.HTTPMethodPost, `{"a":1}`), "HTTP method is not allowed"},
 		"path outside allowlist": {func() contract.Invocation {
 			in := runtimeInvocation()
 			in.HTTP.Path = "/users/1"
@@ -398,5 +404,126 @@ func TestHTTPResponseBodyRedactionDeepAndNonJSON(t *testing.T) {
 	}
 	if got := redactResponseBody([]byte("plain text"), []string{"access_token"}); string(got) != "plain text" {
 		t.Fatalf("non-JSON body was modified: %s", got)
+	}
+}
+
+// writeFixture allows POST and PATCH on /contacts/* with a 64-byte request cap.
+func writeFixture(base string) contract.Metadata {
+	m := httpRuntimeFixture(base)
+	m.Policy.AllowedActions = append(m.Policy.AllowedActions, contract.ActionCreate, contract.ActionUpdate)
+	m.HTTPAPI.AllowedMethods = append(m.HTTPAPI.AllowedMethods, contract.HTTPMethodPost, contract.HTTPMethodPatch)
+	m.HTTPAPI.RequestMaxBytes = 64
+	return m
+}
+
+func writeInvocation(method contract.HTTPMethod, body string) contract.Invocation {
+	in := runtimeInvocation()
+	in.Capability, in.Action = "http.post", contract.ActionCreate
+	if method == contract.HTTPMethodPatch {
+		in.Capability, in.Action = "http.patch", contract.ActionUpdate
+	}
+	in.HTTP = &contract.HTTPInvocation{Method: method, Path: "/contacts/42", ContentType: contract.HTTPContentTypeJSON, Body: json.RawMessage(body)}
+	return in
+}
+
+// POST and PATCH send the declared JSON body byte for byte, as
+// application/json, beside the injected shared-secret header.
+func TestExecuteHTTPSendsPostAndPatchBodiesIntact(t *testing.T) {
+	const body = `{"name":"Ada","tags":["a","b"],"n":1.50}`
+	for _, method := range []contract.HTTPMethod{contract.HTTPMethodPost, contract.HTTPMethodPatch} {
+		t.Run(string(method), func(t *testing.T) {
+			var got string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				got = string(raw)
+				if r.Method != string(method) || r.URL.Path != "/v1/contacts/42" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("X-API-Key") != "fixture-credential" {
+					t.Errorf("request = %s %s %v", r.Method, r.URL, r.Header)
+				}
+				_, _ = io.WriteString(w, `{"ok":true}`)
+			}))
+			defer server.Close()
+			_, err := (HTTPExecutor{Credentials: &fakeHTTPCredentials{value: "fixture-credential"}, Client: mappedClient(server), LookupIP: publicLookup}).
+				ExecuteHTTP(context.Background(), writeFixture("https://api.example.test"), writeInvocation(method, body))
+			if err != nil {
+				t.Fatalf("ExecuteHTTP: %v", err)
+			}
+			if got != body {
+				t.Fatalf("body = %q, want %q", got, body)
+			}
+		})
+	}
+}
+
+// A body over request_max_bytes, a GET with a body, and a non-object body
+// are all denied before any credential is resolved or request is sent.
+func TestExecuteHTTPRejectsOversizeAndMisplacedBodies(t *testing.T) {
+	for name, in := range map[string]contract.Invocation{
+		"oversize post":  writeInvocation(contract.HTTPMethodPost, `{"v":"`+strings.Repeat("x", 64)+`"}`),
+		"oversize patch": writeInvocation(contract.HTTPMethodPatch, `{"v":"`+strings.Repeat("x", 64)+`"}`),
+		"get with a body": func() contract.Invocation {
+			in := runtimeInvocation()
+			in.HTTP.ContentType, in.HTTP.Body = contract.HTTPContentTypeJSON, json.RawMessage(`{"a":1}`)
+			return in
+		}(),
+		"array body": writeInvocation(contract.HTTPMethodPost, `[1,2]`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+			defer server.Close()
+			creds := &fakeHTTPCredentials{value: "fixture-credential"}
+			_, err := (HTTPExecutor{Credentials: creds, Client: mappedClient(server), LookupIP: publicLookup}).
+				ExecuteHTTP(context.Background(), writeFixture("https://api.example.test"), in)
+			if !errors.Is(err, errHTTPInvocationDenied) || calls != 0 || creds.ref != "" {
+				t.Fatalf("err = %v, calls = %d, resolved %q", err, calls, creds.ref)
+			}
+		})
+	}
+}
+
+// GET is unchanged: no body, no Content-Type.
+func TestExecuteHTTPGetSendsNoBody(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if r.Method != http.MethodGet || len(raw) != 0 || r.Header.Get("Content-Type") != "" {
+			t.Errorf("GET sent %s body %q content-type %q", r.Method, raw, r.Header.Get("Content-Type"))
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	if _, err := (HTTPExecutor{Credentials: &fakeHTTPCredentials{value: "fixture-credential"}, Client: mappedClient(server), LookupIP: publicLookup}).
+		ExecuteHTTP(context.Background(), writeFixture("https://api.example.test"), runtimeInvocation()); err != nil {
+		t.Fatalf("ExecuteHTTP: %v", err)
+	}
+}
+
+// Neither a write's success nor its failure writes the shared secret to the
+// process log.
+func TestExecuteHTTPWriteLogsNoSecret(t *testing.T) {
+	var logs bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	prevSlog := slog.Default()
+	log.SetOutput(&logs)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags); slog.SetDefault(prevSlog) })
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"bad"}`)
+	}))
+	defer server.Close()
+	exec := HTTPExecutor{Credentials: &fakeHTTPCredentials{value: "fixture-write-secret"}, Client: mappedClient(server), LookupIP: publicLookup}
+	results := []string{}
+	for _, in := range []contract.Invocation{
+		writeInvocation(contract.HTTPMethodPost, `{"a":1}`),
+		writeInvocation(contract.HTTPMethodPatch, `{"v":"`+strings.Repeat("x", 64)+`"}`),
+	} {
+		res, err := exec.ExecuteHTTP(context.Background(), writeFixture("https://api.example.test"), in)
+		results = append(results, fmt.Sprint(res, err))
+	}
+	for name, text := range map[string]string{"log": logs.String(), "results": strings.Join(results, "\n")} {
+		if strings.Contains(text, "fixture-write-secret") {
+			t.Fatalf("%s leaked the shared secret: %s", name, text)
+		}
 	}
 }

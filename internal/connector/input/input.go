@@ -229,12 +229,15 @@ type LinearIssueCreate = providers.LinearIssueCreatePayload
 // comment's parent and must equal the linear/issue/<issue> resource.
 type LinearCommentCreate = providers.LinearCommentCreatePayload
 
-// HTTPRequest is the http_api/http.get and http.head input. Method comes from
-// the capability, never from the input.
+// HTTPRequest is the http_api/http.get, http.head, http.post, and http.patch
+// input. Method comes from the capability, never from the input. Body is a
+// JSON object, present only for http.post and http.patch; the connector's
+// request_max_bytes caps it at execution.
 type HTTPRequest struct {
 	Method string              `json:"-"`
 	Path   string              `json:"path"`
 	Query  map[string][]string `json:"query,omitempty"`
+	Body   json.RawMessage     `json:"body,omitempty"`
 }
 
 // Empty is the input of every read capability whose resource names
@@ -370,14 +373,15 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 			return nil, ErrInvalid
 		}
 		return in, nil
-	case "http_api/http.get", "http_api/http.head":
+	case "http_api/http.get", "http_api/http.head", "http_api/http.post", "http_api/http.patch":
 		var in HTTPRequest
 		if strict(raw, &in) != nil || in.Path == "" {
 			return nil, ErrInvalid
 		}
-		in.Method = "GET"
-		if capability == "http.head" {
-			in.Method = "HEAD"
+		in.Method = strings.ToUpper(strings.TrimPrefix(capability, "http."))
+		withBody := in.Method == "POST" || in.Method == "PATCH"
+		if withBody != (len(in.Body) != 0) || (withBody && !jsonObject(in.Body)) {
+			return nil, ErrInvalid
 		}
 		return in, nil
 	default:
@@ -389,6 +393,13 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 		}
 		return Empty{}, nil
 	}
+}
+
+// jsonObject reports whether raw is one JSON object (not null, an array, or a
+// scalar).
+func jsonObject(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	return json.Unmarshal(raw, &obj) == nil && obj != nil
 }
 
 func strict(raw json.RawMessage, v any) error {
