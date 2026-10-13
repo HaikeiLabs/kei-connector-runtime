@@ -453,3 +453,52 @@ func TestClaudeDecisionsStopAfterDenied(t *testing.T) {
 	}
 	verifyAuditSteps(t, lines, expect)
 }
+
+// TestClaudeDecisionsCloseCarriesPendingTool verifies that a decision closed
+// by Stop describes the pending call, not the Stop event: Stop carries no
+// tool_name or tool_input, so the closing record must take the tool and the
+// args digest from the call it closes. An empty tool is rejected by the
+// catalog's harness-tool-events:batchCreate and wedged the spool.
+func TestClaudeDecisionsCloseCarriesPendingTool(t *testing.T) {
+	stateDir := t.TempDir()
+	var spool bytes.Buffer
+	cfg := Config{
+		RuntimeStateDir: stateDir,
+		AppendAudit: func(record []byte) error {
+			spool.Write(record)
+			spool.WriteByte('\n')
+			return nil
+		},
+	}
+	events := []string{
+		`{"tool_name":"Bash","tool_input":{"command":"ls -la"},"session_id":"s-close","tool_use_id":"tu1","hook_event_name":"PreToolUse"}`,
+		`{"session_id":"s-close","hook_event_name":"Stop"}`,
+	}
+	for _, ev := range events {
+		var stdout bytes.Buffer
+		if code := ReportPermissions([]string{"claude", "--harness", "h-test"}, strings.NewReader(ev), &stdout, cfg); code != 0 {
+			t.Fatalf("exit=%d input=%s", code, ev)
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(spool.String()), "\n")
+	verifyAuditSteps(t, lines, []expectedAuditStep{
+		{Phase: "pre", NativeDecision: "unknown", ToolUseID: "tu1"},
+		{Phase: "decision", NativeDecision: "deny", ToolUseID: "tu1"},
+	})
+	var pre, closing permissionEvent
+	if err := json.Unmarshal([]byte(lines[0]), &pre); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &closing); err != nil {
+		t.Fatal(err)
+	}
+	if closing.Tool != "shell" {
+		t.Fatalf("closing tool = %q, want shell", closing.Tool)
+	}
+	if closing.ArgsDigest != pre.ArgsDigest {
+		t.Fatalf("closing args_digest = %q, want the pending call's %q", closing.ArgsDigest, pre.ArgsDigest)
+	}
+	if closing.ArgsCiphertext != "" || closing.Argv0 != "" {
+		t.Fatalf("closing record carries the Stop event's args: ciphertext=%q argv0=%q", closing.ArgsCiphertext, closing.Argv0)
+	}
+}

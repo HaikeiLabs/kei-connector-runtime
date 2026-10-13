@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -385,9 +386,9 @@ type fakeHarnessToolClient struct {
 	records []json.RawMessage
 }
 
-func (f *fakeHarnessToolClient) FlushHarnessTool(ctx context.Context, records []json.RawMessage) (int, error) {
+func (f *fakeHarnessToolClient) FlushHarnessTool(ctx context.Context, records []json.RawMessage) (HarnessToolFlushResult, error) {
 	f.records = append(f.records, records...)
-	return len(records), nil
+	return HarnessToolFlushResult{Upserted: len(records)}, nil
 }
 
 // fakeCredentialClient records credential batches handed to the seam.
@@ -645,11 +646,11 @@ func TestHarnessToolFlushSendsOnlyFourFields(t *testing.T) {
 		t.Fatal("client is nil")
 	}
 	raw := json.RawMessage(`{"event_class":"harness_tool","harness_id":"h1","tool":"shell","harness_kind":"claude","args_digest":"sha256:abc","args_ciphertext":"AAAA","tool_input":{"command":"rm -rf"},"observed_at":"2026-10-03T12:00:00Z"}`)
-	n, err := client.FlushHarnessTool(context.Background(), []json.RawMessage{raw})
+	res, err := client.FlushHarnessTool(context.Background(), []json.RawMessage{raw})
 	if err != nil {
 		t.Fatalf("FlushHarnessTool: %v", err)
 	}
-	if n != 1 {
+	if n := res.Upserted; n != 1 {
 		t.Fatalf("upserted = %d, want 1", n)
 	}
 	if gotAuth != "Bearer tok-123" {
@@ -741,11 +742,11 @@ func TestHarnessToolFlushBatchesAtMost500(t *testing.T) {
 	for i := range records {
 		records[i] = json.RawMessage(fmt.Sprintf(`{"tool":"t%d","harness_kind":"opencode","observed_at":"2026-10-03T12:00:00Z"}`, i))
 	}
-	n, err := client.FlushHarnessTool(context.Background(), records)
+	res, err := client.FlushHarnessTool(context.Background(), records)
 	if err != nil {
 		t.Fatalf("FlushHarnessTool: %v", err)
 	}
-	if n != 1200 {
+	if n := res.Upserted; n != 1200 {
 		t.Fatalf("upserted = %d, want 1200", n)
 	}
 	want := []int{500, 500, 200}
@@ -934,4 +935,130 @@ func TestStartCollectorFlushesOnStop(t *testing.T) {
 		t.Fatalf("collector flushed %d time(s), want at least 2", flushed)
 	}
 	mu.Unlock()
+}
+
+// poisonCatalog is a fake harness-tool-events:batchCreate that rejects any
+// batch holding a tool named poisonTool, the way the catalog validates the
+// whole batch before writing: one bad event is a 400 and nothing is stored.
+type poisonCatalog struct {
+	mu      sync.Mutex
+	shipped []string
+	status  int
+}
+
+const poisonTool = "poison-tool-name"
+
+func (p *poisonCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Events []harnessToolIngestEvent `json:"events"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	w.Header().Set("Content-Type", "application/json")
+	if p.status != 0 {
+		w.WriteHeader(p.status)
+		_, _ = w.Write([]byte(`{"error":{"code":401,"status":"UNAUTHENTICATED","message":"invalid runtime token"}}`))
+		return
+	}
+	for _, e := range req.Events {
+		if e.Tool == poisonTool || strings.TrimSpace(e.Tool) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"harness_kind_invalid","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"INVALID_ARGUMENT","domain":"kei"}]}}`))
+			return
+		}
+	}
+	p.mu.Lock()
+	for _, e := range req.Events {
+		p.shipped = append(p.shipped, e.Tool)
+	}
+	p.mu.Unlock()
+	_, _ = w.Write([]byte(`{"upserted":` + strconv.Itoa(len(req.Events)) + `}`))
+}
+
+func writeHarnessToolSpool(t *testing.T, tools ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "harness-tool.jsonl")
+	var b strings.Builder
+	for _, tool := range tools {
+		b.WriteString(`{"event_class":"harness_tool","phase":"decision","tool":"` + tool + `","harness_kind":"claude","args_digest":"sha256:abc","observed_at":"2026-10-12T17:52:00.123456789Z"}` + "\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCollectorQuarantinesRecordTheCatalogRejects pins the unwedge: one record
+// the catalog 400s must not hold back the rest. The good records ship, the
+// rejected one and the tool-less one are quarantined and counted as loss by
+// reason code, the spool advances, and the log names the catalog's reason but
+// never the record's contents.
+func TestCollectorQuarantinesRecordTheCatalogRejects(t *testing.T) {
+	catalog := &poisonCatalog{}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+
+	path := writeHarnessToolSpool(t, "Read", "shell", poisonTool, "", "Edit", "Grep")
+	var logs bytes.Buffer
+	c := NewCollector(path, &fakeFlushClient{}, 100)
+	c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	c.HarnessToolClient = NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
+
+	if _, err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v (logs=%s)", err, logs.String())
+	}
+	catalog.mu.Lock()
+	shipped := strings.Join(catalog.shipped, ",")
+	catalog.mu.Unlock()
+	if shipped != "Read,shell,Edit,Grep" {
+		t.Fatalf("shipped = %q, want Read,shell,Edit,Grep", shipped)
+	}
+	if _, files, _ := c.pendingStats(); files != 0 {
+		t.Fatalf("pending files = %d, want 0: the spool must advance past the rejected record", files)
+	}
+	st, err := readCollectorState(c.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{"catalog_rejected": 1, "tool_missing": 1}
+	if fmt.Sprint(st.HarnessToolQuarantined) != fmt.Sprint(want) {
+		t.Fatalf("quarantined = %v, want %v", st.HarnessToolQuarantined, want)
+	}
+	out := logs.String()
+	for _, needle := range []string{"quarantined", "catalog_rejected", "harness_kind_invalid", "INVALID_ARGUMENT"} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("log missing %q: %s", needle, out)
+		}
+	}
+	if strings.Contains(out, poisonTool) || strings.Contains(out, "sha256:abc") {
+		t.Fatalf("log leaks record contents: %s", out)
+	}
+}
+
+// TestCollectorRetainsSpoolOnUnauthorized verifies that only a record
+// rejection is quarantined: a 401 is the installation's problem, not the
+// record's, so the spool is retained and nothing is dropped.
+func TestCollectorRetainsSpoolOnUnauthorized(t *testing.T) {
+	catalog := &poisonCatalog{status: http.StatusUnauthorized}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+
+	path := writeHarnessToolSpool(t, "Read", "Edit")
+	c := NewCollector(path, &fakeFlushClient{}, 100)
+	c.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	c.HarnessToolClient = NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
+
+	_, err := c.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run succeeded, want the 401 surfaced")
+	}
+	if !strings.Contains(err.Error(), "status 401") || !strings.Contains(err.Error(), "invalid runtime token") {
+		t.Fatalf("error = %v, want status 401 with the catalog's message", err)
+	}
+	if _, files, _ := c.pendingStats(); files == 0 {
+		t.Fatal("spool was dropped on a 401")
+	}
+	st, _ := readCollectorState(c.statePath)
+	if len(st.HarnessToolQuarantined) != 0 {
+		t.Fatalf("quarantined on a 401: %v", st.HarnessToolQuarantined)
+	}
 }

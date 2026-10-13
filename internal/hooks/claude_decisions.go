@@ -18,13 +18,16 @@ import (
 )
 
 type pendingCall struct {
-	ToolUseID  string    `json:"tool_use_id"`
-	ToolName   string    `json:"tool_name"`
-	ArgsDigest string    `json:"args_digest"`
-	Asked      bool      `json:"asked"`
-	Executed   bool      `json:"executed"`
-	Decided    bool      `json:"decided"`
-	CreatedAt  time.Time `json:"created_at"`
+	ToolUseID  string `json:"tool_use_id"`
+	ToolName   string `json:"tool_name"`
+	ArgsDigest string `json:"args_digest"`
+	// DigestKeyID is the key ArgsDigest was computed under; empty for a
+	// plain sha256 digest and for calls stored before it was recorded.
+	DigestKeyID string    `json:"digest_key_id,omitempty"`
+	Asked       bool      `json:"asked"`
+	Executed    bool      `json:"executed"`
+	Decided     bool      `json:"decided"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type claudeSessionCalls struct {
@@ -430,10 +433,11 @@ func handleClaudePreToolUse(in ToolInput, ctx claudeEventContext, stdout io.Writ
 	if store, err := OpenClaudeDecisionStore(cfg.RuntimeStateDir); err == nil {
 		closeStaleSessions(store, ctx, cfg)
 		_ = store.Add(in.SessionID, pendingCall{
-			ToolUseID:  in.ToolUseID,
-			ToolName:   ctx.tool,
-			ArgsDigest: ctx.argsDigest,
-			CreatedAt:  time.Now().UTC(),
+			ToolUseID:   in.ToolUseID,
+			ToolName:    ctx.tool,
+			ArgsDigest:  ctx.argsDigest,
+			DigestKeyID: ctx.digestKeyID,
+			CreatedAt:   time.Now().UTC(),
 		})
 	}
 	writeEvent(ctx, "pre", "unknown", in.ToolUseID, false, cfg)
@@ -556,11 +560,27 @@ func closeRemainingCalls(store *ClaudeDecisionStore, sessionID string, ctx claud
 		if current.Decided {
 			continue
 		}
+		callCtx := pendingCallContext(ctx, *current)
 		if current.Asked {
-			writeEvent(ctx, "permission_reply", "denied", pc.ToolUseID, false, cfg)
+			writeEvent(callCtx, "permission_reply", "denied", pc.ToolUseID, false, cfg)
 		} else {
-			writeEvent(ctx, "decision", "deny", pc.ToolUseID, false, cfg)
+			writeEvent(callCtx, "decision", "deny", pc.ToolUseID, false, cfg)
 		}
 		_ = store.MarkDecided(sessionID, idx)
 	}
+}
+
+// pendingCallContext describes a call closed by a later event (Stop,
+// SessionEnd, or a stale-session sweep). That event carries no tool_name or
+// tool_input of its own, so the tool and args digest come from the stored
+// call; the closing event's argv0 and ciphertext describe nothing and are
+// dropped.
+func pendingCallContext(ctx claudeEventContext, pc pendingCall) claudeEventContext {
+	ctx.tool = pc.ToolName
+	ctx.argsDigest = pc.ArgsDigest
+	ctx.digestKeyID = pc.DigestKeyID
+	ctx.argv0 = ""
+	ctx.argsCiphertext = ""
+	ctx.recipientKeyIDs = nil
+	return ctx
 }
