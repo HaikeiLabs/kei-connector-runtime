@@ -208,7 +208,14 @@ The collector sends each `harness_tool` record to two places:
 
 - `POST /api/v1/runtime/harness-tool-events:batchCreate`, the
   skill-tool-mappings ingest. It receives only `tool`, `skill`,
-  `harness_kind`, and `observed_at`.
+  `harness_kind`, and `observed_at`. The catalog rejects a batch whole when
+  one event is invalid, so the collector quarantines records it cannot
+  accept rather than let them block the spool: a record with no `tool` is
+  dropped before sending, and a batch answered `400`, `413` or `422` is split
+  until the rejected records stand alone. The rest ship. Quarantined records
+  are counted by reason code (`malformed`, `tool_missing`,
+  `catalog_rejected`) in `harness_tool_quarantined` in `<path>.state` and
+  logged with the catalog's error status and message, never the record.
 - `POST /api/v1/runtime/audit:flush`, which writes `abac.audit_records` and
   shows in the console Audit Logs. Records follow the HP harness audit event
   contract and are built field by field: `event_class`, `harness_agent_id`,
@@ -225,7 +232,7 @@ Both routes authenticate with `KEI_RUNTIME_TOKEN` and need
 `KEI_RUNTIME_CONTROL_PLANE_URL`. Delivery is at least once. The collector
 advances its `<path>.state` cursor only after every route has acknowledged a
 batch. A `429` waits for `Retry-After` (capped at 5 minutes); any other error,
-including other 4xx and 5xx responses, keeps the spool and retries with
+including other 4xx (such as `401`) and 5xx responses, keeps the spool and retries with
 exponential backoff (1 second to 15 minutes, with jitter).
 
 There are two ways to run the collector, for example from the local heartbeat

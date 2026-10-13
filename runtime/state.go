@@ -10,6 +10,9 @@ type collectorState struct {
 	Segment      uint64    `json:"segment"`
 	LinesSent    int       `json:"lines_sent"`
 	ReportedLoss spoolLoss `json:"reported_loss"`
+	// HarnessToolQuarantined totals the harness_tool records dropped because
+	// the catalog will never accept them, by reason code.
+	HarnessToolQuarantined map[string]int64 `json:"harness_tool_quarantined,omitempty"`
 }
 
 func readCollectorState(path string) (*collectorState, error) {

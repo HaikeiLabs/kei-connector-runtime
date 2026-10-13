@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,7 +103,33 @@ type LifecycleFlushClient interface {
 }
 
 type HarnessToolFlushClient interface {
-	FlushHarnessTool(ctx context.Context, records []json.RawMessage) (int, error)
+	FlushHarnessTool(ctx context.Context, records []json.RawMessage) (HarnessToolFlushResult, error)
+}
+
+// Quarantine reason codes for harness_tool records the catalog will never
+// accept. A quarantined record is dropped from the spool and counted as loss.
+const (
+	quarantineMalformed       = "malformed"
+	quarantineToolMissing     = "tool_missing"
+	quarantineCatalogRejected = "catalog_rejected"
+)
+
+// HarnessToolFlushResult reports what one FlushHarnessTool call did with its
+// records.
+type HarnessToolFlushResult struct {
+	Upserted int
+	// Quarantined counts dropped records by reason code.
+	Quarantined map[string]int
+	// CatalogRejection is the catalog's error for the last rejected record
+	// (status, reason, message). It never carries record contents.
+	CatalogRejection string
+}
+
+func (r *HarnessToolFlushResult) quarantine(reason string, n int) {
+	if r.Quarantined == nil {
+		r.Quarantined = map[string]int{}
+	}
+	r.Quarantined[reason] += n
 }
 
 type CredentialFlushClient interface {
@@ -319,18 +346,78 @@ type harnessToolFlushClient struct {
 type harnessToolFlushHTTPError struct {
 	statusCode int
 	retryAfter time.Duration
+	// status and message come from the catalog's AIP error body. The
+	// catalog's messages name the failed check, never an event's values.
+	status  string
+	message string
 }
 
 func (e *harnessToolFlushHTTPError) Error() string {
-	return fmt.Sprintf("harness_tool flush returned status %d", e.statusCode)
+	msg := fmt.Sprintf("harness_tool flush returned status %d", e.statusCode)
+	if detail := e.detail(); detail != "" {
+		msg += ": " + detail
+	}
+	return msg
 }
+
+func (e *harnessToolFlushHTTPError) detail() string {
+	switch {
+	case e.status != "" && e.message != "":
+		return e.status + ": " + e.message
+	default:
+		return e.status + e.message
+	}
+}
+
+// rejectsRecords reports whether the catalog refused the batch's contents, so
+// splitting the batch can isolate the record at fault. Any other status
+// (auth, throttling, outage) says nothing about the records and is retried
+// whole.
+func (e *harnessToolFlushHTTPError) rejectsRecords() bool {
+	switch e.statusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
+// maxCatalogErrorBody bounds how much of an error response is read.
+const maxCatalogErrorBody = 4 << 10
+
+// maxCatalogErrorText bounds each catalog error field carried into a log.
+const maxCatalogErrorText = 200
 
 func harnessToolFlushResponseError(resp *http.Response) error {
 	e := &harnessToolFlushHTTPError{statusCode: resp.StatusCode}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		e.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
+	var body struct {
+		Error struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, maxCatalogErrorBody)).Decode(&body) == nil {
+		e.status = safeCatalogErrorText(body.Error.Status)
+		e.message = safeCatalogErrorText(body.Error.Message)
+	}
 	return e
+}
+
+// safeCatalogErrorText keeps a catalog error field printable and bounded
+// before it reaches a log line.
+func safeCatalogErrorText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r > 0x7e {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > maxCatalogErrorText {
+		s = s[:maxCatalogErrorText]
+	}
+	return s
 }
 
 func NewHarnessToolFlushClientFromConfig(cfg CollectorConfig, timeout time.Duration) HarnessToolFlushClient {
@@ -364,11 +451,23 @@ func canonicalHarnessKind(kind string) string {
 // maps the harness kind, and POSTs them to the catalog in batches of at most
 // harnessToolBatchMax. Delivery is at-least-once: a failed batch returns an
 // error so the collector retains the spool and retries.
-func (c *harnessToolFlushClient) FlushHarnessTool(ctx context.Context, records []json.RawMessage) (int, error) {
+//
+// The catalog validates a batch all-or-nothing, so one bad record would hold
+// the spool forever. A record that is not a tool observation (malformed, or
+// no tool) is quarantined before sending, and a batch the catalog rejects is
+// split until the rejected records are isolated and quarantined; the rest
+// ship.
+func (c *harnessToolFlushClient) FlushHarnessTool(ctx context.Context, records []json.RawMessage) (HarnessToolFlushResult, error) {
+	var res HarnessToolFlushResult
 	events := make([]harnessToolIngestEvent, 0, len(records))
 	for _, raw := range records {
 		var rec rawHarnessToolRecord
 		if err := json.Unmarshal(raw, &rec); err != nil {
+			res.quarantine(quarantineMalformed, 1)
+			continue
+		}
+		if strings.TrimSpace(rec.Tool) == "" {
+			res.quarantine(quarantineToolMissing, 1)
 			continue
 		}
 		events = append(events, harnessToolIngestEvent{
@@ -378,19 +477,41 @@ func (c *harnessToolFlushClient) FlushHarnessTool(ctx context.Context, records [
 			ObservedAt:  rec.ObservedAt,
 		})
 	}
-	total := 0
 	for start := 0; start < len(events); start += harnessToolBatchMax {
 		end := start + harnessToolBatchMax
 		if end > len(events) {
 			end = len(events)
 		}
-		n, err := c.flushHarnessToolChunk(ctx, events[start:end])
-		if err != nil {
-			return total, err
+		if err := c.flushIsolatingRejects(ctx, events[start:end], &res); err != nil {
+			return res, err
 		}
-		total += n
 	}
-	return total, nil
+	return res, nil
+}
+
+// flushIsolatingRejects sends events and, when the catalog rejects their
+// contents, bisects them until each rejected event stands alone and is
+// quarantined. Errors that are not record rejections are returned unchanged.
+func (c *harnessToolFlushClient) flushIsolatingRejects(ctx context.Context, events []harnessToolIngestEvent, res *HarnessToolFlushResult) error {
+	n, err := c.flushHarnessToolChunk(ctx, events)
+	if err == nil {
+		res.Upserted += n
+		return nil
+	}
+	var httpErr *harnessToolFlushHTTPError
+	if !errors.As(err, &httpErr) || !httpErr.rejectsRecords() {
+		return err
+	}
+	if len(events) == 1 {
+		res.quarantine(quarantineCatalogRejected, 1)
+		res.CatalogRejection = fmt.Sprintf("status %d %s", httpErr.statusCode, httpErr.detail())
+		return nil
+	}
+	mid := len(events) / 2
+	if err := c.flushIsolatingRejects(ctx, events[:mid], res); err != nil {
+		return err
+	}
+	return c.flushIsolatingRejects(ctx, events[mid:], res)
 }
 
 func (c *harnessToolFlushClient) flushHarnessToolChunk(ctx context.Context, events []harnessToolIngestEvent) (int, error) {
@@ -669,6 +790,7 @@ func (c *Collector) shipSegment(ctx context.Context, seg spoolSegment, st *colle
 			return err
 		}
 		st.Segment, st.LinesSent = seg.seq, lineNo
+		skipped.moveQuarantined(st)
 		batch = batch[:0]
 		return c.writeState(*st)
 	}
@@ -713,6 +835,39 @@ type skippedRecords struct {
 	credential  int
 	unknown     int
 	malformed   int
+	// quarantined holds harness_tool records dropped since the collector
+	// state was last written, by reason code.
+	quarantined map[string]int
+}
+
+func (s *skippedRecords) addQuarantined(counts map[string]int) {
+	for reason, n := range counts {
+		if s.quarantined == nil {
+			s.quarantined = map[string]int{}
+		}
+		s.quarantined[reason] += n
+	}
+}
+
+// moveQuarantined adds the pending quarantine counts to the persisted loss
+// totals and clears them, so each record is counted once.
+func (s *skippedRecords) moveQuarantined(st *collectorState) {
+	for reason, n := range s.quarantined {
+		if st.HarnessToolQuarantined == nil {
+			st.HarnessToolQuarantined = map[string]int64{}
+		}
+		st.HarnessToolQuarantined[reason] += int64(n)
+	}
+	s.quarantined = nil
+}
+
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (s *skippedRecords) add(b parsedBatch, lifecycleShipped, harnessToolShipped, credentialShipped bool) {
@@ -764,10 +919,16 @@ func (c *Collector) flushBatch(ctx context.Context, b parsedBatch, skipped *skip
 	}
 	if len(b.harnessTool) > 0 && c.HarnessToolClient != nil {
 		payload, _ := json.Marshal(map[string][]json.RawMessage{"records": b.harnessTool})
-		if _, err := c.HarnessToolClient.FlushHarnessTool(ctx, b.harnessTool); err != nil {
+		res, err := c.HarnessToolClient.FlushHarnessTool(ctx, b.harnessTool)
+		if err != nil {
 			return len(b.decisions), err
 		}
 		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassHarnessTool, "events_sent", len(b.harnessTool), "payload_bytes", len(payload))
+		for _, reason := range sortedKeys(res.Quarantined) {
+			c.logger.Warn("audit collector quarantined harness_tool records the catalog will not accept",
+				"path", c.jsonlPath, "reason", reason, "records", res.Quarantined[reason], "catalog_error", res.CatalogRejection)
+		}
+		skipped.addQuarantined(res.Quarantined)
 	}
 	if len(b.harnessTool) > 0 && c.HarnessAuditClient != nil {
 		n, err := c.HarnessAuditClient.FlushHarnessAudit(ctx, b.harnessTool)
