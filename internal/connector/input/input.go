@@ -229,6 +229,16 @@ type LinearIssueCreate = providers.LinearIssueCreatePayload
 // comment's parent and must equal the linear/issue/<issue> resource.
 type LinearCommentCreate = providers.LinearCommentCreatePayload
 
+// DriveDocCreate is the google_drive/drive.doc.create input. Its bounds are
+// the contract's (providers.DriveDocCreatePayload.Validate); the parent
+// resource is drive/<drive_id>.
+type DriveDocCreate = providers.DriveDocCreatePayload
+
+// DriveDocUpdate is the google_drive/drive.doc.update input. Its bounds are
+// the contract's (providers.DriveDocUpdatePayload.Validate); the parent
+// resource is drive/<drive_id>/files/<file_id>.
+type DriveDocUpdate = providers.DriveDocUpdatePayload
+
 // HTTPRequest is the http_api/http.get and http.head input. Method comes from
 // the capability, never from the input.
 type HTTPRequest struct {
@@ -365,6 +375,18 @@ func Decode(provider, capability string, raw json.RawMessage) (any, error) {
 		return in, nil
 	case "linear/comment.create":
 		var in LinearCommentCreate
+		if strict(raw, &in) != nil || in.Validate() != nil {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "google_drive/drive.doc.create":
+		var in DriveDocCreate
+		if strict(raw, &in) != nil || in.Validate() != nil {
+			return nil, ErrInvalid
+		}
+		return in, nil
+	case "google_drive/drive.doc.update":
+		var in DriveDocUpdate
 		if strict(raw, &in) != nil || in.Validate() != nil {
 			return nil, ErrInvalid
 		}

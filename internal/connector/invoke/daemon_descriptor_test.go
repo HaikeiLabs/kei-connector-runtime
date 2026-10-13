@@ -244,11 +244,11 @@ func TestDaemonDescriptorDenyMatrix(t *testing.T) {
 		"descriptor names another connector":                      {mutate: func(r *descriptorRig) { r.grant.Connector.ID = "77777777-7777-7777-7777-777777777777" }, want: "descriptor_invalid"},
 		"descriptor fails the http_api contract":                  {mutate: func(r *descriptorRig) { r.grant.Connector.HTTPAPI.RegisteredBaseURL = "http://" + descriptorCRMHost }, want: "descriptor_invalid"},
 		"descriptor method this contracts version lacks": {mutate: func(r *descriptorRig) {
-			r.grant.Connector.HTTPAPI.AllowedMethods = append(r.grant.Connector.HTTPAPI.AllowedMethods, "POST")
+			r.grant.Connector.HTTPAPI.AllowedMethods = append(r.grant.Connector.HTTPAPI.AllowedMethods, "DELETE")
 		}, want: "descriptor_invalid"},
 		"capability this contracts version lacks": {mutate: func(r *descriptorRig) {
-			r.grant.Connector.Capabilities = append(r.grant.Connector.Capabilities, policybundle.ConnectorCapability{Name: "http.post", Mutating: true})
-		}, capability: "http.post", want: "descriptor_invalid"},
+			r.grant.Connector.Capabilities = append(r.grant.Connector.Capabilities, policybundle.ConnectorCapability{Name: "http.delete", Mutating: true})
+		}, capability: "http.delete", want: "descriptor_invalid"},
 		"capability not on the descriptor": {mutate: func(r *descriptorRig) {
 			r.grant.Connector.Capabilities = []policybundle.ConnectorCapability{{Name: "http.head"}}
 		}, want: "descriptor_invalid"},
@@ -290,8 +290,8 @@ func TestDaemonDescriptorDenyMatrix(t *testing.T) {
 			rig := newDescriptorRig(t)
 			c.mutate(rig)
 			capability, action := "http.get", "read"
-			if c.capability == "http.post" {
-				capability, action = "http.post", "create"
+			if c.capability == "http.delete" {
+				capability, action = "http.delete", "delete"
 			}
 			out, body := rig.invoke(capability, action, "/leads/42", `{"path":"/leads/42"}`)
 			if out.Decision != "deny" || out.ReasonCode != c.want || out.Result != nil {

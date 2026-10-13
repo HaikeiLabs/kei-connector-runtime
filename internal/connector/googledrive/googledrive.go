@@ -1,7 +1,9 @@
 // Package googledrive is the google_drive connector: bounded drive.search,
 // drive.metadata.read, and docs.read through the kei-connector-contracts
-// Google client. Search and metadata never carry file content; docs.read
-// returns the document text, capped at MaxDocumentBytes.
+// Google client, plus drive.doc.create and drive.doc.update for document
+// writes. Search and metadata never carry file content; docs.read returns the
+// document text, capped at MaxDocumentBytes. Write results return the created
+// or updated document id.
 package googledrive
 
 import (
@@ -23,7 +25,7 @@ type Document struct {
 	Text   string `json:"text"`
 }
 
-// Connector executes google_drive reads.
+// Connector executes google_drive capabilities.
 type Connector struct{}
 
 func driveIDFromResource(resource string) string {
@@ -34,12 +36,16 @@ func driveIDFromResource(resource string) string {
 	return parts[1]
 }
 
-// Execute runs one google_drive read.
+// Execute runs one google_drive capability.
 func (Connector) Execute(ctx context.Context, call connector.Call) (any, error) {
 	var payload providers.Payload
 	switch in := call.Input.(type) {
 	case input.DriveSearch:
 		payload = providers.DriveSearchPayload{Query: in.Query}
+	case input.DriveDocCreate:
+		payload = in
+	case input.DriveDocUpdate:
+		payload = in
 	case input.Empty:
 		switch call.Invocation.Capability {
 		case "drive.metadata.read":
