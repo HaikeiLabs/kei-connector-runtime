@@ -21,11 +21,13 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
@@ -207,6 +209,25 @@ type serveSeams struct {
 	providerTransport http.RoundTripper
 }
 
+// daemonInvokeEnv is the connector execution environment of the serve
+// daemon. Store and AssertionKey let the crm connector sign its service
+// assertion (contract section 5, D3) with the installation key named by
+// KEI_SERVICE_ASSERTION_KEY_BACKEND/_KEY_REF/_KID; without them every crm call
+// through the daemon denies assertion_key_unavailable. Other providers get
+// their credential from the session store, not from Store.
+func daemonInvokeEnv(cfg Config, seams serveSeams, store secrets.Store, emit func(json.RawMessage)) invoke.Env {
+	return invoke.Env{
+		RuntimeToken:      cfg.RuntimeToken,
+		ProviderTransport: seams.providerTransport,
+		Store:             store,
+		AssertionKey:      crm.KeyConfigFromEnv(),
+		Audit: func(record []byte) error {
+			emit(record)
+			return nil
+		},
+	}
+}
+
 // newServeLocalPDP builds the daemon's local PDP: decision audit goes to the
 // spool and, with KEI_CREDENTIAL_RELEASE=identity, linked sessions and an
 // owner session with matching linked bundle identity hold connector credentials
@@ -230,17 +251,11 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
 	local.SetTokenlessOwnerSession(cfg.TokenlessOwnerSession)
 	if creds != nil {
-		secretResolver := invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: connectorSecretStore()}
+		store := connectorSecretStore()
+		secretResolver := invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: store}
 		local.SetCredentialStore(creds)
 		local.SetConnectorInvoker(&invoke.Daemon{
-			Env: invoke.Env{
-				RuntimeToken:      cfg.RuntimeToken,
-				ProviderTransport: seams.providerTransport,
-				Audit: func(record []byte) error {
-					emitFunc(record)
-					return nil
-				},
-			},
+			Env:       daemonInvokeEnv(cfg, seams, store, emitFunc),
 			Authorize: local.ConnectorGrant,
 			PlanV2: func(ctx context.Context, sessionID, tool, agent string, args, contextValues []byte, parent string, depth int) ([]policybundle.Operation, error) {
 				_, ops, err := local.PlanV2(ctx, sessionID, tool, agent, args, contextValues, parent, depth)
