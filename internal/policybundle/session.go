@@ -127,12 +127,13 @@ func statusReasonCode(status string) string {
 // SubjectSnapshotFresh reports whether the bundle subject snapshot is usable.
 // HAI-452: the snapshot is trusted for the session lifetime — no
 // max_cache_seconds window is enforced. Returns true when the bundle
-// itself has been issued (IssuedAt ≤ now).
+// itself has been issued (IssuedAt ≤ now, allowing MaxIssuedAtClockSkew so a
+// bundle Validate accepted is usable at once).
 func (v *Verified) SubjectSnapshotFresh(now time.Time) bool {
 	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || v.Payload.Identities == nil {
 		return false
 	}
-	return !v.Payload.IssuedAt.After(now)
+	return !v.Payload.IssuedAt.After(now.Add(MaxIssuedAtClockSkew))
 }
 
 // LookupIdentity resolves an external session key against the verified

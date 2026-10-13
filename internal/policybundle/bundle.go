@@ -19,6 +19,11 @@ const ContentType = "application/vnd.kei.policy-bundle.v1+json"
 const ContentTypeV2 = "application/vnd.kei.policy-bundle.v2+json"
 const Issuer = "kei-policy-catalog"
 
+// MaxIssuedAtClockSkew is how far a bundle's issued_at may be ahead of the
+// runtime clock. The catalog stamps issued_at with its own clock, which can
+// lead a runtime host by a few hundred milliseconds; v1 and v2 share it.
+const MaxIssuedAtClockSkew = 5 * time.Minute
+
 var (
 	ErrBundleExpired        = errors.New("policy bundle expired")
 	ErrBundleUnsupported    = errors.New("policy bundle unsupported")
@@ -144,7 +149,7 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	if payload.BundleVersion <= highestVersion {
 		return nil, errors.New("policy bundle version rollback or replay")
 	}
-	if payload.IssuedAt.After(now.Add(5 * time.Minute)) {
+	if payload.IssuedAt.After(now.Add(MaxIssuedAtClockSkew)) {
 		return nil, errors.New("policy bundle issued too far in the future")
 	}
 	if !now.Before(payload.NotAfter) {
@@ -209,8 +214,8 @@ func ValidateV2(bundleBytes []byte, installationID, orgID, workspaceID string, h
 	if payload.BundleVersion <= highestVersion {
 		return nil, errors.New("policy bundle v2 version rollback or replay")
 	}
-	if payload.IssuedAt.After(now) {
-		return nil, errors.New("policy bundle v2 issued in the future")
+	if payload.IssuedAt.After(now.Add(MaxIssuedAtClockSkew)) {
+		return nil, errors.New("policy bundle v2 issued too far in the future")
 	}
 	if !now.Before(payload.NotAfter) {
 		return nil, ErrBundleExpired
