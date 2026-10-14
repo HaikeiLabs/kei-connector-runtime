@@ -44,6 +44,8 @@ const (
 	reasonUpstreamTimeout            = "upstream_timeout"
 	reasonUpstreamProtocolError      = "upstream_protocol_error"
 	reasonResponseTooLarge           = "response_too_large"
+	// reasonCredentialEcho: the upstream response contained the credential.
+	reasonCredentialEcho = "credential_echo"
 )
 
 // routeError is a failure that ends a request with one §4.5 code and reason.

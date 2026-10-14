@@ -27,40 +27,53 @@ const (
 )
 
 // callUpstream makes one POST to connector d's mcp.url and returns the
-// response. The caller must close resp.Body. Every error is a *routeError
-// that never names the upstream URL or carries the credential. A 3xx is never
-// followed (§4.10).
-func (h *Handler) callUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, error) {
+// response with a guard holding the credential sent (nil when none), to check
+// the response for credential_echo. The caller must close resp.Body and wipe
+// the guard. Every error is a *routeError that never names the upstream URL
+// or carries the credential. A 3xx is never followed (§4.10).
+func (h *Handler) callUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, *echoGuard, error) {
+	resp, token, err := h.sendUpstream(ctx, d, sess, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resp, newEchoGuard(token), nil
+}
+
+// sendUpstream is callUpstream returning the credential it attached.
+func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, string, error) {
 	if d.MCP.Transport != transportStreamableHTTP {
-		return nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream transport %q is not supported", d.MCP.Transport))
+		return nil, "", upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream transport %q is not supported", d.MCP.Transport))
 	}
 	u, err := url.Parse(d.MCP.URL)
 	if err != nil {
-		return nil, upstreamFailure(reasonUpstreamBlocked, errors.New("invalid upstream URL"))
+		return nil, "", upstreamFailure(reasonUpstreamBlocked, errors.New("invalid upstream URL"))
 	}
 	if err := h.checkSSRF(u); err != nil {
-		return nil, upstreamFailure(reasonUpstreamBlocked, errSSRFBlocked)
+		return nil, "", upstreamFailure(reasonUpstreamBlocked, errSSRFBlocked)
 	}
 	switch d.MCP.AuthMethod {
 	case authMethodNone:
-		return h.post(ctx, d, sess, body, "")
+		resp, err := h.post(ctx, d, sess, body, "")
+		return resp, "", err
 	case authMethodSecretRef:
 		// credential_fields headers from the tenant secret store are not
 		// implemented for mcp connectors yet.
-		return nil, credentialDenial(reasonCredentialUnavailable, errors.New("secret_ref mcp connectors are not supported yet"))
+		return nil, "", credentialDenial(reasonCredentialUnavailable, errors.New("secret_ref mcp connectors are not supported yet"))
 	}
 	// Step 10 (§4.8): the session's credential for this connector, released
 	// for exactly its canonical resource.
 	if h.config.Credentials == nil {
-		return nil, credentialDenial(reasonCredentialUnavailable, errors.New("no credential source"))
+		return nil, "", credentialDenial(reasonCredentialUnavailable, errors.New("no credential source"))
 	}
 	var resp *http.Response
+	var sent string
 	err = h.config.Credentials.UseCredential(ctx, sess, d.ID, d.MCP.URL, func(c ConnectorCredential) error {
 		if c.ConnectorID != d.ID || c.Resource != d.MCP.URL {
 			return credentialDenial(reasonCredentialAudienceMismatch, errors.New("the credential was released for another connector or resource"))
 		}
 		r, err := h.post(ctx, d, sess, body, c.AccessToken)
-		resp = r
+		// A copy outlives the callback only for this response's echo check.
+		resp, sent = r, strings.Clone(c.AccessToken)
 		return err
 	})
 	var re *routeError
@@ -68,16 +81,16 @@ func (h *Handler) callUpstream(ctx context.Context, d policybundle.Connector, se
 		if re.reason == reasonCredentialRejected {
 			h.config.Credentials.Discard(sess, d.ID, d.MCP.URL)
 		}
-		return nil, re
+		return nil, "", re
 	}
 	if err != nil {
 		var denied *CredentialDenied
 		if errors.As(err, &denied) && denied.Reason == "AUDIENCE_MISMATCH" {
-			return nil, credentialDenial(reasonCredentialAudienceMismatch, err)
+			return nil, "", credentialDenial(reasonCredentialAudienceMismatch, err)
 		}
-		return nil, credentialDenial(reasonCredentialUnavailable, err)
+		return nil, "", credentialDenial(reasonCredentialUnavailable, err)
 	}
-	return resp, nil
+	return resp, sent, nil
 }
 
 func credentialDenial(reason string, err error) *routeError {
@@ -171,17 +184,21 @@ func bearerChallengeParams(ch string) (map[string]string, bool) {
 // the JSON-RPC response body, whether the server answered with JSON or an
 // SSE stream. The response is capped at maxResponseBytes.
 func (h *Handler) exchange(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) ([]byte, error) {
-	resp, err := h.callUpstream(ctx, d, sess, body)
+	resp, guard, err := h.callUpstream(ctx, d, sess, body)
 	if err != nil {
 		return nil, err
 	}
+	defer guard.wipe()
 	defer resp.Body.Close()
-	if !isEventStream(resp) {
-		return readCapped(resp.Body, maxResponseBytes)
-	}
 	raw, err := readCapped(resp.Body, maxResponseBytes)
 	if err != nil {
 		return nil, err
+	}
+	if guard.leaks(raw) {
+		return nil, credentialEcho()
+	}
+	if !isEventStream(resp) {
+		return raw, nil
 	}
 	// The response is the first event whose data is a JSON-RPC response (it
 	// has an id); notifications before it are skipped.
@@ -212,22 +229,27 @@ func (h *Handler) forwardToUpstream(w http.ResponseWriter, ctx context.Context, 
 	start := h.now()
 	rec.Forwarded, rec.UpstreamHost = true, upstreamHost(d.MCP.URL)
 	defer func() { rec.DurationMS = h.now().Sub(start).Milliseconds() }()
-	resp, err := h.callUpstream(ctx, d, sess, body)
+	resp, guard, err := h.callUpstream(ctx, d, sess, body)
 	if err != nil {
 		h.denyUpstream(w, rec, id, d, err)
 		return
 	}
+	defer guard.wipe()
 	defer resp.Body.Close()
 	rec.UpstreamStatus = resp.StatusCode
 
 	if isEventStream(resp) {
-		rec.ResponseBytes = h.relaySSE(w, id, d, resp.Body)
+		rec.ResponseBytes = h.relaySSE(w, rec, id, d, resp.Body, guard)
 		return
 	}
 
 	respBody, err := readCapped(resp.Body, maxResponseBytes)
 	if err != nil {
 		h.denyUpstream(w, rec, id, d, err)
+		return
+	}
+	if guard.leaks(respBody) {
+		h.denyUpstream(w, rec, id, d, credentialEcho())
 		return
 	}
 	rec.ResponseBytes = len(respBody)
@@ -273,7 +295,7 @@ func readCapped(r io.Reader, limit int) ([]byte, error) {
 // the events would exceed maxResponseBytes in total, the stream ends with a
 // response_too_large error for the request instead (ADR-036 §4.9). It
 // returns the number of bytes relayed.
-func (h *Handler) relaySSE(w http.ResponseWriter, id any, d policybundle.Connector, body io.Reader) int {
+func (h *Handler) relaySSE(w http.ResponseWriter, rec *AuditRecord, id any, d policybundle.Connector, body io.Reader, guard *echoGuard) int {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.config.Logger.Error("mcp_sse_flush_unsupported", "slug", d.Slug)
@@ -298,6 +320,10 @@ func (h *Handler) relaySSE(w http.ResponseWriter, id any, d policybundle.Connect
 			continue
 		}
 		if err != nil {
+			if guard.leaks(event.Bytes()) {
+				h.echoed(w, flusher, rec, id, d)
+				return total
+			}
 			if event.Len() > 0 {
 				w.Write(event.Bytes())
 				flusher.Flush()
@@ -309,12 +335,23 @@ func (h *Handler) relaySSE(w http.ResponseWriter, id any, d policybundle.Connect
 			return total
 		}
 		if line := bytes.TrimRight(chunk, "\r\n"); len(line) == 0 {
+			if guard.leaks(event.Bytes()) {
+				h.echoed(w, flusher, rec, id, d)
+				return total
+			}
 			w.Write(event.Bytes())
 			flusher.Flush()
 			total += event.Len()
 			event.Reset()
 		}
 	}
+}
+
+// echoed ends a relayed stream at an event that carries the credential: the
+// event is dropped, and the call is denied credential_echo.
+func (h *Handler) echoed(w io.Writer, flusher http.Flusher, rec *AuditRecord, id any, d policybundle.Connector) {
+	rec.Decision, rec.ReasonCode = "deny", reasonCredentialEcho
+	h.endSSE(w, flusher, id, d, credentialEcho())
 }
 
 // endSSE terminates a relayed stream with a JSON-RPC error event.
