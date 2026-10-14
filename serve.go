@@ -132,7 +132,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			slog.Error("runtime_mcp_listener_failed", "addr", cfg.MCPListenAddr, "error", err)
 			return 1
 		}
-		mcpHandler := newMCPHandler(cfg, local)
+		mcpHandler := newMCPRoute(cfg, local).handler
 		children.Go("mcp listener", func(ctx context.Context) error {
 			return keiruntime.ServeHTTP(ctx, newServer(mcpHandler), mcpListener, shutdownFlushTimeout)
 		})
@@ -310,16 +310,27 @@ func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Ha
 	return base, local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
 }
 
-// newMCPHandler builds the /mcp/{slug} route handler with PDP-based
-// authorization and an empty key registry. Route keys are minted per session
-// at runtime.
-func newMCPHandler(cfg Config, local *keiruntime.LocalPDP) http.Handler {
-	return mcproute.NewHandler(mcproute.Config{
-		KeyRegistry: mcproute.NewKeyRegistry(),
-		Authorizer:  pdpAuthorizer{pdp: local},
-		Upstreams:   make(map[string]mcproute.UpstreamConfig),
-		Logger:      slog.Default(),
-	})
+// mcpRoute is the /mcp/{slug} route as serve wires it: the handler and the
+// registry of route keys for live sessions.
+type mcpRoute struct {
+	handler http.Handler
+	keys    *mcproute.KeyRegistry
+}
+
+// newMCPRoute builds the /mcp/{slug} route with PDP-based authorization and
+// an empty key registry. Route keys are minted per session at runtime.
+func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
+	keys := mcproute.NewKeyRegistry()
+	local.OnSessionEnd(keys.Revoke)
+	return &mcpRoute{
+		keys: keys,
+		handler: mcproute.NewHandler(mcproute.Config{
+			KeyRegistry: keys,
+			Authorizer:  pdpAuthorizer{pdp: local},
+			Upstreams:   make(map[string]mcproute.UpstreamConfig),
+			Logger:      slog.Default(),
+		}),
+	}
 }
 
 // pdpAuthorizer maps an MCP decision to a PDP tool call and denies on any
@@ -334,9 +345,18 @@ func (a pdpAuthorizer) Authorize(ctx context.Context, d mcproute.Decision) error
 		return &mcproute.PermissionError{Reason: "internal_error", Tool: d.Tool}
 	}
 	if !result.Allow {
-		return &mcproute.PermissionError{Reason: result.ReasonCode, Tool: d.Tool}
+		return &mcproute.PermissionError{Reason: mcpReason(result.ReasonCode), Tool: d.Tool}
 	}
 	return nil
+}
+
+// mcpReason maps a PDP reason code to its ADR-036 §4.5 name. The PDP calls a
+// deny policy policy_deny everywhere; the MCP route calls it policy_denied.
+func mcpReason(code string) string {
+	if code == "policy_deny" {
+		return "policy_denied"
+	}
+	return code
 }
 
 // validateMCPListenAddr rejects addresses that do not resolve to a loopback

@@ -1,6 +1,7 @@
 package mcproute
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-contracts/manifest"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/google/uuid"
 )
 
 // Session carries the subject and metadata validated from a route key.
@@ -75,14 +78,15 @@ type UpstreamConfig struct {
 	// TokenSource provides the Bearer token sent to the upstream MCP server.
 	// When nil, no Authorization header is set.
 	TokenSource TokenSource
-	// approved for this upstream. When non-empty, tools/list responses are
+	// ApprovedToolsHash is the approved manifest hash. Empty means no
+	// manifest is approved yet (mcp_manifest_unapproved).
 	ApprovedToolsHash string
 }
 
 // Config configures the /mcp/{slug} route handler.
 type Config struct {
 	// KeyRegistry validates route keys presented as Authorization Bearer tokens.
-	// When nil, auth is skipped and every request is permitted.
+	// When nil, every request is rejected with invalid_route_key (fail closed).
 	KeyRegistry *KeyRegistry
 	// Authorizer decides whether a tool call or tool list entry is permitted.
 	// When nil, every request is denied (fail-closed).
@@ -97,6 +101,9 @@ type Config struct {
 	AgentBindings []AgentBinding
 	// Logger for audit and errors. When nil, logs are discarded.
 	Logger *slog.Logger
+	// UpstreamTimeout bounds one upstream exchange, response body included
+	// (ADR-036 §4.9). Zero means 60 s; values above 300 s are capped.
+	UpstreamTimeout time.Duration
 }
 
 // AgentBinding is one agent_connector_bindings entry (ADR-036 §4.5 step 6).
@@ -113,8 +120,9 @@ type jsonrpcRequest struct {
 }
 
 type jsonrpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    *rpcErrorData `json:"data,omitempty"`
 }
 
 type jsonrpcResponse struct {
@@ -142,6 +150,25 @@ type Handler struct {
 	listings  map[string]*verifiedListing
 }
 
+// Size and time limits of the route (ADR-036 §4.5 step 2, §4.9).
+const (
+	maxRequestBytes        = 1 << 20
+	maxResponseBytes       = 4 << 20
+	defaultUpstreamTimeout = 60 * time.Second
+	maxUpstreamTimeout     = 300 * time.Second
+)
+
+func upstreamTimeout(d time.Duration) time.Duration {
+	switch {
+	case d <= 0:
+		return defaultUpstreamTimeout
+	case d > maxUpstreamTimeout:
+		return maxUpstreamTimeout
+	default:
+		return d
+	}
+}
+
 // NewHandler creates a new MCP route handler.
 func NewHandler(cfg Config) *Handler {
 	if cfg.Logger == nil {
@@ -159,6 +186,7 @@ func NewHandler(cfg Config) *Handler {
 		Control:   func(network, address string, c syscall.RawConn) error { return h.dialCtl(network, address, c) },
 	}
 	h.client = &http.Client{
+		Timeout: upstreamTimeout(cfg.UpstreamTimeout),
 		Transport: &http.Transport{
 			DialContext: dialer.DialContext,
 		},
@@ -191,10 +219,9 @@ func (h *Handler) agentBound(agentID, connectorID string) bool {
 	return false
 }
 
-// errAuthFailed is returned when the route key is missing or invalid.
-const errAuthFailed = "invalid_route_key"
-
-// ServeHTTP handles an MCP route request.
+// ServeHTTP handles an MCP route request. Origin and Host are checked before
+// the route key (ADR-036 §4.5 step 1), so a browser or rebound name never
+// learns whether a key is valid.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/.well-known/") {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -212,26 +239,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := checkLoopback(r); err != nil {
+		writeDenial(w, http.StatusForbidden, nil, codeDenied, reasonNonLoopback)
+		return
+	}
+
 	sess := h.isValidRouteKey(r)
 	if sess == nil {
-		h.writeAuthError(w)
+		writeDenial(w, http.StatusForbidden, nil, codeUnauthenticated, errAuthFailed)
 		return
 	}
 
-	if err := h.checkLoopback(r); err != nil {
-		h.writeLoopbackError(w)
-		return
-	}
-
-	upstream, ok := h.config.Upstreams[slug]
-	if !ok {
-		http.Error(w, "unknown connector", http.StatusNotFound)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			h.writeRPCErrorStatus(w, http.StatusBadRequest, nil, -32600, "request_too_large")
+			return
+		}
+		h.writeRPCErrorStatus(w, http.StatusBadRequest, nil, -32700, "Parse error")
 		return
 	}
 
@@ -280,172 +306,225 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Result:  &pingResult,
 		})
 	case "tools/call":
-		if upstream.ApprovedToolsHash == "" {
-			h.writeRPCError(w, id, -32000, "manifest_not_approved")
-			return
-		}
-		tool := extractTool(req.Params)
-		if tool == "" {
-			h.writeRPCError(w, id, -32602, "missing tool name")
-			return
-		}
-		if h.config.Authorizer == nil {
-			h.writeRPCError(w, id, -32001, "not_implemented")
-			return
-		}
-		// ADR-036 §4.5 steps 5-6: the slug must name an active mcp connector
-		// in the workspace descriptors, and the session's agent must be bound
-		// to it.
-		descriptor, ok := h.lookupMCPDescriptor(slug)
-		if !ok {
-			h.writeRPCError(w, id, -32000, "connector_not_found")
-			return
-		}
-		if !h.agentBound(sess.Agent, descriptor.ID) {
-			h.writeRPCError(w, id, -32000, "connector_not_bound")
-			return
-		}
-		if err := h.config.Authorizer.Authorize(r.Context(), Decision{
-			SessionID:     sess.SessionID,
-			Subject:       sess.Subject,
-			Agent:         sess.Agent,
-			HarnessKind:   sess.HarnessKind,
-			ConnectorSlug: slug,
-			Tool:          tool,
-			Args:          req.Params,
-		}); err != nil {
-			var permErr *PermissionError
-			if errors.As(err, &permErr) {
-				h.writeRPCError(w, id, -32000, permErr.Reason)
-				return
-			}
-			h.writeRPCError(w, id, -32000, "internal_error")
-			return
-		}
-		listing := h.getVerifiedListing(slug)
-		if listing == nil || !listing.toolNames[tool] {
-			h.writeRPCError(w, id, -32000, "manifest_drift")
-			return
-		}
-		h.forwardToUpstream(w, r, upstream, canonical, slug, sess)
+		h.serveToolsCall(w, r.Context(), id, slug, sess, req, canonical)
 	case "tools/list":
-		if upstream.ApprovedToolsHash == "" {
-			h.writeRPCError(w, id, -32000, "manifest_not_approved")
-			return
-		}
-		listing, err := h.fetchAndVerifyManifest(r.Context(), upstream, slug, sess)
-		if err != nil {
-			h.config.Logger.Error("manifest drift", "error", err)
-			h.writeError(w, http.StatusBadGateway, "manifest_drift")
-			return
-		}
-		h.mu.Lock()
-		h.listings[slug] = listing
-		h.mu.Unlock()
-		h.writeToolsList(w, id, h.filterTools(r.Context(), listing.tools, slug, sess))
+		h.serveToolsList(w, r.Context(), id, slug, sess)
 	default:
 		h.writeRPCError(w, id, -32601, "Method not found")
 	}
 }
 
-func (h *Handler) forwardToUpstream(w http.ResponseWriter, r *http.Request, upstream UpstreamConfig, body []byte, slug string, sess *Session) {
-	u, err := url.Parse(upstream.URL)
-	if err != nil {
-		h.config.Logger.Error("invalid upstream URL", "url", upstream.URL, "error", err)
-		h.writeError(w, http.StatusBadGateway, "invalid_upstream_url")
+// serveToolsCall runs ADR-036 §4.5 steps 5 to 11 for one tools/call. Every
+// denial is answered before any request reaches the upstream server.
+func (h *Handler) serveToolsCall(w http.ResponseWriter, ctx context.Context, id any, slug string, sess *Session, req jsonrpcRequest, canonical []byte) {
+	upstream, ok := h.config.Upstreams[slug]
+	if !ok {
+		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotFound)
 		return
 	}
-	if err := h.checkSSRF(u); err != nil {
-		h.config.Logger.Warn("ssrf block", "url", upstream.URL, "error", err)
-		h.writeError(w, http.StatusBadGateway, "upstream_not_allowed")
+	tool := extractTool(req.Params)
+	if tool == "" {
+		h.writeRPCError(w, id, -32602, "missing tool name")
 		return
 	}
+	// Steps 5-6: the slug must name an active mcp connector in the workspace
+	// descriptors, and the session's agent must be bound to it.
+	descriptor, ok := h.lookupMCPDescriptor(slug)
+	if !ok {
+		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotFound)
+		return
+	}
+	if !h.agentBound(sess.Agent, descriptor.ID) {
+		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotBound)
+		return
+	}
+	// Step 7: a verified listing that contains the tool.
+	if upstream.ApprovedToolsHash == "" {
+		writeDenial(w, http.StatusOK, id, codeManifest, reasonManifestUnapproved)
+		return
+	}
+	listing := h.getVerifiedListing(slug)
+	if listing == nil {
+		writeDenial(w, http.StatusOK, id, codeManifest, reasonManifestDrift)
+		return
+	}
+	if !listing.toolNames[tool] {
+		writeDenial(w, http.StatusOK, id, codeManifest, reasonToolNotApproved)
+		return
+	}
+	// Step 9: policy.
+	if h.config.Authorizer == nil {
+		writeDenial(w, http.StatusOK, id, codeDenied, reasonNoMatchingPolicy)
+		return
+	}
+	if err := h.config.Authorizer.Authorize(ctx, Decision{
+		SessionID:     sess.SessionID,
+		Subject:       sess.Subject,
+		Agent:         sess.Agent,
+		HarnessKind:   sess.HarnessKind,
+		ConnectorSlug: slug,
+		Tool:          tool,
+		Args:          req.Params,
+	}); err != nil {
+		reason := reasonPolicyDenied
+		var permErr *PermissionError
+		if errors.As(err, &permErr) && permErr.Reason != "" {
+			reason = permErr.Reason
+		}
+		writeDenial(w, http.StatusOK, id, codeDenied, reason)
+		return
+	}
+	h.forwardToUpstream(w, ctx, id, upstream, canonical, slug, sess)
+}
 
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream.URL, strings.NewReader(string(body)))
-	if err != nil {
-		h.config.Logger.Error("creating upstream request", "error", err)
-		h.writeError(w, http.StatusInternalServerError, "internal_error")
+// serveToolsList answers tools/list from a freshly verified upstream
+// listing (ADR-036 §4.7). Drift returns no tools (§5.3).
+func (h *Handler) serveToolsList(w http.ResponseWriter, ctx context.Context, id any, slug string, sess *Session) {
+	upstream, ok := h.config.Upstreams[slug]
+	if !ok {
+		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotFound)
 		return
 	}
-	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Accept", "application/json")
-	if upstream.TokenSource != nil {
-		token, err := upstream.TokenSource.Token(r.Context(), sess.Subject, slug)
-		if err != nil {
-			h.config.Logger.Warn("token_source_denied", "subject", sess.Subject, "slug", slug, "error", err)
-			h.writeRPCError(w, nil, -32001, "internal_error")
+	if upstream.ApprovedToolsHash == "" {
+		writeDenial(w, http.StatusOK, id, codeManifest, reasonManifestUnapproved)
+		return
+	}
+	listing, err := h.fetchAndVerifyManifest(ctx, upstream, slug, sess)
+	if err != nil {
+		h.logUpstreamFailure(slug, upstream, err)
+		var re *routeError
+		if errors.As(err, &re) {
+			writeDenial(w, http.StatusOK, id, re.code, re.reason)
 			return
 		}
-		upReq.Header.Set("Authorization", "Bearer "+token)
+		h.writeToolsList(w, id, []json.RawMessage{})
+		return
 	}
+	h.mu.Lock()
+	h.listings[slug] = listing
+	h.mu.Unlock()
+	h.writeToolsList(w, id, h.filterTools(ctx, listing.tools, slug, sess))
+}
 
-	resp, err := h.client.Do(upReq)
+// forwardToUpstream sends one tools/call and relays the response. Only the
+// route's own Content-Type is set: no upstream header reaches the harness.
+func (h *Handler) forwardToUpstream(w http.ResponseWriter, ctx context.Context, id any, upstream UpstreamConfig, body []byte, slug string, sess *Session) {
+	resp, err := h.callUpstream(ctx, upstream, slug, sess, body)
 	if err != nil {
-		if errors.Is(err, errSSRFBlocked) {
-			h.writeError(w, http.StatusBadGateway, "upstream_not_allowed")
-			return
-		}
-		h.config.Logger.Error("upstream request failed", "error", err)
-		h.writeError(w, http.StatusBadGateway, "upstream_unreachable")
+		h.denyUpstream(w, id, slug, upstream, err)
 		return
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		h.config.Logger.Warn("upstream redirect", "status", resp.StatusCode, "slug", slug)
-		h.writeError(w, http.StatusBadGateway, "upstream_redirect")
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		h.denyUpstream(w, id, slug, upstream, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream status %d", resp.StatusCode)))
 		return
 	}
 
-	contentType := resp.Header.Get("Content-Type")
-	isSSE := strings.Contains(contentType, "text/event-stream")
-
-	if !isSSE {
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			h.config.Logger.Error("reading upstream response", "error", err)
-			h.writeError(w, http.StatusBadGateway, "upstream_error")
-			return
-		}
-
-		for k, v := range resp.Header {
-			if len(v) > 0 {
-				w.Header()[k] = v
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		h.relaySSE(w, id, slug, upstream, resp.Body)
 		return
 	}
 
-	h.relaySSE(w, resp)
+	respBody, err := readCapped(resp.Body, maxResponseBytes)
+	if err != nil {
+		h.denyUpstream(w, id, slug, upstream, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respBody)
 }
 
-func (h *Handler) relaySSE(w http.ResponseWriter, resp *http.Response) {
+// readCapped reads at most limit bytes. A longer body is response_too_large.
+func readCapped(r io.Reader, limit int) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return nil, transportError(err)
+	}
+	if len(b) > limit {
+		return nil, upstreamFailure(reasonResponseTooLarge, fmt.Errorf("response exceeds %d bytes", limit))
+	}
+	return b, nil
+}
+
+// relaySSE relays an SSE response stream one complete event at a time. Once
+// the events would exceed maxResponseBytes in total, the stream ends with a
+// response_too_large error for the request instead (ADR-036 §4.9).
+func (h *Handler) relaySSE(w http.ResponseWriter, id any, slug string, upstream UpstreamConfig, body io.Reader) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		h.config.Logger.Error("ResponseWriter does not support flushing")
+		h.config.Logger.Error("mcp_sse_flush_unsupported", "slug", slug)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	for k, v := range resp.Header {
-		if len(v) > 0 {
-			w.Header()[k] = v
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	buf := make([]byte, 4096)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	br := bufio.NewReaderSize(body, 64<<10)
+	var event bytes.Buffer
+	total := 0
 	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			w.Write(buf[:n])
-			flusher.Flush()
+		chunk, err := br.ReadSlice('\n')
+		event.Write(chunk)
+		if total+event.Len() > maxResponseBytes {
+			h.endSSE(w, flusher, id, slug, upstream, upstreamFailure(reasonResponseTooLarge, fmt.Errorf("stream exceeds %d bytes", maxResponseBytes)))
+			return
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
 		}
 		if err != nil {
-			break
+			if event.Len() > 0 {
+				w.Write(event.Bytes())
+				flusher.Flush()
+			}
+			if !errors.Is(err, io.EOF) {
+				h.endSSE(w, flusher, id, slug, upstream, transportError(err))
+			}
+			return
+		}
+		if line := bytes.TrimRight(chunk, "\r\n"); len(line) == 0 {
+			w.Write(event.Bytes())
+			flusher.Flush()
+			total += event.Len()
+			event.Reset()
 		}
 	}
-	resp.Body.Close()
+}
+
+// endSSE terminates a relayed stream with a JSON-RPC error event.
+func (h *Handler) endSSE(w io.Writer, flusher http.Flusher, id any, slug string, upstream UpstreamConfig, re *routeError) {
+	h.logUpstreamFailure(slug, upstream, re)
+	msg, _ := json.Marshal(jsonrpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   &jsonrpcError{Code: re.code, Message: re.reason, Data: &rpcErrorData{Reason: re.reason, DecisionID: uuid.NewString()}},
+	})
+	fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
+	flusher.Flush()
+}
+
+// denyUpstream answers a failed upstream exchange with its §4.5 code.
+func (h *Handler) denyUpstream(w http.ResponseWriter, id any, slug string, upstream UpstreamConfig, err error) {
+	h.logUpstreamFailure(slug, upstream, err)
+	re := upstreamFailure(reasonUpstreamUnreachable, err)
+	errors.As(err, &re)
+	writeDenial(w, http.StatusOK, id, re.code, re.reason)
+}
+
+// logUpstreamFailure logs the connector slug and upstream host, never the
+// URL: its path or query can hold a secret.
+func (h *Handler) logUpstreamFailure(slug string, upstream UpstreamConfig, err error) {
+	h.config.Logger.Warn("mcp_upstream_failed", "slug", slug, "upstream_host", upstreamHost(upstream.URL), "error", err)
+}
+
+func upstreamHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // maxManifestTools and maxManifestBytes cap the verified manifest size.
@@ -489,10 +568,18 @@ func (h *Handler) fetchAndVerifyManifest(ctx context.Context, upstream UpstreamC
 		if err != nil {
 			return nil, err
 		}
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := readCapped(resp.Body, maxResponseBytes)
 		resp.Body.Close()
+		var re *routeError
+		if errors.As(err, &re) && re.reason == reasonResponseTooLarge {
+			// §4.7 step 1: a listing above 4 MiB is drift, not an upstream error.
+			return nil, fmt.Errorf("%w: manifest exceeds %d bytes", errManifestDrift, maxManifestBytes)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("reading upstream response: %w", err)
+			return nil, err
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream status %d", resp.StatusCode))
 		}
 		var rpcResp struct {
 			Result *struct {
@@ -504,23 +591,23 @@ func (h *Handler) fetchAndVerifyManifest(ctx context.Context, upstream UpstreamC
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-			return nil, fmt.Errorf("cannot parse tools/list response: %w", err)
+			return nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("cannot parse tools/list response: %w", err))
 		}
 		if rpcResp.Error != nil {
-			return nil, fmt.Errorf("upstream JSON-RPC error: %s", rpcResp.Error.Message)
+			return nil, upstreamFailure(reasonUpstreamProtocolError, errors.New("upstream answered tools/list with a JSON-RPC error"))
 		}
 		if rpcResp.Result == nil || len(rpcResp.Result.Tools) == 0 {
-			return nil, fmt.Errorf("empty tools list")
+			return nil, fmt.Errorf("%w: empty tools list", errManifestDrift)
 		}
 		allTools = append(allTools, rpcResp.Result.Tools...)
 		for _, t := range rpcResp.Result.Tools {
 			totalBytes += len(t)
 		}
 		if len(allTools) > maxManifestTools {
-			return nil, fmt.Errorf("manifest exceeds %d tools", maxManifestTools)
+			return nil, fmt.Errorf("%w: manifest exceeds %d tools", errManifestDrift, maxManifestTools)
 		}
 		if totalBytes > maxManifestBytes {
-			return nil, fmt.Errorf("manifest exceeds %d bytes", maxManifestBytes)
+			return nil, fmt.Errorf("%w: manifest exceeds %d bytes", errManifestDrift, maxManifestBytes)
 		}
 		if rpcResp.Result.NextCursor == "" {
 			break
@@ -530,10 +617,10 @@ func (h *Handler) fetchAndVerifyManifest(ctx context.Context, upstream UpstreamC
 
 	hsh, err := manifest.Hash(allTools)
 	if err != nil {
-		return nil, fmt.Errorf("cannot hash manifest: %w", err)
+		return nil, fmt.Errorf("%w: invalid manifest: %v", errManifestDrift, err)
 	}
 	if hsh != upstream.ApprovedToolsHash {
-		return nil, fmt.Errorf("manifest hash mismatch: got %s, want %s", hsh, upstream.ApprovedToolsHash)
+		return nil, fmt.Errorf("%w: manifest hash %s is not the approved %s", errManifestDrift, hsh, upstream.ApprovedToolsHash)
 	}
 
 	toolNames := make(map[string]bool, len(allTools))
@@ -550,38 +637,36 @@ func (h *Handler) fetchAndVerifyManifest(ctx context.Context, upstream UpstreamC
 }
 
 // callUpstream makes one POST to the upstream MCP server and returns the
-// response. The caller must close resp.Body.
+// response. The caller must close resp.Body. Every error is a *routeError
+// that never names the upstream URL. A 3xx is never followed (§4.10).
 func (h *Handler) callUpstream(ctx context.Context, upstream UpstreamConfig, slug string, sess *Session, body []byte) (*http.Response, error) {
 	u, err := url.Parse(upstream.URL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid upstream URL: %w", err)
+		return nil, upstreamFailure(reasonUpstreamBlocked, errors.New("invalid upstream URL"))
 	}
 	if err := h.checkSSRF(u); err != nil {
-		return nil, errSSRFBlocked
+		return nil, upstreamFailure(reasonUpstreamBlocked, errSSRFBlocked)
 	}
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream.URL, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("creating upstream request: %w", err)
+		return nil, upstreamFailure(reasonUpstreamBlocked, errors.New("cannot build upstream request"))
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("Accept", "application/json")
 	if upstream.TokenSource != nil {
 		token, err := upstream.TokenSource.Token(ctx, sess.Subject, slug)
 		if err != nil {
-			return nil, fmt.Errorf("token source: %w", err)
+			return nil, &routeError{code: codeCredential, reason: reasonCredentialUnavailable, err: err}
 		}
 		upReq.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := h.client.Do(upReq)
 	if err != nil {
-		if errors.Is(err, errSSRFBlocked) {
-			return nil, errSSRFBlocked
-		}
-		return nil, fmt.Errorf("upstream request failed: %w", err)
+		return nil, transportError(err)
 	}
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		resp.Body.Close()
-		return nil, fmt.Errorf("upstream redirect: %d", resp.StatusCode)
+		return nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream redirect %d not followed", resp.StatusCode))
 	}
 	return resp, nil
 }
@@ -626,6 +711,10 @@ func (h *Handler) writeToolsList(w http.ResponseWriter, id any, tools []json.Raw
 }
 
 var errSSRFBlocked = errors.New("ssrf: address not allowed")
+
+// errManifestDrift marks a listing that cannot be verified against the
+// approval (ADR-036 §5.3).
+var errManifestDrift = errors.New(reasonManifestDrift)
 
 // blockedNets are extra ranges rejected by the dial Control hook in addition
 // to loopback, private, link-local, unspecified, and multicast addresses.
@@ -729,56 +818,38 @@ func (h *Handler) isValidRouteKey(r *http.Request) *Session {
 	return sess
 }
 
-func (h *Handler) writeAuthError(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusForbidden)
-	json.NewEncoder(w).Encode(jsonrpcResponse{
-		JSONRPC: "2.0",
-		Error:   &jsonrpcError{Code: -31401, Message: errAuthFailed},
-	})
-}
-
-func (h *Handler) checkLoopback(r *http.Request) error {
-	if origin := r.Header.Get("Origin"); origin != "" {
+// checkLoopback enforces ADR-036 §4.4 rule 2: no Origin header, and a Host
+// of 127.0.0.1, localhost or [::1] with a port.
+func checkLoopback(r *http.Request) error {
+	if _, ok := r.Header["Origin"]; ok {
 		return errors.New("origin not allowed")
 	}
-	host := r.Host
-	if host == "" {
-		return nil
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		return errors.New("host must name a loopback address and port")
 	}
-	hOnly, _, _ := strings.Cut(host, ":")
-	switch hOnly {
-	case "127.0.0.1", "localhost", "::1", "":
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return errors.New("invalid host port")
+	}
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
 		return nil
 	default:
 		return errors.New("non-loopback host")
 	}
 }
 
-func (h *Handler) writeLoopbackError(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusForbidden)
-	json.NewEncoder(w).Encode(jsonrpcResponse{
-		JSONRPC: "2.0",
-		Error:   &jsonrpcError{Code: -31400, Message: "non_loopback_request"},
-	})
-}
-
 func (h *Handler) writeRPCError(w http.ResponseWriter, id any, code int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(jsonrpcResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error:   &jsonrpcError{Code: code, Message: message},
-	})
+	h.writeRPCErrorStatus(w, http.StatusOK, id, code, message)
 }
 
-func (h *Handler) writeError(w http.ResponseWriter, status int, message string) {
+func (h *Handler) writeRPCErrorStatus(w http.ResponseWriter, status int, id any, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(jsonrpcResponse{
 		JSONRPC: "2.0",
-		Error:   &jsonrpcError{Code: -32000, Message: message},
+		ID:      id,
+		Error:   &jsonrpcError{Code: code, Message: message},
 	})
 }
 

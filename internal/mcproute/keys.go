@@ -18,16 +18,15 @@ const (
 )
 
 type registryEntry struct {
-	subject     string
-	sessionID   string
-	agent       string
-	harnessKind string
-	expiry      time.Time
+	session Session
+	expiry  time.Time
 }
 
-// KeyRegistry manages one-time route keys for MCP sessions.
-// Keys are randomly generated, stored only as SHA-256 digests,
-// and expire after 8 hours. A restart clears all keys.
+// KeyRegistry holds the route keys of live MCP sessions (ADR-036 §4.4).
+// A key belongs to exactly one named session. Keys are random, stored only
+// as SHA-256 digests, and stop validating when their session is revoked,
+// after 8 hours, or when the daemon restarts (the registry is memory only).
+// Expired entries are purged on every Mint and Validate.
 type KeyRegistry struct {
 	mu    sync.Mutex
 	keys  map[string]registryEntry
@@ -42,71 +41,62 @@ func NewKeyRegistry() *KeyRegistry {
 	}
 }
 
-// Mint generates a new route key for the given session, agent, and harness
-// kind. Returns the plaintext key in the format kmr_<43-base64url-chars>.
-// The agent and harnessKind parameters are accepted for future audit tracking
-// but are not stored.
-func (r *KeyRegistry) Mint(subject, agent, harnessKind, sessionID string) (string, error) {
+// Mint generates a new route key for s and returns it in the form
+// kmr_<43 base64url characters>. Only its digest is kept.
+func (r *KeyRegistry) Mint(s Session) (string, error) {
 	buf := make([]byte, routeKeyRawLen)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("mint route key: %w", err)
 	}
-	payload := base64.RawURLEncoding.EncodeToString(buf)
-	key := routeKeyPrefix + payload
-
-	digest := sha256Hex([]byte(key))
+	key := routeKeyPrefix + base64.RawURLEncoding.EncodeToString(buf)
 
 	r.mu.Lock()
-	r.keys[digest] = registryEntry{
-		subject:     subject,
-		sessionID:   sessionID,
-		agent:       agent,
-		harnessKind: harnessKind,
-		expiry:      r.clock().Add(routeKeyExpiry),
-	}
-	r.mu.Unlock()
-
+	defer r.mu.Unlock()
+	now := r.clock()
+	r.purgeLocked(now)
+	r.keys[sha256Hex([]byte(key))] = registryEntry{session: s, expiry: now.Add(routeKeyExpiry)}
 	return key, nil
 }
 
-// Validate checks a route key and returns the associated session
-// if the key is valid (known and not expired).
+// Validate returns the session a route key belongs to, if the key is known
+// and not expired.
 func (r *KeyRegistry) Validate(key string) (*Session, bool) {
 	if !strings.HasPrefix(key, routeKeyPrefix) {
 		return nil, false
 	}
-
 	digest := sha256Hex([]byte(key))
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.clock()
+	r.purgeLocked(now)
 	entry, ok := r.keys[digest]
-	r.mu.Unlock()
-
 	if !ok {
 		return nil, false
 	}
-
-	if r.clock().After(entry.expiry) {
-		return nil, false
-	}
-
-	return &Session{
-		Subject:     entry.subject,
-		SessionID:   entry.sessionID,
-		Agent:       entry.agent,
-		HarnessKind: entry.harnessKind,
-	}, true
+	s := entry.session
+	return &s, true
 }
 
-// Revoke removes all keys associated with the given session ID.
-func (r *KeyRegistry) Revoke(subject string) {
+// Revoke removes every key minted for sessionID. The daemon calls it when
+// the session ends for any reason.
+func (r *KeyRegistry) Revoke(sessionID string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	for digest, entry := range r.keys {
-		if entry.subject == subject {
+		if entry.session.SessionID == sessionID {
 			delete(r.keys, digest)
 		}
 	}
-	r.mu.Unlock()
+}
+
+// purgeLocked drops every key past its expiry. r.mu must be held.
+func (r *KeyRegistry) purgeLocked(now time.Time) {
+	for digest, entry := range r.keys {
+		if now.After(entry.expiry) {
+			delete(r.keys, digest)
+		}
+	}
 }
 
 func sha256Hex(data []byte) string {
