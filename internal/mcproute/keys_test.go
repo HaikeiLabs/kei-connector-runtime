@@ -237,3 +237,18 @@ func TestKeyRegistry_PurgesExpiredKeys(t *testing.T) {
 		t.Fatalf("registry holds %d keys, want 1 (expired keys purged)", n)
 	}
 }
+
+func TestKeyRegistry_RevokeKey(t *testing.T) {
+	r := NewKeyRegistry()
+	key1, _ := r.Mint(Session{Subject: "alice", SessionID: "session-1"})
+	key2, _ := r.Mint(Session{Subject: "alice", SessionID: "session-1"})
+
+	r.RevokeKey(key1)
+
+	if _, ok := r.Validate(key1); ok {
+		t.Fatal("revoked key still validates")
+	}
+	if _, ok := r.Validate(key2); !ok {
+		t.Fatal("another key of the same session was revoked")
+	}
+}

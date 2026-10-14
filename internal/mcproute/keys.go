@@ -90,6 +90,14 @@ func (r *KeyRegistry) Revoke(sessionID string) {
 	}
 }
 
+// RevokeKey removes one key, leaving the session's other keys valid. The
+// daemon calls it when the process the key was minted for exits.
+func (r *KeyRegistry) RevokeKey(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.keys, sha256Hex([]byte(key)))
+}
+
 // purgeLocked drops every key past its expiry. r.mu must be held.
 func (r *KeyRegistry) purgeLocked(now time.Time) {
 	for digest, entry := range r.keys {

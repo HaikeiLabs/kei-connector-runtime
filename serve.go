@@ -84,7 +84,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		return 1
 	}
 	defer releaseStateDir()
-	local, err := newServeLocalPDP(cfg, serveSeams{})
+	local, route, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		slog.Error("runtime_credential_release_invalid", "error", err)
 		return 1
@@ -132,7 +132,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			slog.Error("runtime_mcp_listener_failed", "addr", cfg.MCPListenAddr, "error", err)
 			return 1
 		}
-		mcpHandler := newMCPRoute(cfg, local).handler
+		mcpHandler := route.handler
 		children.Go("mcp listener", func(ctx context.Context) error {
 			return keiruntime.ServeHTTP(ctx, newServer(mcpHandler), mcpListener, shutdownFlushTimeout)
 		})
@@ -253,10 +253,10 @@ func daemonInvokeEnv(cfg Config, seams serveSeams, store secrets.Store, emit fun
 // owner session with matching linked bundle identity hold connector credentials
 // in session stores; POST /v1/connectors:invoke runs governed calls with them.
 // The caller must Close it on exit.
-func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error) {
+func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpRoute, error) {
 	creds, err := newSessionCredentialStore(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir)
 	emitFunc := func(data json.RawMessage) {
@@ -268,6 +268,12 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		}
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
+	route := newMCPRoute(cfg, local)
+	// Route keys are minted for run children only while the route listens.
+	var routeKeys runcommand.RouteKeys
+	if cfg.MCPListenAddr != "" {
+		routeKeys = mcpRouteKeys{keys: route.keys, local: local}
+	}
 	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
 	local.SetTokenlessOwnerSession(cfg.TokenlessOwnerSession)
 	if creds != nil {
@@ -295,9 +301,10 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 				return nil
 			},
 			AuditCrypto: auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken),
+			RouteKeys:   routeKeys,
 		})
 	}
-	return local, nil
+	return local, route, nil
 }
 
 // newServeHandlers builds the TCP handler and the Unix socket handler (the
@@ -335,6 +342,23 @@ func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 		handler: handler,
 	}
 }
+
+// mcpRouteKeys mints route keys for `kei-proxy run` children (ADR-036 §4.4):
+// one per run, for a live linked named session, revoked when the child exits.
+type mcpRouteKeys struct {
+	keys  *mcproute.KeyRegistry
+	local *keiruntime.LocalPDP
+}
+
+func (m mcpRouteKeys) Mint(sessionID, agentID, harnessKind string) (string, error) {
+	subject, agent, reason := m.local.RouteKeySession(sessionID, agentID)
+	if reason != "" {
+		return "", &runcommand.RouteKeyDenied{Code: reason, Reason: "the session cannot have an MCP route key"}
+	}
+	return m.keys.Mint(mcproute.Session{Subject: subject, Agent: agent, HarnessKind: harnessKind, SessionID: sessionID})
+}
+
+func (m mcpRouteKeys) Revoke(key string) { m.keys.RevokeKey(key) }
 
 // pdpAuthorizer maps an MCP decision to a PDP tool call and denies on any
 // PDP denial or error. When the PDP is unavailable, every call is denied.

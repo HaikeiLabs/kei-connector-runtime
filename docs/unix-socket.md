@@ -234,9 +234,9 @@ it rejects `--user-id`/`--provider-user`.
 
 ### `POST /v1/commands:run` (`KEI_CREDENTIAL_RELEASE=identity`)
 
-In identity mode, `kei-proxy run [--connector <id>] -- <cmd> [args...]` is a
-thin client of this route. It sends `kei.command-run-request/v1`:
-`{argv, env, dir, connector, agent_id}`. `env` is its own environment, in which
+In identity mode, `kei-proxy run [--connector <id>] [--harness-kind <kind>] -- <cmd> [args...]`
+is a thin client of this route. It sends `kei.command-run-request/v1`:
+`{argv, env, dir, connector, agent_id, harness_kind}`. `env` is its own environment, in which
 `KEY=kei://connectors/<id>/<field>` values are credential references, left
 unresolved. The daemon:
 
@@ -264,6 +264,19 @@ unresolved. The daemon:
    exact matches are redacted, as on the legacy path; an encoded form of the
    value is not.
 5. **Writes** a `kei.proxy-run-event/v1` audit event.
+
+**MCP route key (ADR-036 §4.4).** When the `/mcp/{slug}` listener is enabled
+(`KEI_PROXY_MCP_LISTEN_ADDR`, default `127.0.0.1:8086`) and the request names
+a live, linked named session, the daemon mints a route key for that session,
+its agent (`agent_id`, else the runtime identity's agent) and `harness_kind`
+(`^[a-z][a-z0-9_]{0,31}$`; without it, `harness:<kind>` policy sources do not
+match). The key goes to the child only, as `KEI_MCP_ROUTE_KEY`; a caller's own
+`KEI_MCP_ROUTE_KEY` entry is dropped. It is redacted from the streamed output,
+never written to audit, and revoked when the child exits (or the session ends).
+Credential references are then optional, so `kei-proxy run --harness-kind
+claude_code -- claude` launches a harness whose rendered MCP config reads the
+variable. An ended or unlinked session denies `session_not_found` or
+`subject_unlinked` before the child starts. The default session gets no key.
 
 The client relays the frames to its stdout and stderr and exits with the
 child's exit code: 128+N if a signal killed it, and 127 if it could not start.

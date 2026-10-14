@@ -260,7 +260,7 @@ func TestPiAuthorizeDecisionUsesDefaultSpoolAndShipsDigestOnly(t *testing.T) {
 		RuntimeStateDir:        stateDir,
 		AuditMaxBytes:          defaultAuditMaxBytes,
 	}
-	local, err := newServeLocalPDP(cfg, serveSeams{})
+	local, _, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestPiAuthorizeAppendFailureIsLoggedWithoutDecisionPayload(t *testing.T) {
 		RuntimeStateDir:        stateDir,
 		AuditMaxBytes:          defaultAuditMaxBytes,
 	}
-	local, err := newServeLocalPDP(cfg, serveSeams{})
+	local, _, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestSocketAuthorizeUsesOwnerOnlySocketWithoutRuntimeToken(t *testing.T) {
 		RuntimeControlPlaneURL: "http://127.0.0.1:1",
 		RuntimeStateDir:        t.TempDir(),
 	}
-	local, err := newServeLocalPDP(cfg, serveSeams{})
+	local, _, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}
