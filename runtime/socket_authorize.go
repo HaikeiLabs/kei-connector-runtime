@@ -136,12 +136,15 @@ type LocalPDP struct {
 	ownerID               string
 	tokenlessOwnerSession bool
 	ownerUnavailable      bool
+	// endHooks run after a named session's credentials are dropped.
+	endHooksMu sync.Mutex
+	endHooks   []func(id string)
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, preflight: newPreflightService(), stopSweep: make(chan struct{})}
 	// A named session's credentials go with it, however it ends.
-	l.Sessions.OnEnd(l.dropSessionCredentials)
+	l.Sessions.OnEnd(l.sessionEnded)
 	// A session recycled by max-age also emits a lifecycle event.
 	l.Sessions.OnRecycle(func(id string) {
 		_ = AppendLifecycleEvent(cfg.PolicyAuditPath(), cfg.PolicyAuditMaxBytes(), LifecycleEvent{
@@ -329,6 +332,25 @@ func (l *LocalPDP) flushSession(id string) {
 func (l *LocalPDP) dropSessionCredentials(id string) {
 	if v, ok := l.sessionCreds.LoadAndDelete(id); ok {
 		v.(*credrelease.Store).Flush()
+	}
+}
+
+// OnSessionEnd registers fn to run, once per named session, when the session
+// ends for any reason, after its credentials are dropped. fn runs on the
+// ending goroutine and must not block.
+func (l *LocalPDP) OnSessionEnd(fn func(id string)) {
+	l.endHooksMu.Lock()
+	defer l.endHooksMu.Unlock()
+	l.endHooks = append(l.endHooks, fn)
+}
+
+func (l *LocalPDP) sessionEnded(id string) {
+	l.dropSessionCredentials(id)
+	l.endHooksMu.Lock()
+	hooks := append([]func(string){}, l.endHooks...)
+	l.endHooksMu.Unlock()
+	for _, fn := range hooks {
+		fn(id)
 	}
 }
 

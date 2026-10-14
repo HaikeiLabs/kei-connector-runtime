@@ -62,7 +62,7 @@ func defaultMCPGates(upstreams map[string]UpstreamConfig) ([]policybundle.Connec
 func testKey(t *testing.T) (*KeyRegistry, string) {
 	t.Helper()
 	reg := NewKeyRegistry()
-	key, err := reg.Mint("test-session", "test-agent", "test-harness", "")
+	key, err := reg.Mint(Session{Subject: "test-session", Agent: "test-agent", HarnessKind: "test-harness", SessionID: "test-session"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +143,7 @@ func TestMCPRouteAuth_NoKey(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/mcp/test-slug", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"X"}}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
@@ -173,6 +174,7 @@ func TestMCPRouteAuth_BadKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp/test-slug", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"X"}}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer wrong-key")
+	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
@@ -250,8 +252,8 @@ func TestMCPRouteNonLoopback_OriginHeaderDenied(t *testing.T) {
 		} `json:"error"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &rpcResp)
-	if rpcResp.Error == nil || rpcResp.Error.Code != -31400 {
-		t.Fatalf("want error code -31400, got %+v", rpcResp.Error)
+	if rpcResp.Error == nil || rpcResp.Error.Code != -31403 {
+		t.Fatalf("want error code -31403, got %+v", rpcResp.Error)
 	}
 }
 
@@ -277,8 +279,8 @@ func TestMCPRouteNonLoopback_NonLocalHostDenied(t *testing.T) {
 		} `json:"error"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &rpcResp)
-	if rpcResp.Error == nil || rpcResp.Error.Code != -31400 {
-		t.Fatalf("want error code -31400, got %+v", rpcResp.Error)
+	if rpcResp.Error == nil || rpcResp.Error.Code != -31403 {
+		t.Fatalf("want error code -31403, got %+v", rpcResp.Error)
 	}
 }
 
@@ -381,8 +383,8 @@ func TestMCPRouteDeniedToolReturnsErrorAndDoesNotReachUpstream(t *testing.T) {
 	if rpcResp.Error == nil {
 		t.Fatal("expected JSON-RPC error, got result")
 	}
-	if rpcResp.Error.Code != -32000 {
-		t.Fatalf("error code = %d, want -32000", rpcResp.Error.Code)
+	if rpcResp.Error.Code != -31403 {
+		t.Fatalf("error code = %d, want -31403", rpcResp.Error.Code)
 	}
 	if rpcResp.ID != float64(1) {
 		t.Fatalf("error id = %v, want 1", rpcResp.ID)
@@ -407,9 +409,7 @@ func TestMCPRouteSSRF_PrivateIPBlocked(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
-	}
+	assertDenied(t, w, -31502, "upstream_blocked")
 }
 
 func TestMCPRouteSSRF_LoopbackBlocked(t *testing.T) {
@@ -430,9 +430,7 @@ func TestMCPRouteSSRF_LoopbackBlocked(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
-	}
+	assertDenied(t, w, -31502, "upstream_blocked")
 }
 
 func TestMCPRouteSSRF_NonHTTPSBlocked(t *testing.T) {
@@ -453,9 +451,7 @@ func TestMCPRouteSSRF_NonHTTPSBlocked(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
-	}
+	assertDenied(t, w, -31502, "upstream_blocked")
 }
 
 func TestMCPRouteForwardsToolsList(t *testing.T) {
@@ -623,9 +619,7 @@ func TestMCPRouteManifestDrift_UnapprovedTool(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (manifest drift)", w.Code)
-	}
+	assertNoTools(t, w)
 }
 
 func TestMCPRouteManifestDrift_ApprovedToolsPass(t *testing.T) {
@@ -693,9 +687,7 @@ func TestMCPRouteSSRF_RedirectToBlockedIP(t *testing.T) {
 	if upstreamHits.Load() != 1 {
 		t.Fatal("upstream was called, but redirect should not have been followed")
 	}
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (redirect blocked)", w.Code)
-	}
+	assertDenied(t, w, -31502, "upstream_protocol_error")
 }
 
 func TestMCPRouteSSRF_RedirectNotFollowed(t *testing.T) {
@@ -731,9 +723,7 @@ func TestMCPRouteSSRF_RedirectNotFollowed(t *testing.T) {
 	if targetHits.Load() != 0 {
 		t.Fatalf("redirect target was followed (%d hits); 3xx must fail closed", targetHits.Load())
 	}
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (3xx upstream response is an error)", w.Code)
-	}
+	assertDenied(t, w, -31502, "upstream_protocol_error")
 	var rpcResp struct {
 		Error *struct {
 			Message string `json:"message"`
@@ -742,8 +732,8 @@ func TestMCPRouteSSRF_RedirectNotFollowed(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if rpcResp.Error == nil || rpcResp.Error.Message != "upstream_redirect" {
-		t.Fatalf("want upstream_redirect, got %+v", rpcResp.Error)
+	if rpcResp.Error == nil || rpcResp.Error.Message != "upstream_protocol_error" {
+		t.Fatalf("want upstream_protocol_error, got %+v", rpcResp.Error)
 	}
 }
 
@@ -971,6 +961,7 @@ func TestMCPRouteAuth_NilRegistryDenies(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/mcp/test-slug", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"X"}}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
@@ -1015,14 +1006,14 @@ func TestMCPRouteManifestNotApproved_ToolsList(t *testing.T) {
 		ID any `json:"id"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &rpcResp)
-	if rpcResp.Error == nil || rpcResp.Error.Message != "manifest_not_approved" {
+	if rpcResp.Error == nil || rpcResp.Error.Message != "mcp_manifest_unapproved" {
 		t.Fatalf("want manifest_not_approved, got %+v", rpcResp.Error)
 	}
 }
 
 func TestMCPRouteManifestNotApproved_ToolsCall(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := newHandler(Config{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
 			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: StaticToken("ct_test"), ApprovedToolsHash: ""},
@@ -1047,7 +1038,7 @@ func TestMCPRouteManifestNotApproved_ToolsCall(t *testing.T) {
 		ID any `json:"id"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &rpcResp)
-	if rpcResp.Error == nil || rpcResp.Error.Message != "manifest_not_approved" {
+	if rpcResp.Error == nil || rpcResp.Error.Message != "mcp_manifest_unapproved" {
 		t.Fatalf("want manifest_not_approved, got %+v", rpcResp.Error)
 	}
 }
@@ -1242,11 +1233,11 @@ func (s subjectFilterAuthorizer) Authorize(ctx context.Context, d Decision) erro
 
 func TestMCPRouteFilterTools_SubjectAware(t *testing.T) {
 	reg := NewKeyRegistry()
-	key1, err := reg.Mint("session-alpha", "agent-1", "harness-kind", "")
+	key1, err := reg.Mint(Session{Subject: "session-alpha", Agent: "agent-1", HarnessKind: "harness-kind", SessionID: "session-alpha"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	key2, err := reg.Mint("session-beta", "agent-1", "harness-kind", "")
+	key2, err := reg.Mint(Session{Subject: "session-beta", Agent: "agent-1", HarnessKind: "harness-kind", SessionID: "session-beta"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1422,8 +1413,8 @@ func TestMCPRouteNilAuthorizer_DeniesToolsCall(t *testing.T) {
 	if rpcResp.Error == nil {
 		t.Fatal("expected error from nil authorizer")
 	}
-	if rpcResp.Error.Code != -32001 {
-		t.Fatalf("error code = %d, want -32001", rpcResp.Error.Code)
+	if rpcResp.Error.Code != -31403 {
+		t.Fatalf("error code = %d, want -31403", rpcResp.Error.Code)
 	}
 }
 
@@ -1578,9 +1569,7 @@ func TestMCPRouteSSE_ManifestDrift(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (manifest drift over SSE)", w.Code)
-	}
+	assertNoTools(t, w)
 }
 
 // subjectTokenSource returns a different token per subject.
@@ -1601,11 +1590,11 @@ func (s *subjectTokenSource) Token(_ context.Context, subject, _ string) (string
 
 func TestMCPRouteTokenSource_SubjectSpecific(t *testing.T) {
 	reg := NewKeyRegistry()
-	keyAlpha, err := reg.Mint("session-alpha", "agent1", "harness1", "")
+	keyAlpha, err := reg.Mint(Session{Subject: "session-alpha", Agent: "agent1", HarnessKind: "harness1", SessionID: "session-alpha"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyBeta, err := reg.Mint("session-beta", "agent1", "harness1", "")
+	keyBeta, err := reg.Mint(Session{Subject: "session-beta", Agent: "agent1", HarnessKind: "harness1", SessionID: "session-beta"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1720,8 +1709,8 @@ func TestMCPRouteTokenSource_ErrorDeniesUpstream(t *testing.T) {
 	if rpcResp.Error == nil {
 		t.Fatal("expected JSON-RPC error, got result")
 	}
-	if rpcResp.Error.Code != -32001 {
-		t.Fatalf("error code = %d, want -32001", rpcResp.Error.Code)
+	if rpcResp.Error.Code != -31424 {
+		t.Fatalf("error code = %d, want -31424", rpcResp.Error.Code)
 	}
 }
 
@@ -1795,9 +1784,7 @@ func TestMCPRouteManifestDrift_DescriptionChange(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (manifest drift on description change)", w.Code)
-	}
+	assertNoTools(t, w)
 }
 
 // ── Method whitelist ────────────────────────────────────────────────────────────
@@ -2175,9 +2162,7 @@ func TestMCPRouteManifestDrift_EmptyListFailsClosed(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (empty list must fail closed)", w.Code)
-	}
+	assertNoTools(t, w)
 }
 
 func TestMCPRouteManifestDrift_UpstreamErrorFailsClosed(t *testing.T) {
@@ -2208,9 +2193,7 @@ func TestMCPRouteManifestDrift_UpstreamErrorFailsClosed(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (upstream JSON-RPC error must fail closed)", w.Code)
-	}
+	assertDenied(t, w, -31502, "upstream_protocol_error")
 }
 
 func TestMCPRouteToolsCall_UnknownToolDenied(t *testing.T) {
@@ -2259,8 +2242,8 @@ func TestMCPRouteToolsCall_UnknownToolDenied(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if rpcResp.Error == nil || rpcResp.Error.Message != "manifest_drift" {
-		t.Fatalf("want manifest_drift, got %+v", rpcResp.Error)
+	if rpcResp.Error == nil || rpcResp.Error.Message != "mcp_tool_not_approved" {
+		t.Fatalf("want mcp_tool_not_approved, got %+v", rpcResp.Error)
 	}
 }
 
@@ -2305,8 +2288,8 @@ func TestMCPRouteToolsCall_NoVerifiedListingDenied(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if rpcResp.Error == nil || rpcResp.Error.Message != "manifest_drift" {
-		t.Fatalf("want manifest_drift, got %+v", rpcResp.Error)
+	if rpcResp.Error == nil || rpcResp.Error.Message != "mcp_manifest_drift" {
+		t.Fatalf("want mcp_manifest_drift, got %+v", rpcResp.Error)
 	}
 }
 
@@ -2342,9 +2325,7 @@ func TestMCPRouteManifestPaging_TooManyToolsFailsClosed(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (513 tools exceeds 512 cap)", w.Code)
-	}
+	assertNoTools(t, w)
 }
 
 func TestMCPRouteManifestPaging_TooLargeFailsClosed(t *testing.T) {
@@ -2388,9 +2369,7 @@ func TestMCPRouteManifestPaging_TooLargeFailsClosed(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (manifest exceeds 4 MiB cap)", w.Code)
-	}
+	assertNoTools(t, w)
 }
 
 func TestMCPRouteManifestPaging_TwoPagesSucceed(t *testing.T) {

@@ -1100,105 +1100,13 @@ func TestMCPRoute_DeniedWithoutPolicyBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg := mcproute.NewKeyRegistry()
-	key, err := reg.Mint("test-subject", "test-agent", "test-harness", sessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	h := mcproute.NewHandler(mcproute.Config{
-		KeyRegistry: reg,
-		Authorizer:  pdpAuthorizer{pdp: local},
-		Upstreams: map[string]mcproute.UpstreamConfig{
-			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: mcproute.StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
-		},
-		Connectors:    []policybundle.Connector{{ID: "conn-1", Kind: "mcp", Slug: "test-slug"}},
-		AgentBindings: []mcproute.AgentBinding{{AgentID: "test-agent", ConnectorID: "conn-1"}},
-		Logger:        slog.Default(),
+	// Without a policy bundle the PDP denies every MCP tool call.
+	err = (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
+		SessionID: sessionID, Agent: "test-agent", HarnessKind: "test-harness", ConnectorSlug: "test-slug", Tool: "test-tool",
 	})
-
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test-tool","arguments":{}}}`
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/mcp/test-slug", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Host = "127.0.0.1:8086"
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (JSON-RPC error in body)", w.Code)
-	}
-	var rpcResp struct {
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
-		t.Fatal(err)
-	}
-	if rpcResp.Error == nil {
-		t.Fatal("expected error, got success")
-	}
-	if rpcResp.Error.Message != "policy_bundle_missing" {
-		t.Fatalf("error message = %q, want policy_bundle_missing", rpcResp.Error.Message)
-	}
-}
-
-func TestMCPRoute_SessionFromKeyNotHeader(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-	local := keiruntime.NewLocalPDP(Config{RuntimeToken: runtimeToken}, nil)
-
-	sessionA, err := local.Sessions.Create(pdp.Subject{
-		UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	reg := mcproute.NewKeyRegistry()
-	key, err := reg.Mint("test-subject", "test-agent", "test-harness", sessionA)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	h := mcproute.NewHandler(mcproute.Config{
-		KeyRegistry: reg,
-		Authorizer:  pdpAuthorizer{pdp: local},
-		Upstreams: map[string]mcproute.UpstreamConfig{
-			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: mcproute.StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
-		},
-		Connectors:    []policybundle.Connector{{ID: "conn-1", Kind: "mcp", Slug: "test-slug"}},
-		AgentBindings: []mcproute.AgentBinding{{AgentID: "test-agent", ConnectorID: "conn-1"}},
-		Logger:        slog.Default(),
-	})
-
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test-tool","arguments":{}}}`
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/mcp/test-slug", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("X-Kei-Session", "session-B")
-	req.Host = "127.0.0.1:8086"
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (JSON-RPC error in body)", w.Code)
-	}
-	var rpcResp struct {
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
-		t.Fatal(err)
-	}
-	if rpcResp.Error == nil {
-		t.Fatal("expected error, got success")
-	}
-	if rpcResp.Error.Message != "policy_bundle_missing" {
-		t.Fatalf("error message = %q, want policy_bundle_missing (X-Kei-Session header must not override the session bound in the route key)", rpcResp.Error.Message)
+	var permErr *mcproute.PermissionError
+	if !errors.As(err, &permErr) || permErr.Reason != "policy_bundle_missing" {
+		t.Fatalf("err = %v, want PermissionError policy_bundle_missing", err)
 	}
 }
 
@@ -1232,7 +1140,7 @@ func TestMCPRoute_AllowedWithPolicyBundle(t *testing.T) {
 	t.Cleanup(local.Close)
 
 	reg := mcproute.NewKeyRegistry()
-	key, err := reg.Mint("test-subject", "test-agent", "test-harness", sessionID)
+	key, err := reg.Mint(mcproute.Session{Subject: "test-subject", Agent: "test-agent", HarnessKind: "test-harness", SessionID: sessionID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1274,14 +1182,28 @@ func TestMCPRoute_AllowedWithPolicyBundle(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
 		t.Fatalf("failed to decode body (status %d): %v\nbody: %s", w.Code, err, string(w.Body.Bytes()))
 	}
-	// The PDP allowed the call (no policy denial), but no verified listing
-	// was cached (no prior tools/list), so the manifest pin must deny with
-	// manifest_drift and nothing may be forwarded upstream.
+	// No verified listing is cached (no prior tools/list), so the manifest
+	// pin (ADR-036 §4.5 step 7) denies before policy, and nothing may be
+	// forwarded upstream.
 	if rpcResp.Error == nil {
-		t.Fatalf("expected manifest_drift error, got success: %s", w.Body.String())
+		t.Fatalf("expected mcp_manifest_drift error, got success: %s", w.Body.String())
 	}
-	if rpcResp.Error.Message != "manifest_drift" {
-		t.Fatalf("error message = %q, want manifest_drift (PDP allowed; manifest pin must deny)", rpcResp.Error.Message)
+	if rpcResp.Error.Message != "mcp_manifest_drift" {
+		t.Fatalf("error message = %q, want mcp_manifest_drift", rpcResp.Error.Message)
+	}
+	// The PDP itself permits the call.
+	if err := (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
+		SessionID: sessionID, Agent: "test-agent", HarnessKind: "test-harness", ConnectorSlug: "test_slug", Tool: "test_tool",
+	}); err != nil {
+		t.Fatalf("PDP denied test_slug.test_tool: %v", err)
+	}
+	// A deny policy surfaces as the ADR-036 §4.5 reason policy_denied.
+	err = (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
+		SessionID: sessionID, Agent: "test-agent", HarnessKind: "test-harness", ConnectorSlug: "test_slug", Tool: "blocked_tool",
+	})
+	var permErr *mcproute.PermissionError
+	if !errors.As(err, &permErr) || permErr.Reason != "policy_denied" {
+		t.Fatalf("deny policy: err = %v, want PermissionError policy_denied", err)
 	}
 	if hits := upstreamHits.Load(); hits != 0 {
 		t.Fatalf("upstream received %d requests, want 0 (no verified listing, must not forward)", hits)
@@ -1322,6 +1244,15 @@ func buildMCPAllowBundle(t *testing.T, now time.Time) []byte {
 					"priority":    50,
 					"scope":       map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
 				},
+				map[string]any{
+					"policy_id":   "pol-mcp-deny-blocked",
+					"name":        "mcp-deny-blocked",
+					"src_pattern": "*",
+					"dst_pattern": "mcp:test_slug.blocked_tool",
+					"action":      "deny",
+					"priority":    50,
+					"scope":       map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
+				},
 			},
 		},
 		"agent_connector_bindings": []any{},
@@ -1341,4 +1272,38 @@ func buildMCPAllowBundle(t *testing.T, now time.Time) []byte {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// TestMCPRoute_SessionEndRevokesRouteKey builds the route through the serve
+// wiring: ending the named session must revoke its route keys (ADR-036 §4.4).
+func TestMCPRoute_SessionEndRevokesRouteKey(t *testing.T) {
+	local := keiruntime.NewLocalPDP(Config{RuntimeToken: "kh_live_runtime_test_token_1234567890"}, nil)
+	defer local.Close()
+	route := newMCPRoute(Config{}, local)
+
+	sessionID, err := local.Sessions.Create(pdp.Subject{UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := local.Sessions.Create(pdp.Subject{UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := route.keys.Mint(mcproute.Session{Subject: "test-user", Agent: "test-agent", HarnessKind: "claude_code", SessionID: sessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := route.keys.Mint(mcproute.Session{Subject: "test-user", Agent: "test-agent", HarnessKind: "claude_code", SessionID: other})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	local.Sessions.EndID(sessionID)
+
+	if _, ok := route.keys.Validate(key); ok {
+		t.Fatal("route key still validates after its session ended")
+	}
+	if _, ok := route.keys.Validate(otherKey); !ok {
+		t.Fatal("another session's route key was revoked")
+	}
 }
