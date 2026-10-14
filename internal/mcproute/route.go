@@ -21,6 +21,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/manifest"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/google/uuid"
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // Session carries the subject and metadata validated from a route key.
@@ -137,6 +138,10 @@ type verifiedListing struct {
 	hash      string
 	tools     []json.RawMessage
 	toolNames map[string]bool
+	// schemas holds each tool's verified inputSchema; compiled caches them.
+	schemas  map[string]json.RawMessage
+	schemaMu sync.Mutex
+	compiled map[string]*jsonschema.Schema
 }
 
 // Handler serves POST /mcp/{slug} by authenticating, authorizing tools/call,
@@ -350,6 +355,12 @@ func (h *Handler) serveToolsCall(w http.ResponseWriter, ctx context.Context, id 
 	}
 	if !listing.toolNames[tool] {
 		writeDenial(w, http.StatusOK, id, codeManifest, reasonToolNotApproved)
+		return
+	}
+	// Step 8: the arguments must validate against the verified inputSchema.
+	if err := listing.validateArguments(tool, req.Params); err != nil {
+		h.config.Logger.Info("mcp_invalid_arguments", "slug", slug, "tool", tool, "error", err)
+		writeDenial(w, http.StatusOK, id, codeInvalidArgs, reasonInvalidArguments)
 		return
 	}
 	// Step 9: policy.
@@ -623,17 +634,25 @@ func (h *Handler) fetchAndVerifyManifest(ctx context.Context, upstream UpstreamC
 		return nil, fmt.Errorf("%w: manifest hash %s is not the approved %s", errManifestDrift, hsh, upstream.ApprovedToolsHash)
 	}
 
-	toolNames := make(map[string]bool, len(allTools))
-	for _, t := range allTools {
+	return newVerifiedListing(hsh, allTools)
+}
+
+// newVerifiedListing indexes a listing whose hash has been verified.
+func newVerifiedListing(hash string, tools []json.RawMessage) (*verifiedListing, error) {
+	toolNames := make(map[string]bool, len(tools))
+	schemas := make(map[string]json.RawMessage, len(tools))
+	for _, t := range tools {
 		var info struct {
-			Name string `json:"name"`
+			Name        string          `json:"name"`
+			InputSchema json.RawMessage `json:"inputSchema"`
 		}
 		if err := json.Unmarshal(t, &info); err != nil {
 			continue
 		}
 		toolNames[info.Name] = true
+		schemas[info.Name] = info.InputSchema
 	}
-	return &verifiedListing{hash: hsh, tools: allTools, toolNames: toolNames}, nil
+	return &verifiedListing{hash: hash, tools: tools, toolNames: toolNames, schemas: schemas}, nil
 }
 
 // callUpstream makes one POST to the upstream MCP server and returns the

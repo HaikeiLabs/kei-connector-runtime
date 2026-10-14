@@ -17,6 +17,7 @@ const (
 	codeUnauthenticated = -31401
 	codeDenied          = -31403
 	codeManifest        = -31409
+	codeInvalidArgs     = -31400
 	codeCredential      = -31424
 	codeUpstream        = -31502
 )
