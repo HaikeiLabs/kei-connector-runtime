@@ -27,6 +27,27 @@ type Connector struct {
 	Config            map[string]any          `json:"config,omitempty"`
 	HTTPAPI           *contract.HTTPAPI       `json:"http_api,omitempty"`
 	Grafana           *contract.GrafanaConfig `json:"grafana,omitempty"`
+	// TODO(HAI-484): ADR-036 §4.3 descriptor fields. Optional until the catalog
+	// emits them; the runtime gates the MCP route on kind and slug (§4.5 5-6).
+	Kind string         `json:"kind,omitempty"`
+	Slug string         `json:"slug,omitempty"`
+	MCP  *MCPDescriptor `json:"mcp,omitempty"`
+}
+
+// MCPDescriptor is the mcp block of a v2 connector descriptor (ADR-036 §4.3).
+type MCPDescriptor struct {
+	URL                  string            `json:"url"`
+	Transport            string            `json:"transport"`
+	AuthMethod           string            `json:"auth_method"`
+	ApprovedManifestHash string            `json:"approved_manifest_hash,omitempty"`
+	ApprovedTools        []MCPApprovedTool `json:"approved_tools,omitempty"`
+}
+
+// MCPApprovedTool is one approved tool of an mcp descriptor (ADR-036 §4.3).
+// approved_tools is sorted by name.
+type MCPApprovedTool struct {
+	Name     string `json:"name"`
+	ToolHash string `json:"tool_hash"`
 }
 
 // ConnectorCapability is one declared capability of a bundle connector.

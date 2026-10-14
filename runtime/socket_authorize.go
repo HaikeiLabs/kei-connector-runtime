@@ -368,6 +368,21 @@ func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp
 	return g, id, err
 }
 
+// AuthorizeMCPTool decides an MCP tool call with the local PDP and the
+// session subject, using the v2 harness_policies set (mcp: dst pattern).
+// Before the identity resolves, every call denies policy_bundle_missing.
+// The error is non-nil only when ctx is done.
+func (l *LocalPDP) AuthorizeMCPTool(ctx context.Context, sessionID, slug, tool, agentID, harnessKind string) (pdp.Decision, error) {
+	e := l.evaluator.Load()
+	if e == nil {
+		if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
+			return pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}, nil
+		}
+		return pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}, nil
+	}
+	return e.AuthorizeV2MCP(ctx, sessionID, slug, tool, agentID, harnessKind)
+}
+
 // Close stops the session sweeper and flushes every held session
 // credential. The serve daemon calls it on exit.
 func (l *LocalPDP) Close() {

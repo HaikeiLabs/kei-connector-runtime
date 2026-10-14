@@ -25,6 +25,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
@@ -36,6 +37,7 @@ import (
 
 const (
 	defaultListenAddr     = ":8085"
+	defaultMCPListenAddr  = "127.0.0.1:8086"
 	maxModelRequest       = 4 << 20
 	shutdownFlushTimeout  = 5 * time.Second
 	collectorPollInterval = time.Minute
@@ -64,6 +66,12 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	// The daemon may hold session credentials in memory; never dump it.
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		slog.Warn("runtime_core_limit_failed", "error", err)
+	}
+	if cfg.MCPListenAddr != "" {
+		if err := validateMCPListenAddr(cfg.MCPListenAddr); err != nil {
+			slog.Error("runtime_mcp_listener_invalid", "addr", cfg.MCPListenAddr, "error", err)
+			return 1
+		}
 	}
 	// serve owns its state directory: it is the one process that refreshes
 	// policy, ships audit, and reports heartbeats for it (HAI-438). Claim it
@@ -118,6 +126,18 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	children.Go("unix listener", func(ctx context.Context) error {
 		return keiruntime.ServeHTTP(ctx, newServer(socketHandler), unixListener, shutdownFlushTimeout)
 	})
+	if cfg.MCPListenAddr != "" {
+		mcpListener, err := net.Listen("tcp", cfg.MCPListenAddr)
+		if err != nil {
+			slog.Error("runtime_mcp_listener_failed", "addr", cfg.MCPListenAddr, "error", err)
+			return 1
+		}
+		mcpHandler := newMCPHandler(cfg, local)
+		children.Go("mcp listener", func(ctx context.Context) error {
+			return keiruntime.ServeHTTP(ctx, newServer(mcpHandler), mcpListener, shutdownFlushTimeout)
+		})
+		slog.Info("runtime_mcp_listener_started", "addr", cfg.MCPListenAddr)
+	}
 	children.Go("session sweeper", func(ctx context.Context) error {
 		local.SweepSessions(ctx)
 		return nil
@@ -288,6 +308,63 @@ func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Ha
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
 	base.models = local
 	return base, local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
+}
+
+// newMCPHandler builds the /mcp/{slug} route handler with PDP-based
+// authorization and an empty key registry. Route keys are minted per session
+// at runtime.
+func newMCPHandler(cfg Config, local *keiruntime.LocalPDP) http.Handler {
+	return mcproute.NewHandler(mcproute.Config{
+		KeyRegistry: mcproute.NewKeyRegistry(),
+		Authorizer:  pdpAuthorizer{pdp: local},
+		Upstreams:   make(map[string]mcproute.UpstreamConfig),
+		Logger:      slog.Default(),
+	})
+}
+
+// pdpAuthorizer maps an MCP decision to a PDP tool call and denies on any
+// PDP denial or error. When the PDP is unavailable, every call is denied.
+type pdpAuthorizer struct {
+	pdp *keiruntime.LocalPDP
+}
+
+func (a pdpAuthorizer) Authorize(ctx context.Context, d mcproute.Decision) error {
+	result, err := a.pdp.AuthorizeMCPTool(ctx, d.SessionID, d.ConnectorSlug, d.Tool, d.Agent, d.HarnessKind)
+	if err != nil {
+		return &mcproute.PermissionError{Reason: "internal_error", Tool: d.Tool}
+	}
+	if !result.Allow {
+		return &mcproute.PermissionError{Reason: result.ReasonCode, Tool: d.Tool}
+	}
+	return nil
+}
+
+// validateMCPListenAddr rejects addresses that do not resolve to a loopback
+// IP, ensuring the MCP route listener is only reachable from the local host.
+func validateMCPListenAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid MCP listen address %q: %w", addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("MCP listen address %q binds all interfaces; must be loopback", addr)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return fmt.Errorf("MCP listen address %q is not loopback", addr)
+		}
+		return nil
+	}
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return fmt.Errorf("cannot resolve MCP listen address %q: %w", addr, err)
+	}
+	for _, ipStr := range ips {
+		if ip := net.ParseIP(ipStr); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf("MCP listen address %q does not resolve to a loopback IP", addr)
 }
 
 const (

@@ -45,6 +45,9 @@ type Config struct {
 	// RuntimeHeartbeatInterval is KEI_RUNTIME_HEARTBEAT_INTERVAL: how often
 	// `kei-proxy serve` reports liveness (Go duration, default 1m).
 	RuntimeHeartbeatInterval time.Duration
+	// MCPListenAddr is the TCP address for the /mcp/{slug} listener
+	// (KEI_PROXY_MCP_LISTEN_ADDR, default 127.0.0.1:8086). Must be loopback.
+	MCPListenAddr string
 }
 
 func envOr(key, fallback string) string {
@@ -138,6 +141,7 @@ func configFromEnv() Config {
 		SessionIdleTTL:                sessionIdleTTLFromEnv(),
 		TokenlessOwnerSession:         tokenlessOwnerSessionFromEnv(),
 		RuntimeHeartbeatInterval:      runtimeHeartbeatIntervalFromEnv(),
+		MCPListenAddr:                 envOr("KEI_PROXY_MCP_LISTEN_ADDR", defaultMCPListenAddr),
 	}
 }
 

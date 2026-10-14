@@ -205,6 +205,123 @@ func TestEvaluateV2PlanAcceptsSnapshotAndRefreshSubstitution(t *testing.T) {
 	}
 }
 
+// mcpTestPolicy describes one harness_policy entry for MCP test bundles.
+type mcpTestPolicy struct {
+	id       string
+	src      string
+	dst      string
+	action   string
+	priority int
+	agentID  string
+}
+
+func v2MCPBundle(t *testing.T, now time.Time, policies []mcpTestPolicy) *Verified {
+	t.Helper()
+	doc := v2BundleDoc(now)
+	set := doc["policy_set"].(map[string]any)
+	var hps []any
+	for _, p := range policies {
+		var agent any
+		if p.agentID != "" {
+			agent = p.agentID
+		}
+		hps = append(hps, map[string]any{
+			"policy_id": p.id, "name": "mcp-" + p.id, "src_pattern": p.src, "dst_pattern": p.dst, "action": p.action, "priority": p.priority,
+			"scope": map[string]any{"org_id": v2Org, "workspace_id": v2Workspace, "agent_id": agent},
+		})
+	}
+	set["harness_policies"] = hps
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload Payload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return &Verified{Payload: payload, PayloadBytes: raw, Digest: "sha256:mcp-test"}
+}
+
+func TestEvaluateV2MCP(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	subject := &SessionSubject{UserID: "user-alice", Source: "discord", ExternalID: "ext-alice", Status: SubjectLinked}
+
+	t.Run("permit mcp:<slug>.<tool>", func(t *testing.T) {
+		v := v2MCPBundle(t, now, []mcpTestPolicy{
+			{id: "p1", src: "*", dst: "mcp:slack.list_channels", action: "permit", priority: 10},
+		})
+		d := v.EvaluateV2MCP("slack", "list_channels", "agent-a", "claude_code", subject, now)
+		if d.Outcome != "allow" || d.PolicyID != "p1" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+
+	t.Run("permit mcp:<slug>", func(t *testing.T) {
+		v := v2MCPBundle(t, now, []mcpTestPolicy{
+			{id: "p1", src: "*", dst: "mcp:slack", action: "permit", priority: 10},
+		})
+		d := v.EvaluateV2MCP("slack", "list_channels", "agent-a", "claude_code", subject, now)
+		if d.Outcome != "allow" || d.PolicyID != "p1" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+
+	t.Run("deny wins at equal priority", func(t *testing.T) {
+		v := v2MCPBundle(t, now, []mcpTestPolicy{
+			{id: "p-permit", src: "*", dst: "mcp:slack", action: "permit", priority: 10},
+			{id: "p-deny", src: "*", dst: "mcp:slack.list_channels", action: "deny", priority: 10},
+		})
+		d := v.EvaluateV2MCP("slack", "list_channels", "agent-a", "claude_code", subject, now)
+		if d.Outcome != "deny" || d.PolicyID != "p-deny" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+
+	t.Run("group source via membership", func(t *testing.T) {
+		v := v2MCPBundle(t, now, []mcpTestPolicy{
+			{id: "p1", src: "group:members", dst: "mcp:slack.list_channels", action: "permit", priority: 10},
+		})
+		d := v.EvaluateV2MCP("slack", "list_channels", "agent-a", "claude_code", subject, now)
+		if d.Outcome != "allow" || d.PolicyID != "p1" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+
+	t.Run("no match denies", func(t *testing.T) {
+		v := v2MCPBundle(t, now, []mcpTestPolicy{
+			{id: "p1", src: "*", dst: "mcp:other_server.read", action: "permit", priority: 10},
+		})
+		d := v.EvaluateV2MCP("slack", "list_channels", "agent-a", "claude_code", subject, now)
+		if d.Outcome != "deny" || d.ReasonCode != "no_matching_policy" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+
+	t.Run("dotted tool name", func(t *testing.T) {
+		v := v2MCPBundle(t, now, []mcpTestPolicy{
+			{id: "p1", src: "*", dst: "mcp:api.github.com.list_repos", action: "permit", priority: 10},
+		})
+		d := v.EvaluateV2MCP("api.github.com", "list_repos", "agent-a", "claude_code", subject, now)
+		if d.Outcome != "allow" || d.PolicyID != "p1" {
+			t.Fatalf("decision = %+v", d)
+		}
+	})
+
+	t.Run("harness kind source", func(t *testing.T) {
+		v := v2MCPBundle(t, now, []mcpTestPolicy{
+			{id: "p-codex", src: "harness:codex", dst: "mcp:slack", action: "permit", priority: 10},
+		})
+		d := v.EvaluateV2MCP("slack", "list_channels", "agent-a", "codex", subject, now)
+		if d.Outcome != "allow" || d.PolicyID != "p-codex" {
+			t.Fatalf("codex session = %+v, want allow via p-codex", d)
+		}
+		d = v.EvaluateV2MCP("slack", "list_channels", "agent-a", "claude_code", subject, now)
+		if d.Outcome != "deny" || d.ReasonCode != "no_matching_policy" {
+			t.Fatalf("claude_code session = %+v, want deny no_matching_policy", d)
+		}
+	})
+}
+
 func TestV2SessionPathRequiresPreflight(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	v := v2ToolBundle(t, now, nil)
