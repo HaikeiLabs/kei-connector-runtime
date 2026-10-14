@@ -293,6 +293,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var id any
 	json.Unmarshal(req.ID, &id)
 
+	// Step 2: the request metadata headers must agree with the body.
+	if code, message := checkRequestHeaders(r.Header, req); code != 0 {
+		h.writeRPCErrorStatus(w, http.StatusBadRequest, id, code, message)
+		return
+	}
+
 	// Re-serialize to prevent duplicate-key attacks: Go's decoder uses the
 	// last value for duplicate keys; raw forwarding could let an upstream
 	// see a different value.
@@ -597,6 +603,59 @@ func extractTool(params json.RawMessage) string {
 // Protocol revisions the route speaks to harnesses (ADR-036 §4.2), latest
 // first.
 var harnessProtocolVersions = []string{"2026-07-28", "2025-11-25", "2025-06-18"}
+
+// JSON-RPC errors for request metadata headers (ADR-036 §4.2, §4.5 step 2).
+const (
+	codeHeaderMismatch = -32020
+	codeInvalidRequest = -32600
+)
+
+// checkRequestHeaders validates the MCP request metadata headers against the
+// body. MCP-Protocol-Version, when sent, must be a revision the route speaks;
+// Mcp-Method must equal the method; Mcp-Name must equal params.name of a
+// tools/call; and on initialize the version header must equal
+// params.protocolVersion. An absent header is not checked. It returns a
+// JSON-RPC code and message, or 0.
+func checkRequestHeaders(header http.Header, req jsonrpcRequest) (int, string) {
+	version, hasVersion := headerValue(header, "MCP-Protocol-Version")
+	if hasVersion && !speaksProtocolVersion(version) {
+		return codeInvalidRequest, "UnsupportedProtocolVersionError"
+	}
+	if method, ok := headerValue(header, "Mcp-Method"); ok && method != req.Method {
+		return codeHeaderMismatch, "HeaderMismatch"
+	}
+	if name, ok := headerValue(header, "Mcp-Name"); ok && (req.Method != "tools/call" || name != extractTool(req.Params)) {
+		return codeHeaderMismatch, "HeaderMismatch"
+	}
+	if req.Method == "initialize" && hasVersion {
+		var p struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		if p.ProtocolVersion != "" && p.ProtocolVersion != version {
+			return codeHeaderMismatch, "HeaderMismatch"
+		}
+	}
+	return 0, ""
+}
+
+// headerValue returns a header's value and whether it was sent at all.
+func headerValue(header http.Header, name string) (string, bool) {
+	values := header.Values(name)
+	if len(values) == 0 {
+		return "", false
+	}
+	return strings.TrimSpace(values[0]), true
+}
+
+func speaksProtocolVersion(v string) bool {
+	for _, known := range harnessProtocolVersions {
+		if v == known {
+			return true
+		}
+	}
+	return false
+}
 
 // negotiateProtocolVersion answers initialize's protocolVersion: the
 // client's requested revision when the route speaks it, else its latest.
