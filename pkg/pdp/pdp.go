@@ -262,6 +262,28 @@ func (e *Evaluator) AuthorizeV2HarnessTool(ctx context.Context, req Request) (De
 	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
 }
 
+// AuthorizeV2MCP decides an MCP tool call against the v2 harness_policies
+// set for the subject held by a live named session. It replaces the old v1
+// mcp:call action path with per-call EvaluateV2MCP decisions.
+func (e *Evaluator) AuthorizeV2MCP(ctx context.Context, sessionID, slug, tool, agentID, harnessKind string) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
+	if live, reason := e.sessionLive(sessionID); !live {
+		return sessionDenial(reason), nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return stateDenial(state), nil
+	}
+	var subject *policybundle.SessionSubject
+	if current, ok := e.sessions.Get(sessionID); ok {
+		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Groups: current.Groups, Status: string(current.Status)}
+	}
+	d := v.EvaluateV2MCP(slug, tool, agentID, harnessKind, subject, e.now().UTC())
+	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+}
+
 // AuthorizeV2Model decides a model call for the subject held by the request's
 // session (ADR-035 §6). The calling agent's model-profile assignment in the
 // bundle is the permission; nothing is resolved online. v2 is false only when

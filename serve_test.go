@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
@@ -139,6 +140,91 @@ func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
 		t.Fatalf("socket after shutdown: stat err = %v, want not-exist", err)
 	}
+}
+
+func TestServeMCPListener(t *testing.T) {
+	t.Run("loopback starts and serves", func(t *testing.T) {
+		tempDir := shortSocketTempDir(t)
+		socketPath := filepath.Join(tempDir, "runtime.sock")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan int, 1)
+		finished := make(chan struct{})
+
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mcpAddr := l.Addr().String()
+		l.Close()
+
+		cfg := Config{
+			RuntimeToken:           "kh_live_12345678901234567890",
+			RuntimeControlPlaneURL: "http://127.0.0.1:1",
+			MCPListenAddr:          mcpAddr,
+		}
+		go func() {
+			defer close(finished)
+			done <- runServeContext(ctx, cfg, socketPath, "127.0.0.1:0")
+		}()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case <-finished:
+			case <-time.After(3 * time.Second):
+			}
+		})
+
+		var resp *http.Response
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			resp, err = http.Get("http://" + mcpAddr + "/mcp/test")
+			if err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err != nil {
+			t.Fatalf("MCP listener not reachable: %v", err)
+		}
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("MCP GET /mcp/test status = %d, want 405", resp.StatusCode)
+		}
+		resp.Body.Close()
+
+		cancel()
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("runServeContext exit = %d, want 0", code)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("runtime did not stop")
+		}
+	})
+
+	t.Run("non-loopback rejected", func(t *testing.T) {
+		tempDir := shortSocketTempDir(t)
+		socketPath := filepath.Join(tempDir, "runtime.sock")
+		cfg := Config{
+			RuntimeToken:           "kh_live_12345678901234567890",
+			RuntimeControlPlaneURL: "http://127.0.0.1:1",
+			MCPListenAddr:          "0.0.0.0:8086",
+		}
+
+		done := make(chan int, 1)
+		go func() {
+			done <- runServeContext(context.Background(), cfg, socketPath, "127.0.0.1:0")
+		}()
+
+		select {
+		case code := <-done:
+			if code != 1 {
+				t.Fatalf("runServeContext with non-loopback MCP addr = %d, want 1", code)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("runServeContext did not exit")
+		}
+	})
 }
 
 func shortSocketTempDir(t *testing.T) string {
@@ -1001,4 +1087,258 @@ func TestRuntimeHTTPHandlerIgnoresInvokingSubjectHeader(t *testing.T) {
 	if subjectUserID != "session-user-42" {
 		t.Fatalf("subject resolve UserID = %q, want session-user-42 (X-Kei-Invoking-Subject header victim was ignored)", subjectUserID)
 	}
+}
+
+func TestMCPRoute_DeniedWithoutPolicyBundle(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	local := keiruntime.NewLocalPDP(Config{RuntimeToken: runtimeToken}, nil)
+
+	sessionID, err := local.Sessions.Create(pdp.Subject{
+		UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reg := mcproute.NewKeyRegistry()
+	key, err := reg.Mint("test-subject", "test-agent", "test-harness", sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := mcproute.NewHandler(mcproute.Config{
+		KeyRegistry: reg,
+		Authorizer:  pdpAuthorizer{pdp: local},
+		Upstreams: map[string]mcproute.UpstreamConfig{
+			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: mcproute.StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
+		},
+		Connectors:    []policybundle.Connector{{ID: "conn-1", Kind: "mcp", Slug: "test-slug"}},
+		AgentBindings: []mcproute.AgentBinding{{AgentID: "test-agent", ConnectorID: "conn-1"}},
+		Logger:        slog.Default(),
+	})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test-tool","arguments":{}}}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp/test-slug", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Host = "127.0.0.1:8086"
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (JSON-RPC error in body)", w.Code)
+	}
+	var rpcResp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
+		t.Fatal(err)
+	}
+	if rpcResp.Error == nil {
+		t.Fatal("expected error, got success")
+	}
+	if rpcResp.Error.Message != "policy_bundle_missing" {
+		t.Fatalf("error message = %q, want policy_bundle_missing", rpcResp.Error.Message)
+	}
+}
+
+func TestMCPRoute_SessionFromKeyNotHeader(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	local := keiruntime.NewLocalPDP(Config{RuntimeToken: runtimeToken}, nil)
+
+	sessionA, err := local.Sessions.Create(pdp.Subject{
+		UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reg := mcproute.NewKeyRegistry()
+	key, err := reg.Mint("test-subject", "test-agent", "test-harness", sessionA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := mcproute.NewHandler(mcproute.Config{
+		KeyRegistry: reg,
+		Authorizer:  pdpAuthorizer{pdp: local},
+		Upstreams: map[string]mcproute.UpstreamConfig{
+			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: mcproute.StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
+		},
+		Connectors:    []policybundle.Connector{{ID: "conn-1", Kind: "mcp", Slug: "test-slug"}},
+		AgentBindings: []mcproute.AgentBinding{{AgentID: "test-agent", ConnectorID: "conn-1"}},
+		Logger:        slog.Default(),
+	})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test-tool","arguments":{}}}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp/test-slug", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("X-Kei-Session", "session-B")
+	req.Host = "127.0.0.1:8086"
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (JSON-RPC error in body)", w.Code)
+	}
+	var rpcResp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
+		t.Fatal(err)
+	}
+	if rpcResp.Error == nil {
+		t.Fatal("expected error, got success")
+	}
+	if rpcResp.Error.Message != "policy_bundle_missing" {
+		t.Fatalf("error message = %q, want policy_bundle_missing (X-Kei-Session header must not override the session bound in the route key)", rpcResp.Error.Message)
+	}
+}
+
+func TestMCPRoute_AllowedWithPolicyBundle(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	stateDir := t.TempDir()
+
+	now := time.Now().UTC()
+	bundle := buildMCPAllowBundle(t, now)
+	store, err := policybundle.OpenStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+
+	local := keiruntime.NewLocalPDP(Config{RuntimeToken: runtimeToken, RuntimeStateDir: stateDir}, nil)
+
+	sessionID, err := local.Sessions.Create(pdp.Subject{
+		UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ws := "ws-fixture-0001"
+	local.SetIdentity(&keiruntime.Identity{
+		ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &ws, AgentID: "test-agent",
+	})
+	t.Cleanup(local.Close)
+
+	reg := mcproute.NewKeyRegistry()
+	key, err := reg.Mint("test-subject", "test-agent", "test-harness", sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var upstreamHits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	h := mcproute.NewHandler(mcproute.Config{
+		KeyRegistry: reg,
+		Authorizer:  pdpAuthorizer{pdp: local},
+		Upstreams: map[string]mcproute.UpstreamConfig{
+			"test_slug": {URL: upstream.URL, TokenSource: mcproute.StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
+		},
+		Connectors:    []policybundle.Connector{{ID: "conn-1", Kind: "mcp", Slug: "test_slug"}},
+		AgentBindings: []mcproute.AgentBinding{{AgentID: "test-agent", ConnectorID: "conn-1"}},
+		Logger:        slog.Default(),
+	})
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp/test_slug", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Host = "127.0.0.1:8086"
+	h.ServeHTTP(w, req)
+
+	var rpcResp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Result *json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
+		t.Fatalf("failed to decode body (status %d): %v\nbody: %s", w.Code, err, string(w.Body.Bytes()))
+	}
+	// The PDP allowed the call (no policy denial), but no verified listing
+	// was cached (no prior tools/list), so the manifest pin must deny with
+	// manifest_drift and nothing may be forwarded upstream.
+	if rpcResp.Error == nil {
+		t.Fatalf("expected manifest_drift error, got success: %s", w.Body.String())
+	}
+	if rpcResp.Error.Message != "manifest_drift" {
+		t.Fatalf("error message = %q, want manifest_drift (PDP allowed; manifest pin must deny)", rpcResp.Error.Message)
+	}
+	if hits := upstreamHits.Load(); hits != 0 {
+		t.Fatalf("upstream received %d requests, want 0 (no verified listing, must not forward)", hits)
+	}
+}
+
+// buildMCPAllowBundle builds a schema-compliant v2 bundle with
+// harness_policies that permit test_slug.test_tool unconditionally and a
+// bundle identity matching the test session (slack / U1234 / test-user).
+func buildMCPAllowBundle(t *testing.T, now time.Time) []byte {
+	t.Helper()
+
+	doc := map[string]any{
+		"schema": "kei.policy-bundle/v2", "bundle_id": "bundle-mcp-v2", "bundle_version": 2, "policy_revision": 7,
+		"issuer": policybundle.Issuer,
+		"audience": map[string]any{
+			"installation_id": "inst-fixture-0001",
+			"org_id":          "org-fixture-0001",
+			"workspace_id":    "ws-fixture-0001",
+		},
+		"issued_at":          now.UTC().Format(time.RFC3339Nano),
+		"not_after":          now.Add(12 * time.Hour).UTC().Format(time.RFC3339Nano),
+		"refresh":            map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300},
+		"subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 30},
+		"policy_set": map[string]any{
+			"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001",
+			"match_semantics": "kei.match/v2",
+			"evaluation":      map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
+			"tools":           []any{}, "checks": []any{}, "tool_policies": []any{},
+			"harness_match_semantics": "kei.harness-match/v1",
+			"harness_policies": []any{
+				map[string]any{
+					"policy_id":   "pol-mcp-allow-all",
+					"name":        "mcp-allow-test",
+					"src_pattern": "*",
+					"dst_pattern": "mcp:test_slug.test_tool",
+					"action":      "permit",
+					"priority":    50,
+					"scope":       map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
+				},
+			},
+		},
+		"agent_connector_bindings": []any{},
+		"identities": []any{
+			map[string]any{
+				"source":      "slack",
+				"external_id": "U1234",
+				"user_id":     "test-user",
+				"status":      "linked",
+				"groups":      []string{},
+			},
+		},
+	}
+
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
