@@ -94,7 +94,7 @@ func okResult(w http.ResponseWriter, _ *http.Request) {
 func TestMCPRoute_RequestOver1MiBRejectedBeforeUpstream(t *testing.T) {
 	reg, key := testKey(t)
 	upstream, hits := countingUpstream(t, okResult)
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -117,7 +117,7 @@ func TestMCPRoute_ResponseOver4MiBDropped(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"%s"}]}}`, strings.Repeat("b", 4<<20))
 	})
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -140,7 +140,7 @@ func TestMCPRoute_SSEResponseOver4MiBTerminated(t *testing.T) {
 			w.Write([]byte(event))
 		}
 	})
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -169,7 +169,7 @@ func TestMCPRoute_UpstreamTimeout(t *testing.T) {
 		okResult(w, r)
 	})
 	defer close(release)
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, UpstreamTimeout: 50 * time.Millisecond, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, UpstreamTimeout: 50 * time.Millisecond, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -181,10 +181,10 @@ func TestMCPRoute_UpstreamTimeout(t *testing.T) {
 }
 
 func TestMCPRoute_UpstreamTimeoutDefaultAndCap(t *testing.T) {
-	if got := NewHandler(Config{}).client.Timeout; got != 60*time.Second {
+	if got := buildHandler(testConfig{}).client.Timeout; got != 60*time.Second {
 		t.Fatalf("default upstream timeout = %v, want 60s", got)
 	}
-	if got := NewHandler(Config{UpstreamTimeout: 10 * time.Minute}).client.Timeout; got != 300*time.Second {
+	if got := buildHandler(testConfig{UpstreamTimeout: 10 * time.Minute}).client.Timeout; got != 300*time.Second {
 		t.Fatalf("upstream timeout = %v, want it capped at 300s", got)
 	}
 }
@@ -197,7 +197,7 @@ func TestMCPRoute_UpstreamResponseHeadersNotCopied(t *testing.T) {
 		w.Header().Set("X-Upstream-Internal", "leak")
 		okResult(w, r)
 	})
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -220,7 +220,7 @@ func TestMCPRoute_UpstreamResponseHeadersNotCopied(t *testing.T) {
 
 func TestMCPRoute_IPv6LoopbackHostAllowed(t *testing.T) {
 	reg, key := testKey(t)
-	h := newHandler(Config{KeyRegistry: reg})
+	h := newHandler(testConfig{KeyRegistry: reg})
 	req := routeRequest(key, `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
 	req.Host = "[::1]:8086"
 	w := httptest.NewRecorder()
@@ -233,7 +233,7 @@ func TestMCPRoute_IPv6LoopbackHostAllowed(t *testing.T) {
 
 func TestMCPRoute_HostWithoutLoopbackPortForms(t *testing.T) {
 	reg, key := testKey(t)
-	h := newHandler(Config{KeyRegistry: reg})
+	h := newHandler(testConfig{KeyRegistry: reg})
 	for _, host := range []string{"", "127.0.0.1", "[::1]", "::1:8086", "127.0.0.1.evil.com:8086", "localhost.evil.com:8086"} {
 		req := routeRequest(key, `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
 		req.Host = host
@@ -247,7 +247,7 @@ func TestMCPRoute_HostWithoutLoopbackPortForms(t *testing.T) {
 
 func TestMCPRoute_OriginAndHostCheckedBeforeRouteKey(t *testing.T) {
 	reg, _ := testKey(t)
-	h := newHandler(Config{KeyRegistry: reg})
+	h := newHandler(testConfig{KeyRegistry: reg})
 
 	withOrigin := routeRequest("", `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
 	withOrigin.Header.Set("Origin", "https://evil.example")
@@ -270,8 +270,8 @@ func TestMCPRoute_OriginAndHostCheckedBeforeRouteKey(t *testing.T) {
 func TestMCPRoute_DenialCodes(t *testing.T) {
 	reg, key := testKey(t)
 	upstream, hits := countingUpstream(t, okResult)
-	cfg := func() Config {
-		return Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
+	cfg := func() testConfig {
+		return testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
 			"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 		}}
 	}
@@ -285,11 +285,15 @@ func TestMCPRoute_DenialCodes(t *testing.T) {
 		code   int
 		reason string
 	}{
-		{"connector_not_found", func() *Handler { return NewHandler(cfg()) }, call("Y"), -31403, "connector_not_found"},
+		{"connector_not_found", func() *Handler {
+			c := cfg()
+			c.Connectors = []policybundle.Connector{}
+			return buildHandler(c)
+		}, call("Y"), -31403, "connector_not_found"},
 		{"connector_not_bound", func() *Handler {
 			c := cfg()
 			c.Connectors = []policybundle.Connector{{ID: "conn-1", Kind: "mcp", Slug: "test-slug"}}
-			return NewHandler(c)
+			return buildHandler(c)
 		}, call("Y"), -31403, "connector_not_bound"},
 		{"policy_denied", func() *Handler { h := newHandler(cfg()); primeTools(t, h, "test-slug", "X"); return h }, call("X"), -31403, "mcp_not_authorized"},
 		{"mcp_manifest_unapproved", func() *Handler {
@@ -297,7 +301,12 @@ func TestMCPRoute_DenialCodes(t *testing.T) {
 			c.Upstreams["test-slug"] = UpstreamConfig{URL: upstream.URL}
 			return newHandler(c)
 		}, call("Y"), -31409, "mcp_manifest_unapproved"},
-		{"mcp_manifest_drift", func() *Handler { return newHandler(cfg()) }, call("Y"), -31409, "mcp_manifest_drift"},
+		{"mcp_manifest_drift", func() *Handler {
+			// The session's connector is blocked after drift (§5.3).
+			h := newHandler(cfg())
+			h.blocked[listingKey{session: "test-session", connector: "conn-test-slug"}] = "sha256:dummy"
+			return h
+		}, call("Y"), -31409, "mcp_manifest_drift"},
 		{"mcp_tool_not_approved", func() *Handler { h := newHandler(cfg()); primeTools(t, h, "test-slug", "Z"); return h }, call("Y"), -31409, "mcp_tool_not_approved"},
 		{"upstream_blocked", func() *Handler {
 			h := newHandlerSSRF(cfg())
@@ -323,7 +332,7 @@ func TestMCPRoute_RedirectIsUpstreamProtocolError(t *testing.T) {
 	upstream, _ := countingUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://example.com/elsewhere", http.StatusFound)
 	})
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -340,8 +349,8 @@ func TestMCPRoute_ToolsListDriftReturnsNoTools(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"tools": []any{namedTool("changed")}}})
 	})
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
-		"test-slug": {URL: upstream.URL, ApprovedToolsHash: hashNamedTools(t, "approved")},
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Upstreams: map[string]UpstreamConfig{
+		"test-slug": {URL: upstream.URL, ApprovedToolsHash: hashNamedTools(t, "approved"), ApprovedTools: approvedNamed(t, "approved")},
 	}})
 
 	w := httptest.NewRecorder()
@@ -370,7 +379,7 @@ func TestMCPRoute_LogsNeverContainUpstreamURL(t *testing.T) {
 	secretURL := closed.URL + "/mcp/p4th-s3cret?token=q5ery-s3cret"
 
 	var logs bytes.Buffer
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Logger: slog.New(slog.NewTextHandler(&logs, nil)), Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Logger: slog.New(slog.NewTextHandler(&logs, nil)), Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: secretURL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -419,13 +428,13 @@ func (a recordingAuthorizer) Authorize(_ context.Context, d Decision) error {
 
 func TestMCPRouteCall_SessionFromKeyNotHeader(t *testing.T) {
 	reg := NewKeyRegistry()
-	key, err := reg.Mint(Session{Subject: "test-session", Agent: "test-agent", HarnessKind: "claude_code", SessionID: "session-A"})
+	key, err := reg.Mint(Session{Subject: "test-session", Agent: "test-agent", HarnessKind: "claude_code", SessionID: "test-session"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	upstream, _ := countingUpstream(t, okResult)
 	var got []Decision
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: recordingAuthorizer{&got}, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: recordingAuthorizer{&got}, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:dummy"},
 	}})
 	primeTools(t, h, "test-slug", "Y")
@@ -434,7 +443,7 @@ func TestMCPRouteCall_SessionFromKeyNotHeader(t *testing.T) {
 	req.Header.Set("X-Kei-Session", "session-B")
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
-	if len(got) != 1 || got[0].SessionID != "session-A" || got[0].HarnessKind != "claude_code" {
-		t.Fatalf("authorizer saw %+v, want the session bound to the route key (session-A)", got)
+	if len(got) != 1 || got[0].SessionID != "test-session" || got[0].HarnessKind != "claude_code" {
+		t.Fatalf("authorizer saw %+v, want the session bound to the route key (test-session)", got)
 	}
 }

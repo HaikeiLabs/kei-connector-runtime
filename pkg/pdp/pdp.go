@@ -458,6 +458,12 @@ func (e *Evaluator) IsV2HarnessTool(name string) bool {
 	return err == nil && v.V2HarnessTool(name, e.now().UTC())
 }
 
+// Bundle returns the verified bundle in force, or false when none is valid.
+func (e *Evaluator) Bundle() (*policybundle.Verified, bool) {
+	v, _, err := e.check()
+	return v, err == nil && v != nil
+}
+
 func (e *Evaluator) check() (*policybundle.Verified, policybundle.State, error) {
 	return e.store.Check(e.aud.InstallationID, e.aud.OrgID, e.aud.WorkspaceID, e.now().UTC())
 }

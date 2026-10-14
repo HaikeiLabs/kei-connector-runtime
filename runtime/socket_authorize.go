@@ -405,6 +405,54 @@ func (l *LocalPDP) AuthorizeMCPTool(ctx context.Context, sessionID, slug, tool, 
 	return e.AuthorizeV2MCP(ctx, sessionID, slug, tool, agentID, harnessKind)
 }
 
+// mcpBundle is the verified bundle in force, or nil before the identity
+// resolves or while no valid bundle is held.
+func (l *LocalPDP) mcpBundle() *policybundle.Verified {
+	e := l.evaluator.Load()
+	if e == nil {
+		return nil
+	}
+	v, ok := e.Bundle()
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+// MCPConnector returns the bundle's mcp connector descriptor for slug
+// (ADR-036 §4.3). With no valid bundle there is none.
+func (l *LocalPDP) MCPConnector(slug string) (policybundle.Connector, bool) {
+	v := l.mcpBundle()
+	if v == nil {
+		return policybundle.Connector{}, false
+	}
+	return v.MCPConnector(slug)
+}
+
+// AgentBoundToConnector reports the bundle's agent_connector_bindings entry.
+func (l *LocalPDP) AgentBoundToConnector(agentID, connectorID string) bool {
+	v := l.mcpBundle()
+	return v != nil && v.AgentBoundToConnector(agentID, connectorID)
+}
+
+// MCPHosts returns host:port of every mcp descriptor URL in the bundle.
+func (l *LocalPDP) MCPHosts() []string {
+	v := l.mcpBundle()
+	if v == nil {
+		return nil
+	}
+	return v.MCPHosts()
+}
+
+// BundleDigest identifies the bundle in force ("" without one).
+func (l *LocalPDP) BundleDigest() string {
+	v := l.mcpBundle()
+	if v == nil {
+		return ""
+	}
+	return v.Digest
+}
+
 // Close stops the session sweeper and flushes every held session
 // credential. The serve daemon calls it on exit.
 func (l *LocalPDP) Close() {

@@ -15,25 +15,89 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/manifest"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 )
 
-func newHandler(cfg Config) *Handler {
-	h := NewHandler(cfg)
+// UpstreamConfig describes one test connector the way these tests did before
+// the route read descriptors from the bundle: testConfig turns it into an mcp
+// descriptor of a fake catalog.
+type UpstreamConfig struct {
+	URL               string
+	TokenSource       TokenSource
+	ApprovedToolsHash string
+	ApprovedTools     []policybundle.MCPApprovedTool
+}
+
+// AgentBinding is one test agent_connector_bindings entry.
+type AgentBinding struct {
+	AgentID     string
+	ConnectorID string
+}
+
+// testConfig is Config with the connectors given as Upstreams. Unless
+// Connectors or AgentBindings is set, every upstream gets an mcp descriptor
+// (ID conn-<slug>) bound to the test agent ("test-agent", see testKey).
+type testConfig struct {
+	KeyRegistry     *KeyRegistry
+	Authorizer      Authorizer
+	Upstreams       map[string]UpstreamConfig
+	Connectors      []policybundle.Connector
+	AgentBindings   []AgentBinding
+	Logger          *slog.Logger
+	UpstreamTimeout time.Duration
+}
+
+func (tc testConfig) config() Config {
+	connectors := tc.Connectors
+	if connectors == nil {
+		for slug := range tc.Upstreams {
+			connectors = append(connectors, policybundle.Connector{ID: "conn-" + slug, Kind: "mcp", Slug: slug})
+		}
+	}
+	bindings := map[[2]string]bool{}
+	if tc.AgentBindings == nil && tc.Connectors == nil {
+		for _, c := range connectors {
+			bindings[[2]string{"test-agent", c.ID}] = true
+		}
+	}
+	for _, b := range tc.AgentBindings {
+		bindings[[2]string{b.AgentID, b.ConnectorID}] = true
+	}
+	cat := &fakeCatalog{bindings: bindings, digest: "bundle-1"}
+	var tokens TokenSource
+	for _, c := range connectors {
+		if u, ok := tc.Upstreams[c.Slug]; ok {
+			c.MCP = &policybundle.MCPDescriptor{URL: u.URL, Transport: "streamable_http", AuthMethod: "oauth", ApprovedManifestHash: u.ApprovedToolsHash, ApprovedTools: u.ApprovedTools}
+			if u.TokenSource != nil {
+				tokens = u.TokenSource
+			}
+		}
+		cat.connectors = append(cat.connectors, c)
+	}
+	return Config{KeyRegistry: tc.KeyRegistry, Authorizer: tc.Authorizer, Catalog: cat, TokenSource: tokens, Logger: tc.Logger, UpstreamTimeout: tc.UpstreamTimeout}
+}
+
+// buildHandler is NewHandler over a testConfig, with the real SSRF checks.
+func buildHandler(tc testConfig) *Handler { return NewHandler(tc.config()) }
+
+// newHandler is buildHandler with the SSRF checks relaxed for loopback test
+// servers.
+func newHandler(tc testConfig) *Handler {
+	h := buildHandler(tc)
 	h.checkSSRF = func(u *url.URL) error { return nil }
 	h.dialCtl = func(network, address string, c syscall.RawConn) error { return nil }
-	h.config.Connectors, h.config.AgentBindings = defaultMCPGates(cfg.Upstreams)
 	return h
 }
 
-func newHandlerSSRF(cfg Config, allowedURLs ...string) *Handler {
+func newHandlerSSRF(tc testConfig, allowedURLs ...string) *Handler {
 	allowed := make(map[string]bool, len(allowedURLs))
 	for _, u := range allowedURLs {
 		allowed[u] = true
 	}
-	h := NewHandler(cfg)
+	h := buildHandler(tc)
 	h.checkSSRF = func(u *url.URL) error {
 		if allowed[u.String()] {
 			return nil
@@ -41,21 +105,32 @@ func newHandlerSSRF(cfg Config, allowedURLs ...string) *Handler {
 		return checkSSRF(u)
 	}
 	h.dialCtl = func(network, address string, c syscall.RawConn) error { return nil }
-	h.config.Connectors, h.config.AgentBindings = defaultMCPGates(cfg.Upstreams)
 	return h
 }
 
-// defaultMCPGates gives every configured upstream a matching mcp descriptor and
-// binds the test session agent (testKey mints "test-agent"), so existing
-// tools/call tests exercise the path after the ADR-036 §4.5 step 5/6 gates.
-func defaultMCPGates(upstreams map[string]UpstreamConfig) ([]policybundle.Connector, []AgentBinding) {
-	var connectors []policybundle.Connector
-	var bindings []AgentBinding
-	for slug := range upstreams {
-		connectors = append(connectors, policybundle.Connector{ID: "conn-" + slug, Kind: "mcp", Slug: slug})
-		bindings = append(bindings, AgentBinding{AgentID: "test-agent", ConnectorID: "conn-" + slug})
+// approvedNamed approves namedTool(name) for each name.
+func approvedNamed(t *testing.T, names ...string) []policybundle.MCPApprovedTool {
+	t.Helper()
+	tools := make([]map[string]any, len(names))
+	for i, n := range names {
+		tools[i] = namedTool(n)
 	}
-	return connectors, bindings
+	return approvedTools(t, tools...)
+}
+
+// primeListing caches listing as the test session's verified listing for
+// slug, as a prior verified tools/list would.
+func primeListing(t *testing.T, h *Handler, slug string, listing *verifiedListing) {
+	t.Helper()
+	d, ok := h.config.Catalog.MCPConnector(slug)
+	if !ok {
+		t.Fatalf("no mcp descriptor for %s", slug)
+	}
+	h.mu.Lock()
+	h.listings[listingKey{session: "test-session", connector: d.ID}] = &cachedListing{
+		listing: listing, bundleDigest: h.config.Catalog.BundleDigest(), approvedHash: d.MCP.ApprovedManifestHash, verifiedAt: h.now(),
+	}
+	h.mu.Unlock()
 }
 
 // testKey creates a KeyRegistry with one minted key and returns both.
@@ -120,9 +195,7 @@ func primeTools(t *testing.T, h *Handler, slug string, names ...string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.mu.Lock()
-	h.listings[slug] = listing
-	h.mu.Unlock()
+	primeListing(t, h, slug, listing)
 }
 
 type fakeAuthorizer struct{}
@@ -136,7 +209,7 @@ func (fakeAuthorizer) Authorize(_ context.Context, d Decision) error {
 
 func TestMCPRouteAuth_NoKey(t *testing.T) {
 	reg, _ := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 	})
 
@@ -166,7 +239,7 @@ func TestMCPRouteAuth_NoKey(t *testing.T) {
 
 func TestMCPRouteAuth_BadKey(t *testing.T) {
 	reg, _ := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 	})
 
@@ -209,7 +282,7 @@ func TestMCPRouteAuth_ValidKey(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -232,7 +305,7 @@ func TestMCPRouteAuth_ValidKey(t *testing.T) {
 
 func TestMCPRouteNonLoopback_OriginHeaderDenied(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 	})
 
@@ -259,7 +332,7 @@ func TestMCPRouteNonLoopback_OriginHeaderDenied(t *testing.T) {
 
 func TestMCPRouteNonLoopback_NonLocalHostDenied(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 	})
 
@@ -298,7 +371,7 @@ func TestMCPRouteNonLoopback_LocalHostAllowed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -320,7 +393,7 @@ func TestMCPRouteNonLoopback_LocalHostAllowed(t *testing.T) {
 
 func TestMCPRouteAuth_WellKnownReturns404(t *testing.T) {
 	reg, _ := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 	})
 
@@ -347,7 +420,7 @@ func TestMCPRouteDeniedToolReturnsErrorAndDoesNotReachUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -393,7 +466,7 @@ func TestMCPRouteDeniedToolReturnsErrorAndDoesNotReachUpstream(t *testing.T) {
 
 func TestMCPRouteSSRF_PrivateIPBlocked(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -414,7 +487,7 @@ func TestMCPRouteSSRF_PrivateIPBlocked(t *testing.T) {
 
 func TestMCPRouteSSRF_LoopbackBlocked(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -435,7 +508,7 @@ func TestMCPRouteSSRF_LoopbackBlocked(t *testing.T) {
 
 func TestMCPRouteSSRF_NonHTTPSBlocked(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -475,11 +548,11 @@ func TestMCPRouteForwardsToolsList(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1"), ApprovedTools: approvedNamed(t, "tool1")},
 		},
 	})
 
@@ -526,7 +599,7 @@ func TestMCPRouteAllowsToolCallToReachUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -565,7 +638,7 @@ func TestMCPRouteStripHarnessAuth(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -604,10 +677,10 @@ func TestMCPRouteManifestDrift_UnapprovedTool(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known"), ApprovedTools: approvedNamed(t, "tool_known")},
 		},
 	})
 
@@ -638,10 +711,10 @@ func TestMCPRouteManifestDrift_ApprovedToolsPass(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known"), ApprovedTools: approvedNamed(t, "tool_known")},
 		},
 	})
 
@@ -667,7 +740,7 @@ func TestMCPRouteSSRF_RedirectToBlockedIP(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandlerSSRF(Config{
+	h := newHandlerSSRF(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -703,11 +776,11 @@ func TestMCPRouteSSRF_RedirectNotFollowed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1"), ApprovedTools: approvedNamed(t, "tool1")},
 		},
 	})
 	primeTools(t, h, "test-slug", "tool1")
@@ -767,12 +840,13 @@ func TestMCPRouteConnectorNotFound(t *testing.T) {
 
 	// The upstream is configured, but no mcp descriptor names this slug
 	// (ADR-036 §4.5 step 5).
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
 			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
 		},
+		Connectors: []policybundle.Connector{},
 	})
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool1","arguments":{}}}`
@@ -799,7 +873,7 @@ func TestMCPRouteConnectorNotBound(t *testing.T) {
 
 	// The mcp descriptor names the slug, but the session agent has no
 	// agent_connector_bindings entry for it (ADR-036 §4.5 step 6).
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -887,11 +961,11 @@ func TestMCPRouteSSE_RelaysEvents(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "test_tool")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "test_tool"), ApprovedTools: approvedNamed(t, "test_tool")},
 		},
 	})
 	primeTools(t, h, "test-slug", "test_tool")
@@ -928,7 +1002,7 @@ func TestMCPRouteResponseBodyRelayed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -954,7 +1028,7 @@ func TestMCPRouteResponseBodyRelayed(t *testing.T) {
 }
 
 func TestMCPRouteAuth_NilRegistryDenies(t *testing.T) {
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: nil,
 	})
 
@@ -981,7 +1055,7 @@ func TestMCPRouteAuth_NilRegistryDenies(t *testing.T) {
 
 func TestMCPRouteManifestNotApproved_ToolsList(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := buildHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
 			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: StaticToken("ct_test"), ApprovedToolsHash: ""},
@@ -1013,7 +1087,7 @@ func TestMCPRouteManifestNotApproved_ToolsList(t *testing.T) {
 
 func TestMCPRouteManifestNotApproved_ToolsCall(t *testing.T) {
 	reg, key := testKey(t)
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
 			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: StaticToken("ct_test"), ApprovedToolsHash: ""},
@@ -1074,11 +1148,11 @@ func TestMCPRouteFilterTools_RemovesDeniedTools(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  selectiveAuthorizer{allowed: []string{"tool_a", "tool_c"}},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c"), ApprovedTools: approvedNamed(t, "tool_a", "tool_b", "tool_c")},
 		},
 	})
 
@@ -1134,11 +1208,11 @@ func TestMCPRouteFilterTools_AllDenied(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  selectiveAuthorizer{allowed: []string{}},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b"), ApprovedTools: approvedNamed(t, "tool_a", "tool_b")},
 		},
 	})
 
@@ -1175,16 +1249,16 @@ func TestMCPRouteFilterTools_SSE(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		tools := []map[string]any{namedTool("tool_a"), namedTool("tool_b"), namedTool("tool_c")}
-		enc := json.NewEncoder(w)
-		enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"tools": tools}})
+		msg, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"tools": tools}})
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  selectiveAuthorizer{allowed: []string{"tool_a", "tool_c"}},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c"), ApprovedTools: approvedNamed(t, "tool_a", "tool_b", "tool_c")},
 		},
 	})
 
@@ -1233,11 +1307,11 @@ func (s subjectFilterAuthorizer) Authorize(ctx context.Context, d Decision) erro
 
 func TestMCPRouteFilterTools_SubjectAware(t *testing.T) {
 	reg := NewKeyRegistry()
-	key1, err := reg.Mint(Session{Subject: "session-alpha", Agent: "agent-1", HarnessKind: "harness-kind", SessionID: "session-alpha"})
+	key1, err := reg.Mint(Session{Subject: "session-alpha", Agent: "test-agent", HarnessKind: "harness-kind", SessionID: "session-alpha"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	key2, err := reg.Mint(Session{Subject: "session-beta", Agent: "agent-1", HarnessKind: "harness-kind", SessionID: "session-beta"})
+	key2, err := reg.Mint(Session{Subject: "session-beta", Agent: "test-agent", HarnessKind: "harness-kind", SessionID: "session-beta"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,7 +1332,7 @@ func TestMCPRouteFilterTools_SubjectAware(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer: subjectFilterAuthorizer{allow: func(d Decision) error {
 			switch d.Subject {
@@ -1277,7 +1351,7 @@ func TestMCPRouteFilterTools_SubjectAware(t *testing.T) {
 			}
 		}},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c"), ApprovedTools: approvedNamed(t, "tool_a", "tool_b", "tool_c")},
 		},
 	})
 
@@ -1340,7 +1414,7 @@ func TestMCPRouteCall_PassesSubjectAndArgs(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer: subjectFilterAuthorizer{allow: func(d Decision) error {
 			got = d
@@ -1385,12 +1459,13 @@ func TestMCPRouteCall_PassesSubjectAndArgs(t *testing.T) {
 
 func TestMCPRouteNilAuthorizer_DeniesToolsCall(t *testing.T) {
 	reg, key := testKey(t)
-	h := NewHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
 			"test-slug": {URL: "https://upstream.example/mcp", TokenSource: StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
 		},
 	})
+	primeTools(t, h, "test-slug", "tool1")
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool1"}}`
 	w := httptest.NewRecorder()
@@ -1434,10 +1509,10 @@ func TestMCPRouteNilAuthorizer_ToolsListReturnsEmpty(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a"), ApprovedTools: approvedNamed(t, "tool_a")},
 		},
 	})
 
@@ -1501,11 +1576,11 @@ func TestMCPRouteFilterTools_PreservesNextCursor(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  selectiveAuthorizer{allowed: []string{"tool_a", "tool_c"}},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c", "tool_d")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c", "tool_d"), ApprovedTools: approvedNamed(t, "tool_a", "tool_b", "tool_c", "tool_d")},
 		},
 	})
 
@@ -1549,15 +1624,15 @@ func TestMCPRouteSSE_ManifestDrift(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		tools := []map[string]any{{"name": "tool_unknown", "description": "not approved", "inputSchema": map[string]any{}}}
-		enc := json.NewEncoder(w)
-		enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"tools": tools}})
+		msg, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"tools": tools}})
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known"), ApprovedTools: approvedNamed(t, "tool_known")},
 		},
 	})
 
@@ -1590,11 +1665,11 @@ func (s *subjectTokenSource) Token(_ context.Context, subject, _ string) (string
 
 func TestMCPRouteTokenSource_SubjectSpecific(t *testing.T) {
 	reg := NewKeyRegistry()
-	keyAlpha, err := reg.Mint(Session{Subject: "session-alpha", Agent: "agent1", HarnessKind: "harness1", SessionID: "session-alpha"})
+	keyAlpha, err := reg.Mint(Session{Subject: "session-alpha", Agent: "test-agent", HarnessKind: "harness1", SessionID: "session-alpha"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyBeta, err := reg.Mint(Session{Subject: "session-beta", Agent: "agent1", HarnessKind: "harness1", SessionID: "session-beta"})
+	keyBeta, err := reg.Mint(Session{Subject: "session-beta", Agent: "test-agent", HarnessKind: "harness1", SessionID: "session-beta"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1614,14 +1689,14 @@ func TestMCPRouteTokenSource_SubjectSpecific(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
 			"test-slug": {
 				URL:               upstream.URL,
 				TokenSource:       &subjectTokenSource{tokens: map[string]string{"session-alpha": "token_alpha", "session-beta": "token_beta"}},
-				ApprovedToolsHash: hashNamedTools(t, "tool1"),
+				ApprovedToolsHash: hashNamedTools(t, "tool1"), ApprovedTools: approvedNamed(t, "tool1"),
 			},
 		},
 	})
@@ -1675,7 +1750,7 @@ func TestMCPRouteTokenSource_ErrorDeniesUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -1729,7 +1804,7 @@ func TestMCPRouteTokenSource_TokenNotInLogs(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Logger:      logger,
@@ -1769,10 +1844,10 @@ func TestMCPRouteManifestDrift_DescriptionChange(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1"), ApprovedTools: approvedNamed(t, "tool1")},
 		},
 	})
 
@@ -1797,7 +1872,7 @@ func TestMCPRoute_UnknownMethodReturnsMinus32601(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -1845,7 +1920,7 @@ func TestMCPRoute_PromptsGetReturnsMinus32601(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -1891,7 +1966,7 @@ func TestMCPRoute_BatchArrayRejected(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -1934,7 +2009,7 @@ func TestMCPRoute_InitializeHandledLocally(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -1979,7 +2054,7 @@ func TestMCPRoute_PingHandledLocally(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -2024,7 +2099,7 @@ func TestMCPRoute_NotificationInitialized(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -2062,11 +2137,11 @@ func TestMCPRouteForwardsReSerializedBody(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1"), ApprovedTools: approvedNamed(t, "tool1")},
 		},
 	})
 	primeTools(t, h, "test-slug", "tool2")
@@ -2114,10 +2189,10 @@ func TestMCPRouteManifestDrift_ToolsReorderNoDrift(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c"), ApprovedTools: approvedNamed(t, "tool_a", "tool_b", "tool_c")},
 		},
 	})
 
@@ -2146,7 +2221,7 @@ func TestMCPRouteManifestDrift_EmptyListFailsClosed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -2177,7 +2252,7 @@ func TestMCPRouteManifestDrift_UpstreamErrorFailsClosed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -2210,11 +2285,11 @@ func TestMCPRouteToolsCall_UnknownToolDenied(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_known"), ApprovedTools: approvedNamed(t, "tool_known")},
 		},
 	})
 	primeTools(t, h, "test-slug", "tool_known")
@@ -2247,7 +2322,9 @@ func TestMCPRouteToolsCall_UnknownToolDenied(t *testing.T) {
 	}
 }
 
-func TestMCPRouteToolsCall_NoVerifiedListingDenied(t *testing.T) {
+// With no cached listing a call first fetches and verifies one (ADR-036
+// §5.3). This upstream lists no tools, so the call is never forwarded.
+func TestMCPRouteToolsCall_NoVerifiedListingFetchesOneFirst(t *testing.T) {
 	reg, key := testKey(t)
 	var upstreamHits atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2261,11 +2338,11 @@ func TestMCPRouteToolsCall_NoVerifiedListingDenied(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool1"), ApprovedTools: approvedNamed(t, "tool1")},
 		},
 	})
 
@@ -2277,8 +2354,8 @@ func TestMCPRouteToolsCall_NoVerifiedListingDenied(t *testing.T) {
 	req.Host = "127.0.0.1:8086"
 	h.ServeHTTP(w, req)
 
-	if upstreamHits.Load() != 0 {
-		t.Fatal("upstream was called without a verified listing")
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("upstream received %d requests, want 1 (the tools/list only)", upstreamHits.Load())
 	}
 	var rpcResp struct {
 		Error *struct {
@@ -2288,8 +2365,8 @@ func TestMCPRouteToolsCall_NoVerifiedListingDenied(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if rpcResp.Error == nil || rpcResp.Error.Message != "mcp_manifest_drift" {
-		t.Fatalf("want mcp_manifest_drift, got %+v", rpcResp.Error)
+	if rpcResp.Error == nil || rpcResp.Error.Message != "mcp_tool_not_approved" {
+		t.Fatalf("want mcp_tool_not_approved, got %+v", rpcResp.Error)
 	}
 }
 
@@ -2309,7 +2386,7 @@ func TestMCPRouteManifestPaging_TooManyToolsFailsClosed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -2353,7 +2430,7 @@ func TestMCPRouteManifestPaging_TooLargeFailsClosed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
@@ -2409,11 +2486,11 @@ func TestMCPRouteManifestPaging_TwoPagesSucceed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := newHandler(Config{
+	h := newHandler(testConfig{
 		KeyRegistry: reg,
 		Authorizer:  fakeAuthorizer{},
 		Upstreams: map[string]UpstreamConfig{
-			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c")},
+			"test-slug": {URL: upstream.URL, TokenSource: StaticToken("ct_test"), ApprovedToolsHash: hashNamedTools(t, "tool_a", "tool_b", "tool_c"), ApprovedTools: approvedNamed(t, "tool_a", "tool_b", "tool_c")},
 		},
 	})
 
