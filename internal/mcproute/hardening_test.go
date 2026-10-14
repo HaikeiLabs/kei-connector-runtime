@@ -421,9 +421,9 @@ func assertNoTools(t *testing.T, w *httptest.ResponseRecorder) {
 // recordingAuthorizer permits every call and records the decisions it saw.
 type recordingAuthorizer struct{ got *[]Decision }
 
-func (a recordingAuthorizer) Authorize(_ context.Context, d Decision) error {
+func (a recordingAuthorizer) Authorize(_ context.Context, d Decision) (Verdict, error) {
 	*a.got = append(*a.got, d)
-	return nil
+	return Verdict{}, nil
 }
 
 func TestMCPRouteCall_SessionFromKeyNotHeader(t *testing.T) {

@@ -89,6 +89,12 @@ type rpcErrorData struct {
 // writeDenial writes a §4.5 error: error.data is the reason and a fresh
 // decision id, and nothing else.
 func writeDenial(w http.ResponseWriter, status int, id any, code int, reason string) {
+	writeDenialID(w, status, id, code, reason, uuid.NewString())
+}
+
+// writeDenialID is writeDenial with the decision id of the request's audit
+// record.
+func writeDenialID(w http.ResponseWriter, status int, id any, code int, reason, decisionID string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(jsonrpcResponse{
@@ -97,7 +103,7 @@ func writeDenial(w http.ResponseWriter, status int, id any, code int, reason str
 		Error: &jsonrpcError{
 			Code:    code,
 			Message: reason,
-			Data:    &rpcErrorData{Reason: reason, DecisionID: uuid.NewString()},
+			Data:    &rpcErrorData{Reason: reason, DecisionID: decisionID},
 		},
 	})
 }

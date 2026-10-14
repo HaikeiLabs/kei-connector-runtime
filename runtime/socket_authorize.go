@@ -428,6 +428,19 @@ func (l *LocalPDP) RouteKeySession(sessionID, agentID string) (subject, agent, r
 	return sub.UserID, agent, ""
 }
 
+// AuditScope returns the installation's org, workspace and installation ids
+// for audit records ("" before the identity resolves).
+func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
+	id := l.identity.Load()
+	if id == nil {
+		return "", "", ""
+	}
+	if id.WorkspaceID != nil {
+		workspaceID = *id.WorkspaceID
+	}
+	return id.OrgID, workspaceID, id.ID
+}
+
 // mcpBundle is the verified bundle in force, or nil before the identity
 // resolves or while no valid bundle is held.
 func (l *LocalPDP) mcpBundle() *policybundle.Verified {

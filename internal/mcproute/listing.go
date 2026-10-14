@@ -146,30 +146,63 @@ func verifyListing(tools []json.RawMessage, approved []policybundle.MCPApprovedT
 	for _, a := range approved {
 		approvedHash[a.Name] = a.ToolHash
 	}
+	drift := &driftError{}
 	for _, raw := range tools {
 		var info struct {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(raw, &info); err != nil {
-			return nil, fmt.Errorf("%w: unreadable tool", errManifestDrift)
+			drift.add("unreadable tool")
+			continue
 		}
 		got, err := manifest.ToolHash(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%w: tool %q: %v", errManifestDrift, info.Name, err)
-		}
 		want, ok := approvedHash[info.Name]
-		if !ok {
-			return nil, fmt.Errorf("%w: tool %q is not approved", errManifestDrift, info.Name)
+		switch {
+		case err != nil:
+			drift.add(fmt.Sprintf("tool %q: %v", info.Name, err))
+		case !ok:
+			drift.add(fmt.Sprintf("tool %q is not approved", info.Name))
+		case got != want:
+			drift.add(fmt.Sprintf("tool %q changed", info.Name))
 		}
-		if got != want {
-			return nil, fmt.Errorf("%w: tool %q changed", errManifestDrift, info.Name)
-		}
+	}
+	if drift.unapproved > 0 {
+		return nil, drift
 	}
 	observed, err := manifest.Hash(tools)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid manifest: %v", errManifestDrift, err)
 	}
 	return newVerifiedListing(observed, tools)
+}
+
+// driftError is a listing with tools that are not approved, or whose hash
+// differs; unapproved counts them for audit (§4.9).
+type driftError struct {
+	unapproved int
+	first      string
+}
+
+func (e *driftError) add(why string) {
+	if e.unapproved == 0 {
+		e.first = why
+	}
+	e.unapproved++
+}
+
+func (e *driftError) Error() string {
+	return fmt.Sprintf("%s: %d tool(s) not approved, first: %s", reasonManifestDrift, e.unapproved, e.first)
+}
+
+func (e *driftError) Is(target error) bool { return target == errManifestDrift }
+
+// unapprovedCount is the number of unapproved tools behind a drift error.
+func unapprovedCount(err error) int {
+	var d *driftError
+	if errors.As(err, &d) {
+		return d.unapproved
+	}
+	return 0
 }
 
 // fetchListing pages through the upstream tools/list (§4.7 step 1). More
