@@ -321,15 +321,18 @@ type mcpRoute struct {
 // an empty key registry. Route keys are minted per session at runtime.
 func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 	keys := mcproute.NewKeyRegistry()
+	handler := mcproute.NewHandler(mcproute.Config{
+		KeyRegistry: keys,
+		Authorizer:  pdpAuthorizer{pdp: local},
+		// The bundle in force: mcp descriptors, bindings, approvals.
+		Catalog: local,
+		Logger:  slog.Default(),
+	})
 	local.OnSessionEnd(keys.Revoke)
+	local.OnSessionEnd(handler.EndSession)
 	return &mcpRoute{
-		keys: keys,
-		handler: mcproute.NewHandler(mcproute.Config{
-			KeyRegistry: keys,
-			Authorizer:  pdpAuthorizer{pdp: local},
-			Upstreams:   make(map[string]mcproute.UpstreamConfig),
-			Logger:      slog.Default(),
-		}),
+		keys:    keys,
+		handler: handler,
 	}
 }
 

@@ -1110,7 +1110,7 @@ func TestMCPRoute_DeniedWithoutPolicyBundle(t *testing.T) {
 	}
 }
 
-func TestMCPRoute_AllowedWithPolicyBundle(t *testing.T) {
+func TestMCPRoute_PolicyBundleDecidesMCPCalls(t *testing.T) {
 	const runtimeToken = "kh_live_runtime_test_token_1234567890"
 	stateDir := t.TempDir()
 
@@ -1139,58 +1139,6 @@ func TestMCPRoute_AllowedWithPolicyBundle(t *testing.T) {
 	})
 	t.Cleanup(local.Close)
 
-	reg := mcproute.NewKeyRegistry()
-	key, err := reg.Mint(mcproute.Session{Subject: "test-subject", Agent: "test-agent", HarnessKind: "test-harness", SessionID: sessionID})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var upstreamHits atomic.Int64
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamHits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
-	}))
-	t.Cleanup(upstream.Close)
-
-	h := mcproute.NewHandler(mcproute.Config{
-		KeyRegistry: reg,
-		Authorizer:  pdpAuthorizer{pdp: local},
-		Upstreams: map[string]mcproute.UpstreamConfig{
-			"test_slug": {URL: upstream.URL, TokenSource: mcproute.StaticToken("ct_test"), ApprovedToolsHash: "sha256:dummy"},
-		},
-		Connectors:    []policybundle.Connector{{ID: "conn-1", Kind: "mcp", Slug: "test_slug"}},
-		AgentBindings: []mcproute.AgentBinding{{AgentID: "test-agent", ConnectorID: "conn-1"}},
-		Logger:        slog.Default(),
-	})
-
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/mcp/test_slug", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Host = "127.0.0.1:8086"
-	h.ServeHTTP(w, req)
-
-	var rpcResp struct {
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-		Result *json.RawMessage `json:"result"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &rpcResp); err != nil {
-		t.Fatalf("failed to decode body (status %d): %v\nbody: %s", w.Code, err, string(w.Body.Bytes()))
-	}
-	// No verified listing is cached (no prior tools/list), so the manifest
-	// pin (ADR-036 §4.5 step 7) denies before policy, and nothing may be
-	// forwarded upstream.
-	if rpcResp.Error == nil {
-		t.Fatalf("expected mcp_manifest_drift error, got success: %s", w.Body.String())
-	}
-	if rpcResp.Error.Message != "mcp_manifest_drift" {
-		t.Fatalf("error message = %q, want mcp_manifest_drift", rpcResp.Error.Message)
-	}
 	// The PDP itself permits the call.
 	if err := (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
 		SessionID: sessionID, Agent: "test-agent", HarnessKind: "test-harness", ConnectorSlug: "test_slug", Tool: "test_tool",
@@ -1204,9 +1152,6 @@ func TestMCPRoute_AllowedWithPolicyBundle(t *testing.T) {
 	var permErr *mcproute.PermissionError
 	if !errors.As(err, &permErr) || permErr.Reason != "policy_denied" {
 		t.Fatalf("deny policy: err = %v, want PermissionError policy_denied", err)
-	}
-	if hits := upstreamHits.Load(); hits != 0 {
-		t.Fatalf("upstream received %d requests, want 0 (no verified listing, must not forward)", hits)
 	}
 }
 
@@ -1305,5 +1250,90 @@ func TestMCPRoute_SessionEndRevokesRouteKey(t *testing.T) {
 	}
 	if _, ok := route.keys.Validate(otherKey); !ok {
 		t.Fatal("another session's route key was revoked")
+	}
+}
+
+// buildMCPDescriptorBundle is buildMCPAllowBundle with the catalog's HAI-570
+// connectors section: one mcp connector (slug test_slug) bound to test-agent.
+func buildMCPDescriptorBundle(t *testing.T, now time.Time, mcpURL string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(buildMCPAllowBundle(t, now), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["policy_set"].(map[string]any)["connectors"] = []any{map[string]any{
+		"id": "conn-mcp-1", "name": "Test MCP", "provider": "test_mcp", "capabilities": []any{},
+		"credential_source": "oauth", "account_model": "per_user",
+		"kind": "mcp", "slug": "test_slug",
+		"mcp": map[string]any{
+			"url": mcpURL, "transport": "streamable_http", "auth_method": "oauth",
+			"approved_manifest_hash": "sha256:a94748f3bd7e1bc1e46ff952e802378a98249adfd5fcd2677ff48bd0df848dbb",
+			"approved_tools":         []any{map[string]any{"name": "test_tool", "tool_hash": "sha256:9e84a27116887ce94c79f25184ee07da9b9dd0288847be9e0ee885fdc61ec537"}},
+		},
+	}}
+	doc["agent_connector_bindings"] = []any{map[string]any{"agent_id": "test-agent", "connector_id": "conn-mcp-1", "capabilities": []any{}}}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestMCPRoute_ReadsDescriptorsFromTheBundle builds the route through the
+// serve wiring: connectors, bindings and upstream URLs come from the v2
+// bundle's mcp descriptors (ADR-036 §4.3, §4.5 steps 5-6).
+func TestMCPRoute_ReadsDescriptorsFromTheBundle(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Now().UTC()
+	store, err := policybundle.OpenStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(buildMCPDescriptorBundle(t, now, "https://mcp.unresolvable.invalid/mcp"), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	local := keiruntime.NewLocalPDP(Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeStateDir: stateDir}, nil)
+	t.Cleanup(local.Close)
+	ws := "ws-fixture-0001"
+	local.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &ws, AgentID: "test-agent"})
+	sessionID, err := local.Sessions.Create(pdp.Subject{UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := newMCPRoute(Config{}, local)
+
+	call := func(agent, slug string) string {
+		key, err := route.keys.Mint(mcproute.Session{Subject: "test-user", Agent: agent, HarnessKind: "claude_code", SessionID: sessionID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/mcp/"+slug, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{}}}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Host = "127.0.0.1:8086"
+		w := httptest.NewRecorder()
+		route.handler.ServeHTTP(w, req)
+		var resp struct {
+			Error *struct {
+				Data struct {
+					Reason string `json:"reason"`
+				} `json:"data"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Error == nil {
+			t.Fatalf("want a JSON-RPC error, got %s", w.Body.Bytes())
+		}
+		return resp.Error.Data.Reason
+	}
+
+	if got := call("test-agent", "other_slug"); got != "connector_not_found" {
+		t.Fatalf("unknown slug: reason %q, want connector_not_found", got)
+	}
+	if got := call("other-agent", "test_slug"); got != "connector_not_bound" {
+		t.Fatalf("unbound agent: reason %q, want connector_not_bound", got)
+	}
+	// The bound agent passes steps 5-6 and the route dials the descriptor's
+	// mcp.url to verify a listing; that name does not resolve.
+	if got := call("test-agent", "test_slug"); got != "upstream_blocked" {
+		t.Fatalf("bound agent: reason %q, want upstream_blocked (the descriptor URL was dialed)", got)
 	}
 }

@@ -2,6 +2,9 @@ package policybundle
 
 import (
 	"encoding/json"
+	"net"
+	"net/url"
+	"strings"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 )
@@ -27,8 +30,8 @@ type Connector struct {
 	Config            map[string]any          `json:"config,omitempty"`
 	HTTPAPI           *contract.HTTPAPI       `json:"http_api,omitempty"`
 	Grafana           *contract.GrafanaConfig `json:"grafana,omitempty"`
-	// TODO(HAI-484): ADR-036 §4.3 descriptor fields. Optional until the catalog
-	// emits them; the runtime gates the MCP route on kind and slug (§4.5 5-6).
+	// ADR-036 §4.3 descriptor fields (catalog HAI-570). Optional in the closed
+	// schema until every runtime accepts them; mcp requires slug and mcp.
 	Kind string         `json:"kind,omitempty"`
 	Slug string         `json:"slug,omitempty"`
 	MCP  *MCPDescriptor `json:"mcp,omitempty"`
@@ -82,4 +85,54 @@ func (v *Verified) CarriesConnectorDescriptors() bool {
 		Connectors *[]json.RawMessage `json:"connectors"`
 	}
 	return json.Unmarshal(v.Payload.PolicySet, &set) == nil && set.Connectors != nil
+}
+
+// MCPConnector returns the bundle's mcp connector descriptor whose slug is
+// slug (ADR-036 §4.3, §4.5 step 5). The closed v2 schema guarantees an mcp
+// descriptor has its mcp block.
+func (v *Verified) MCPConnector(slug string) (Connector, bool) {
+	set, err := v.decodePolicySet()
+	if err != nil || slug == "" {
+		return Connector{}, false
+	}
+	for _, c := range set.Connectors {
+		if c.Kind == "mcp" && c.Slug == slug && c.MCP != nil {
+			return c, true
+		}
+	}
+	return Connector{}, false
+}
+
+// MCPHosts returns host:port of every mcp descriptor URL in the bundle, the
+// only upstream destinations the MCP route may dial (ADR-036 §4.10).
+func (v *Verified) MCPHosts() []string {
+	set, err := v.decodePolicySet()
+	if err != nil {
+		return nil
+	}
+	var hosts []string
+	for _, c := range set.Connectors {
+		if c.Kind != "mcp" || c.MCP == nil {
+			continue
+		}
+		u, err := url.Parse(c.MCP.URL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+			continue
+		}
+		port := u.Port()
+		if port == "" {
+			port = "443"
+		}
+		hosts = append(hosts, net.JoinHostPort(strings.ToLower(u.Hostname()), port))
+	}
+	return hosts
+}
+
+// AgentBoundToConnector reports whether agent_connector_bindings binds agentID
+// to connectorID, whatever the capabilities (ADR-036 §4.5 step 6).
+func (v *Verified) AgentBoundToConnector(agentID, connectorID string) bool {
+	if v == nil || agentID == "" || connectorID == "" {
+		return false
+	}
+	return v.agentBound(agentID, connectorID, nil)
 }

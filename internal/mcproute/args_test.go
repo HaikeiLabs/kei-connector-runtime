@@ -25,9 +25,7 @@ func primeSchemas(t *testing.T, h *Handler, slug string, schemas map[string]stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.mu.Lock()
-	h.listings[slug] = listing
-	h.mu.Unlock()
+	primeListing(t, h, slug, listing)
 }
 
 const querySchema = `{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}`
@@ -39,7 +37,7 @@ func argsHandler(t *testing.T, schema string) (*Handler, string, *[]Decision, fu
 	reg, key := testKey(t)
 	upstream, hits := countingUpstream(t, okResult)
 	var seen []Decision
-	h := newHandler(Config{KeyRegistry: reg, Authorizer: recordingAuthorizer{&seen}, Upstreams: map[string]UpstreamConfig{
+	h := newHandler(testConfig{KeyRegistry: reg, Authorizer: recordingAuthorizer{&seen}, Upstreams: map[string]UpstreamConfig{
 		"test-slug": {URL: upstream.URL, ApprovedToolsHash: "sha256:test"},
 	}})
 	primeSchemas(t, h, "test-slug", map[string]string{"search": schema})
