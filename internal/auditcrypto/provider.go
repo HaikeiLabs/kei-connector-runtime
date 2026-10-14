@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,7 +50,14 @@ type Provider struct {
 	httpClient    *http.Client
 	cached        *cachedData
 	escrowEnabled bool
+	// retryAt is when a fetch may run again after a failed one.
+	retryAt time.Time
 }
+
+// fetchBackoff is how long a failed fetch is not retried, so callers on a
+// request path (the MCP route) do not each wait for an unreachable control
+// plane. The existing cache, if any, keeps serving meanwhile.
+const fetchBackoff = 30 * time.Second
 
 // NewProvider creates a Provider that fetches material from baseURL using
 // the given runtime token for authentication.
@@ -149,10 +157,17 @@ func (p *Provider) ensureFresh(ctx context.Context) error {
 		p.mu.Unlock()
 		return nil
 	}
+	if time.Now().Before(p.retryAt) {
+		p.mu.Unlock()
+		return errors.New("auditcrypto: fetch backing off after a failure")
+	}
 	p.mu.Unlock()
 
 	resp, err := p.fetch(ctx)
 	if err != nil {
+		p.mu.Lock()
+		p.retryAt = time.Now().Add(fetchBackoff)
+		p.mu.Unlock()
 		return err
 	}
 

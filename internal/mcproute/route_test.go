@@ -200,11 +200,11 @@ func primeTools(t *testing.T, h *Handler, slug string, names ...string) {
 
 type fakeAuthorizer struct{}
 
-func (fakeAuthorizer) Authorize(_ context.Context, d Decision) error {
+func (fakeAuthorizer) Authorize(_ context.Context, d Decision) (Verdict, error) {
 	if d.Tool == "X" {
-		return &PermissionError{Reason: "mcp_not_authorized", Tool: d.Tool}
+		return Verdict{}, &PermissionError{Reason: "mcp_not_authorized", Tool: d.Tool}
 	}
-	return nil
+	return Verdict{}, nil
 }
 
 func TestMCPRouteAuth_NoKey(t *testing.T) {
@@ -1121,13 +1121,13 @@ type selectiveAuthorizer struct {
 	allowed []string
 }
 
-func (s selectiveAuthorizer) Authorize(_ context.Context, d Decision) error {
+func (s selectiveAuthorizer) Authorize(_ context.Context, d Decision) (Verdict, error) {
 	for _, a := range s.allowed {
 		if d.Tool == a {
-			return nil
+			return Verdict{}, nil
 		}
 	}
-	return &PermissionError{Reason: "mcp_not_authorized", Tool: d.Tool}
+	return Verdict{}, &PermissionError{Reason: "mcp_not_authorized", Tool: d.Tool}
 }
 
 func TestMCPRouteFilterTools_RemovesDeniedTools(t *testing.T) {
@@ -1301,8 +1301,8 @@ type subjectFilterAuthorizer struct {
 	allow func(Decision) error
 }
 
-func (s subjectFilterAuthorizer) Authorize(ctx context.Context, d Decision) error {
-	return s.allow(d)
+func (s subjectFilterAuthorizer) Authorize(ctx context.Context, d Decision) (Verdict, error) {
+	return Verdict{}, s.allow(d)
 }
 
 func TestMCPRouteFilterTools_SubjectAware(t *testing.T) {

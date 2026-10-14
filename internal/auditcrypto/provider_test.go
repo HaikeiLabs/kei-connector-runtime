@@ -240,3 +240,24 @@ func newTestServer(t *testing.T, digestKey []byte, digestKeyID string, recipient
 		})
 	}))
 }
+
+// A failed fetch is not retried on every call: the MCP route digests and
+// encrypts on the request path, so an unreachable control plane must not add
+// a fetch timeout to each tools/call (HAI-488).
+func TestProviderBacksOffAfterAFailedFetch(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	p := NewProvider(srv.URL, "test-token")
+
+	for i := 0; i < 3; i++ {
+		p.Digest([]byte(`{}`))
+		p.Encrypt([]byte(`{}`))
+	}
+	if hits != 1 {
+		t.Fatalf("control plane fetched %d times after a failure, want 1 until the backoff passes", hits)
+	}
+}

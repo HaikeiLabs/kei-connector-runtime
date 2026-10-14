@@ -1101,7 +1101,7 @@ func TestMCPRoute_DeniedWithoutPolicyBundle(t *testing.T) {
 	}
 
 	// Without a policy bundle the PDP denies every MCP tool call.
-	err = (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
+	_, err = (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
 		SessionID: sessionID, Agent: "test-agent", HarnessKind: "test-harness", ConnectorSlug: "test-slug", Tool: "test-tool",
 	})
 	var permErr *mcproute.PermissionError
@@ -1140,13 +1140,13 @@ func TestMCPRoute_PolicyBundleDecidesMCPCalls(t *testing.T) {
 	t.Cleanup(local.Close)
 
 	// The PDP itself permits the call.
-	if err := (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
+	if _, err := (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
 		SessionID: sessionID, Agent: "test-agent", HarnessKind: "test-harness", ConnectorSlug: "test_slug", Tool: "test_tool",
 	}); err != nil {
 		t.Fatalf("PDP denied test_slug.test_tool: %v", err)
 	}
 	// A deny policy surfaces as the ADR-036 §4.5 reason policy_denied.
-	err = (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
+	_, err = (pdpAuthorizer{pdp: local}).Authorize(context.Background(), mcproute.Decision{
 		SessionID: sessionID, Agent: "test-agent", HarnessKind: "test-harness", ConnectorSlug: "test_slug", Tool: "blocked_tool",
 	})
 	var permErr *mcproute.PermissionError
@@ -1335,5 +1335,55 @@ func TestMCPRoute_ReadsDescriptorsFromTheBundle(t *testing.T) {
 	// mcp.url to verify a listing; that name does not resolve.
 	if got := call("test-agent", "test_slug"); got != "upstream_blocked" {
 		t.Fatalf("bound agent: reason %q, want upstream_blocked (the descriptor URL was dialed)", got)
+	}
+}
+
+// TestMCPRoute_WritesAuditRecordsToTheSpool builds the route through the serve
+// wiring: a tools/call writes one §4.9 record to the local audit spool, as a
+// decision line the collector parses (ADR-036 §4.9, ADR-022).
+func TestMCPRoute_WritesAuditRecordsToTheSpool(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Now().UTC()
+	store, err := policybundle.OpenStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(buildMCPDescriptorBundle(t, now, "https://mcp.unresolvable.invalid/mcp"), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeStateDir: stateDir, AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")}
+	local := keiruntime.NewLocalPDP(cfg, nil)
+	t.Cleanup(local.Close)
+	ws := "ws-fixture-0001"
+	local.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &ws, AgentID: "test-agent"})
+	sessionID, err := local.Sessions.Create(pdp.Subject{UserID: "test-user", Source: "slack", ExternalID: "U1234", Status: pdp.StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := newMCPRoute(cfg, local)
+	key, err := route.keys.Mint(mcproute.Session{Subject: "test-user", Agent: "test-agent", HarnessKind: "claude_code", SessionID: sessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp/other_slug", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_tool","arguments":{"q":"argument-canary-488"}}}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Host = "127.0.0.1:8086"
+	route.handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spool := strings.TrimSpace(readSpool(t, cfg.AuditPath))
+	if strings.Count(spool, "\n") != 0 || !strings.Contains(spool, `"event":"mcp.tools_call"`) || !strings.Contains(spool, `"reason_code":"connector_not_found"`) {
+		t.Fatalf("spool = %s, want one mcp.tools_call connector_not_found record", spool)
+	}
+	if strings.Contains(spool, "argument-canary-488") || strings.Contains(spool, key) {
+		t.Fatalf("spool carries an argument value or the route key: %s", spool)
+	}
+	for _, field := range []string{`"org_id":"org-fixture-0001"`, `"workspace_id":"ws-fixture-0001"`, `"installation_id":"inst-fixture-0001"`, `"harness_kind":"claude_code"`} {
+		if !strings.Contains(spool, field) {
+			t.Errorf("spool record lacks %s: %s", field, spool)
+		}
+	}
+	event, ok := keiruntime.ParseAuditLine(spool)
+	if !ok || event.ToolName != "mcp:other_slug.test_tool" || event.Decision != "deny" || event.AgentID != "test-agent" {
+		t.Fatalf("the collector parses %+v (%v), want the deny decision for mcp:other_slug.test_tool", event, ok)
 	}
 }

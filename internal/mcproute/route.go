@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/google/uuid"
 )
 
 // Session carries the subject and metadata validated from a route key.
@@ -46,9 +47,19 @@ type PermissionError struct {
 
 func (e *PermissionError) Error() string { return e.Reason + ": " + e.Tool }
 
-// Authorizer decides whether a tool call is permitted.
+// Verdict is what the policy decision rests on, for audit (ADR-036 §4.9).
+type Verdict struct {
+	PolicyID      string
+	BundleVersion int64
+	DenySource    string
+	// Groups are the session subject's groups the decision used.
+	Groups []string
+}
+
+// Authorizer decides whether a tool call is permitted. A denial is a
+// *PermissionError; the Verdict is returned either way.
 type Authorizer interface {
-	Authorize(ctx context.Context, d Decision) error
+	Authorize(ctx context.Context, d Decision) (Verdict, error)
 }
 
 // TokenSource provides a per-request upstream Bearer token for a subject and
@@ -95,6 +106,9 @@ type Config struct {
 	Authorizer Authorizer
 	// Logger for audit and errors. When nil, logs are discarded.
 	Logger *slog.Logger
+	// Auditor receives one record per tools/list and tools/call (§4.9).
+	// When nil, nothing is recorded.
+	Auditor Auditor
 	// Catalog is the bundle in force. When nil, no connector is found and
 	// nothing is dialed.
 	Catalog Catalog
@@ -301,46 +315,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveToolsCall runs ADR-036 §4.5 steps 5 to 11 for one tools/call. Every
-// denial is answered before any request reaches the upstream server.
+// denial is answered before any request reaches the upstream server, and the
+// call writes exactly one audit record (§4.9).
 func (h *Handler) serveToolsCall(w http.ResponseWriter, ctx context.Context, id any, slug string, sess *Session, req jsonrpcRequest, canonical []byte) {
+	rec := h.newAudit("mcp.tools_call", slug, sess)
+	defer h.emit(ctx, rec)
 	tool := extractTool(req.Params)
 	if tool == "" {
+		rec.ReasonCode = "invalid_request"
 		h.writeRPCError(w, id, -32602, "missing tool name")
 		return
 	}
+	rec.Tool, rec.Args = tool, extractArguments(req.Params)
 	// Steps 5-6: the slug must name an active mcp connector in the workspace
 	// descriptors, and the session's agent must be bound to it.
 	d, ok := h.connector(slug)
 	if !ok {
-		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotFound)
+		h.deny(w, rec, id, codeDenied, reasonConnectorNotFound)
 		return
 	}
+	rec.describe(d)
 	if !h.config.Catalog.AgentBoundToConnector(sess.Agent, d.ID) {
-		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotBound)
+		h.deny(w, rec, id, codeDenied, reasonConnectorNotBound)
 		return
 	}
 	// Step 7: a verified listing that contains the tool.
 	listing, err := h.verifiedListingFor(ctx, sess, d)
 	if err != nil {
-		h.denyUpstream(w, id, d, err)
+		h.denyUpstream(w, rec, id, d, err)
 		return
 	}
 	if !listing.toolNames[tool] {
-		writeDenial(w, http.StatusOK, id, codeManifest, reasonToolNotApproved)
+		h.deny(w, rec, id, codeManifest, reasonToolNotApproved)
 		return
 	}
 	// Step 8: the arguments must validate against the verified inputSchema.
 	if err := listing.validateArguments(tool, req.Params); err != nil {
 		h.config.Logger.Info("mcp_invalid_arguments", "slug", slug, "tool", tool, "error", err)
-		writeDenial(w, http.StatusOK, id, codeInvalidArgs, reasonInvalidArguments)
+		h.deny(w, rec, id, codeInvalidArgs, reasonInvalidArguments)
 		return
 	}
 	// Step 9: policy.
 	if h.config.Authorizer == nil {
-		writeDenial(w, http.StatusOK, id, codeDenied, reasonNoMatchingPolicy)
+		h.deny(w, rec, id, codeDenied, reasonNoMatchingPolicy)
 		return
 	}
-	if err := h.config.Authorizer.Authorize(ctx, Decision{
+	verdict, err := h.config.Authorizer.Authorize(ctx, Decision{
 		SessionID:     sess.SessionID,
 		Subject:       sess.Subject,
 		Agent:         sess.Agent,
@@ -348,42 +368,83 @@ func (h *Handler) serveToolsCall(w http.ResponseWriter, ctx context.Context, id 
 		ConnectorSlug: slug,
 		Tool:          tool,
 		Args:          req.Params,
-	}); err != nil {
+	})
+	rec.PolicyID, rec.BundleVersion, rec.DenySource, rec.Groups = verdict.PolicyID, verdict.BundleVersion, verdict.DenySource, verdict.Groups
+	if err != nil {
 		reason := reasonPolicyDenied
 		var permErr *PermissionError
 		if errors.As(err, &permErr) && permErr.Reason != "" {
 			reason = permErr.Reason
 		}
-		writeDenial(w, http.StatusOK, id, codeDenied, reason)
+		h.deny(w, rec, id, codeDenied, reason)
 		return
 	}
-	h.forwardToUpstream(w, ctx, id, d, canonical, sess)
+	rec.Decision = "allow"
+	h.forwardToUpstream(w, ctx, rec, id, d, canonical, sess)
 }
 
 // serveToolsList answers tools/list from the session's verified listing
-// (ADR-036 §4.7). Drift returns no tools (§5.3).
+// (ADR-036 §4.7). Drift returns no tools (§5.3). It writes one audit record
+// with the listed, hidden and unapproved counts.
 func (h *Handler) serveToolsList(w http.ResponseWriter, ctx context.Context, id any, slug string, sess *Session) {
+	rec := h.newAudit("mcp.tools_list", slug, sess)
+	defer h.emit(ctx, rec)
 	d, ok := h.connector(slug)
 	if !ok {
-		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotFound)
+		h.deny(w, rec, id, codeDenied, reasonConnectorNotFound)
 		return
 	}
+	rec.describe(d)
 	if !h.config.Catalog.AgentBoundToConnector(sess.Agent, d.ID) {
-		writeDenial(w, http.StatusOK, id, codeDenied, reasonConnectorNotBound)
+		h.deny(w, rec, id, codeDenied, reasonConnectorNotBound)
 		return
 	}
 	listing, err := h.verifiedListingFor(ctx, sess, d)
 	var re *routeError
 	if errors.As(err, &re) && re.reason == reasonManifestDrift {
 		h.logUpstreamFailure(d, err)
+		rec.Decision, rec.ReasonCode, rec.Unapproved = "deny", reasonManifestDrift, unapprovedCount(err)
 		h.writeToolsList(w, id, []json.RawMessage{})
 		return
 	}
 	if err != nil {
-		h.denyUpstream(w, id, d, err)
+		h.denyUpstream(w, rec, id, d, err)
 		return
 	}
-	h.writeToolsList(w, id, h.filterTools(ctx, listing.tools, slug, sess))
+	permitted := h.filterTools(ctx, listing.tools, slug, sess)
+	rec.Decision, rec.Listed, rec.HiddenByPolicy = "allow", len(permitted), len(listing.tools)-len(permitted)
+	h.writeToolsList(w, id, permitted)
+}
+
+// newAudit starts a request's audit record. It is a denial until a step
+// permits it.
+func (h *Handler) newAudit(event, slug string, sess *Session) *AuditRecord {
+	rec := &AuditRecord{
+		Event: event, DecisionID: uuid.NewString(), Decision: "deny",
+		SessionID: sess.SessionID, AgentID: sess.Agent, HarnessKind: sess.HarnessKind, UserID: sess.Subject,
+		ConnectorSlug: slug,
+	}
+	if h.config.Catalog != nil {
+		rec.BundleDigest = h.config.Catalog.BundleDigest()
+	}
+	return rec
+}
+
+// emit writes rec. A failed write is logged and never changes the decision
+// (ADR-012); the log names no content.
+func (h *Handler) emit(ctx context.Context, rec *AuditRecord) {
+	if h.config.Auditor == nil {
+		return
+	}
+	if err := h.config.Auditor.Record(ctx, *rec); err != nil {
+		h.config.Logger.Warn("mcp_audit_write_failed", "event", rec.Event, "decision_id", rec.DecisionID, "error", err)
+	}
+}
+
+// deny answers a §4.5 denial and records it under the record's decision id.
+func (h *Handler) deny(w http.ResponseWriter, rec *AuditRecord, id any, code int, reason string) {
+	rec.Decision, rec.ReasonCode = "deny", reason
+	writeDenialID(w, http.StatusOK, id, code, reason, rec.DecisionID)
 }
 
 // filterTools removes tools the Authorizer denies. A nil Authorizer denies
@@ -400,7 +461,7 @@ func (h *Handler) filterTools(ctx context.Context, tools []json.RawMessage, slug
 		if err := json.Unmarshal(t, &info); err != nil {
 			continue
 		}
-		if err := h.config.Authorizer.Authorize(ctx, Decision{
+		if _, err := h.config.Authorizer.Authorize(ctx, Decision{
 			SessionID:     sess.SessionID,
 			Subject:       sess.Subject,
 			Agent:         sess.Agent,
@@ -501,4 +562,15 @@ func extractTool(params json.RawMessage) string {
 		return ""
 	}
 	return p.Name
+}
+
+// extractArguments returns params.arguments, for audit digests only.
+func extractArguments(params json.RawMessage) json.RawMessage {
+	var p struct {
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return nil
+	}
+	return p.Arguments
 }

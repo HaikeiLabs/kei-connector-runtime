@@ -103,27 +103,53 @@ func isEventStream(resp *http.Response) bool {
 
 // forwardToUpstream sends one tools/call and relays the response. Only the
 // route's own Content-Type is set: no upstream header reaches the harness.
-func (h *Handler) forwardToUpstream(w http.ResponseWriter, ctx context.Context, id any, d policybundle.Connector, body []byte, sess *Session) {
+func (h *Handler) forwardToUpstream(w http.ResponseWriter, ctx context.Context, rec *AuditRecord, id any, d policybundle.Connector, body []byte, sess *Session) {
+	start := h.now()
+	rec.Forwarded, rec.UpstreamHost = true, upstreamHost(d.MCP.URL)
+	defer func() { rec.DurationMS = h.now().Sub(start).Milliseconds() }()
 	resp, err := h.callUpstream(ctx, d, sess, body)
 	if err != nil {
-		h.denyUpstream(w, id, d, err)
+		h.denyUpstream(w, rec, id, d, err)
 		return
 	}
 	defer resp.Body.Close()
+	rec.UpstreamStatus = resp.StatusCode
 
 	if isEventStream(resp) {
-		h.relaySSE(w, id, d, resp.Body)
+		rec.ResponseBytes = h.relaySSE(w, id, d, resp.Body)
 		return
 	}
 
 	respBody, err := readCapped(resp.Body, maxResponseBytes)
 	if err != nil {
-		h.denyUpstream(w, id, d, err)
+		h.denyUpstream(w, rec, id, d, err)
 		return
 	}
+	rec.ResponseBytes = len(respBody)
+	rec.IsError, rec.JSONRPCErrorCode = resultOutcome(respBody)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(respBody)
+}
+
+// resultOutcome reads, for audit only, whether a tools/call response is a
+// tool error (result.isError) or a JSON-RPC error and its code.
+func resultOutcome(body []byte) (isError bool, code int) {
+	var msg struct {
+		Result *struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &msg) != nil {
+		return false, 0
+	}
+	if msg.Error != nil {
+		return true, msg.Error.Code
+	}
+	return msg.Result != nil && msg.Result.IsError, 0
 }
 
 // readCapped reads at most limit bytes. A longer body is response_too_large.
@@ -140,13 +166,14 @@ func readCapped(r io.Reader, limit int) ([]byte, error) {
 
 // relaySSE relays an SSE response stream one complete event at a time. Once
 // the events would exceed maxResponseBytes in total, the stream ends with a
-// response_too_large error for the request instead (ADR-036 §4.9).
-func (h *Handler) relaySSE(w http.ResponseWriter, id any, d policybundle.Connector, body io.Reader) {
+// response_too_large error for the request instead (ADR-036 §4.9). It
+// returns the number of bytes relayed.
+func (h *Handler) relaySSE(w http.ResponseWriter, id any, d policybundle.Connector, body io.Reader) int {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.config.Logger.Error("mcp_sse_flush_unsupported", "slug", d.Slug)
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return 0
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -160,7 +187,7 @@ func (h *Handler) relaySSE(w http.ResponseWriter, id any, d policybundle.Connect
 		event.Write(chunk)
 		if total+event.Len() > maxResponseBytes {
 			h.endSSE(w, flusher, id, d, upstreamFailure(reasonResponseTooLarge, fmt.Errorf("stream exceeds %d bytes", maxResponseBytes)))
-			return
+			return total
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
@@ -169,11 +196,12 @@ func (h *Handler) relaySSE(w http.ResponseWriter, id any, d policybundle.Connect
 			if event.Len() > 0 {
 				w.Write(event.Bytes())
 				flusher.Flush()
+				total += event.Len()
 			}
 			if !errors.Is(err, io.EOF) {
 				h.endSSE(w, flusher, id, d, transportError(err))
 			}
-			return
+			return total
 		}
 		if line := bytes.TrimRight(chunk, "\r\n"); len(line) == 0 {
 			w.Write(event.Bytes())
@@ -196,12 +224,13 @@ func (h *Handler) endSSE(w io.Writer, flusher http.Flusher, id any, d policybund
 	flusher.Flush()
 }
 
-// denyUpstream answers a failed upstream exchange with its §4.5 code.
-func (h *Handler) denyUpstream(w http.ResponseWriter, id any, d policybundle.Connector, err error) {
+// denyUpstream answers a failed upstream exchange (or manifest step) with
+// its §4.5 code and records it.
+func (h *Handler) denyUpstream(w http.ResponseWriter, rec *AuditRecord, id any, d policybundle.Connector, err error) {
 	h.logUpstreamFailure(d, err)
 	re := upstreamFailure(reasonUpstreamUnreachable, err)
 	errors.As(err, &re)
-	writeDenial(w, http.StatusOK, id, re.code, re.reason)
+	h.deny(w, rec, id, re.code, re.reason)
 }
 
 // logUpstreamFailure logs the connector slug and upstream host, never the

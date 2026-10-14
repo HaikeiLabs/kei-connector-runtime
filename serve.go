@@ -328,9 +328,19 @@ type mcpRoute struct {
 // an empty key registry. Route keys are minted per session at runtime.
 func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 	keys := mcproute.NewKeyRegistry()
+	auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir)
 	handler := mcproute.NewHandler(mcproute.Config{
 		KeyRegistry: keys,
 		Authorizer:  pdpAuthorizer{pdp: local},
+		// One §4.9 record per tools/list and tools/call, in the local spool;
+		// arguments only as a digest, or encrypted to customer-held keys.
+		Auditor: mcproute.SpoolAuditor{
+			Append: func(class string, record []byte) error {
+				return keiruntime.NewAuditSpool(auditPath, cfg.AuditMaxBytes).Append(class, record)
+			},
+			Sealer: auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken),
+			Scope:  local.AuditScope,
+		},
 		// The bundle in force: mcp descriptors, bindings, approvals.
 		Catalog: local,
 		Logger:  slog.Default(),
@@ -366,15 +376,19 @@ type pdpAuthorizer struct {
 	pdp *keiruntime.LocalPDP
 }
 
-func (a pdpAuthorizer) Authorize(ctx context.Context, d mcproute.Decision) error {
+func (a pdpAuthorizer) Authorize(ctx context.Context, d mcproute.Decision) (mcproute.Verdict, error) {
 	result, err := a.pdp.AuthorizeMCPTool(ctx, d.SessionID, d.ConnectorSlug, d.Tool, d.Agent, d.HarnessKind)
 	if err != nil {
-		return &mcproute.PermissionError{Reason: "internal_error", Tool: d.Tool}
+		return mcproute.Verdict{}, &mcproute.PermissionError{Reason: "internal_error", Tool: d.Tool}
+	}
+	verdict := mcproute.Verdict{PolicyID: result.PolicyID, BundleVersion: result.BundleVersion, DenySource: result.DenySource}
+	if sub, ok := a.pdp.Sessions.Get(d.SessionID); ok {
+		verdict.Groups = sub.Groups
 	}
 	if !result.Allow {
-		return &mcproute.PermissionError{Reason: mcpReason(result.ReasonCode), Tool: d.Tool}
+		return verdict, &mcproute.PermissionError{Reason: mcpReason(result.ReasonCode), Tool: d.Tool}
 	}
-	return nil
+	return verdict, nil
 }
 
 // mcpReason maps a PDP reason code to its ADR-036 §4.5 name. The PDP calls a
