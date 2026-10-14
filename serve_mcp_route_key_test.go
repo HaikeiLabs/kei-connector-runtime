@@ -1,11 +1,15 @@
 package connectorruntime
 
 import (
+	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
 )
 
 // HAI-488 (ADR-036 §4.4): `kei-proxy run --harness-kind <kind> -- <harness>`
@@ -67,5 +71,48 @@ func TestCommandRunRouteKeyNeedsALiveNamedSession(t *testing.T) {
 
 	if code != 1 || !strings.Contains(stderr, "session_not_found") || strings.Contains(stdout, "env-keys") {
 		t.Fatalf("exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
+	}
+}
+
+const (
+	mcpConnectorID = "conn-mcp-1"
+	mcpTokenCanary = "kei-canary-mcp-connector-token-577"
+)
+
+// TestMCPRoute_ResolvesTheSessionsConnectorCredential builds the route
+// through the serve wiring: its credential source releases the linked
+// session's token for one connector and resource through the HAI-577
+// connector-scoped resolve, and maps a failure to a CredentialDenied.
+func TestMCPRoute_ResolvesTheSessionsConnectorCredential(t *testing.T) {
+	rig := newInvokeRigConfig(t, func(c *Config) { c.MCPListenAddr = defaultMCPListenAddr })
+	id := rig.startNamedSession(t)
+	sub, ok := rig.local.Sessions.Get(id)
+	if !ok {
+		t.Fatal("no session")
+	}
+	sess := &mcproute.Session{Subject: sub.UserID, SessionID: id, Agent: "agent-fixture-0001"}
+	if rig.mcp.credentials == nil {
+		t.Fatal("the route has no credential source")
+	}
+
+	var got mcproute.ConnectorCredential
+	if err := rig.mcp.credentials.UseCredential(context.Background(), sess, mcpConnectorID, "https://mcp.example/mcp", func(c mcproute.ConnectorCredential) error {
+		got = c
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken != mcpTokenCanary || got.ConnectorID != mcpConnectorID || got.Resource != "https://mcp.example/mcp" || got.Issuer != "https://auth.mcp.example" {
+		t.Fatalf("credential = connector %q resource %q issuer %q (token matches: %v)", got.ConnectorID, got.Resource, got.Issuer, got.AccessToken == mcpTokenCanary)
+	}
+
+	err := rig.mcp.credentials.UseCredential(context.Background(), sess, "conn-other", "https://mcp.example/mcp", func(mcproute.ConnectorCredential) error { return nil })
+	var denied *mcproute.CredentialDenied
+	if !errors.As(err, &denied) || denied.Reason != "NOT_CONNECTED" {
+		t.Fatalf("unconnected connector: err = %v, want CredentialDenied NOT_CONNECTED", err)
+	}
+	other := &mcproute.Session{Subject: "someone-else", SessionID: id}
+	if err := rig.mcp.credentials.UseCredential(context.Background(), other, mcpConnectorID, "https://mcp.example/mcp", func(mcproute.ConnectorCredential) error { return nil }); !errors.As(err, &denied) {
+		t.Fatalf("another subject: err = %v, want a denial", err)
 	}
 }

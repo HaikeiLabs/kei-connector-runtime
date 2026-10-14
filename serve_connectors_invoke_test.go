@@ -87,6 +87,23 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func (rig *invokeRig) serveI11(w http.ResponseWriter, r *http.Request) {
+	// HAI-577: one connector's token for one resource.
+	if connector, ok := strings.CutPrefix(r.URL.Path, "/api/v1/connectorCredentials/"); ok && strings.HasSuffix(connector, ":resolve") && r.Header.Get("X-Kei-Subject-Token") == subjectCanary {
+		connector = strings.TrimSuffix(connector, ":resolve")
+		var body struct {
+			Resource string `json:"resource"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if connector != mcpConnectorID {
+			_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": connector, "failure": map[string]any{"reason": "NOT_CONNECTED"}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connector_id": connector, "issuer": "https://auth.mcp.example", "resource": body.Resource, "account_model": "per_user",
+			"credential": map[string]any{"access_token": mcpTokenCanary, "token_type": "Bearer"},
+		})
+		return
+	}
 	if r.URL.Path != credrelease.ResolvePath || r.Header.Get("X-Kei-Subject-Token") != subjectCanary {
 		w.WriteHeader(http.StatusUnauthorized)
 		return

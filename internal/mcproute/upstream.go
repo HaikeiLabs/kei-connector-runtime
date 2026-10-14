@@ -20,9 +20,16 @@ import (
 // today. HTTP+SSE (2024-11-05) upstreams are denied upstream_protocol_error.
 const transportStreamableHTTP = "streamable_http"
 
+// Auth methods of an mcp descriptor (ADR-036 §3.3).
+const (
+	authMethodNone      = "none"
+	authMethodSecretRef = "secret_ref"
+)
+
 // callUpstream makes one POST to connector d's mcp.url and returns the
 // response. The caller must close resp.Body. Every error is a *routeError
-// that never names the upstream URL. A 3xx is never followed (§4.10).
+// that never names the upstream URL or carries the credential. A 3xx is never
+// followed (§4.10).
 func (h *Handler) callUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, error) {
 	if d.MCP.Transport != transportStreamableHTTP {
 		return nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream transport %q is not supported", d.MCP.Transport))
@@ -34,32 +41,130 @@ func (h *Handler) callUpstream(ctx context.Context, d policybundle.Connector, se
 	if err := h.checkSSRF(u); err != nil {
 		return nil, upstreamFailure(reasonUpstreamBlocked, errSSRFBlocked)
 	}
+	switch d.MCP.AuthMethod {
+	case authMethodNone:
+		return h.post(ctx, d, sess, body, "")
+	case authMethodSecretRef:
+		// credential_fields headers from the tenant secret store are not
+		// implemented for mcp connectors yet.
+		return nil, credentialDenial(reasonCredentialUnavailable, errors.New("secret_ref mcp connectors are not supported yet"))
+	}
+	// Step 10 (§4.8): the session's credential for this connector, released
+	// for exactly its canonical resource.
+	if h.config.Credentials == nil {
+		return nil, credentialDenial(reasonCredentialUnavailable, errors.New("no credential source"))
+	}
+	var resp *http.Response
+	err = h.config.Credentials.UseCredential(ctx, sess, d.ID, d.MCP.URL, func(c ConnectorCredential) error {
+		if c.ConnectorID != d.ID || c.Resource != d.MCP.URL {
+			return credentialDenial(reasonCredentialAudienceMismatch, errors.New("the credential was released for another connector or resource"))
+		}
+		r, err := h.post(ctx, d, sess, body, c.AccessToken)
+		resp = r
+		return err
+	})
+	var re *routeError
+	if errors.As(err, &re) {
+		if re.reason == reasonCredentialRejected {
+			h.config.Credentials.Discard(sess, d.ID, d.MCP.URL)
+		}
+		return nil, re
+	}
+	if err != nil {
+		var denied *CredentialDenied
+		if errors.As(err, &denied) && denied.Reason == "AUDIENCE_MISMATCH" {
+			return nil, credentialDenial(reasonCredentialAudienceMismatch, err)
+		}
+		return nil, credentialDenial(reasonCredentialUnavailable, err)
+	}
+	return resp, nil
+}
+
+func credentialDenial(reason string, err error) *routeError {
+	return &routeError{code: codeCredential, reason: reason, err: err}
+}
+
+// post sends body to d's mcp.url with token (none when empty) and maps the
+// HTTP status: 3xx and other non-2xx are upstream_protocol_error, 401 is
+// credential_rejected, and 403 insufficient_scope carries the challenged
+// scope (§4.8). The route retries nothing.
+func (h *Handler) post(ctx context.Context, d policybundle.Connector, sess *Session, body []byte, token string) (*http.Response, error) {
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.MCP.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, upstreamFailure(reasonUpstreamBlocked, errors.New("cannot build upstream request"))
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("Accept", "application/json, text/event-stream")
-	if h.config.TokenSource != nil {
-		token, err := h.config.TokenSource.Token(ctx, sess.Subject, d.Slug)
-		if err != nil {
-			return nil, &routeError{code: codeCredential, reason: reasonCredentialUnavailable, err: err}
-		}
+	if token != "" {
 		upReq.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := h.client.Do(upReq)
 	if err != nil {
 		return nil, transportError(err)
 	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+	switch {
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		resp.Body.Close()
 		return nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream redirect %d not followed", resp.StatusCode))
+	case resp.StatusCode == http.StatusUnauthorized && token != "":
+		resp.Body.Close()
+		return nil, credentialDenial(reasonCredentialRejected, errors.New("upstream rejected the credential"))
+	case resp.StatusCode == http.StatusForbidden && token != "":
+		if scope, ok := insufficientScope(resp.Header.Values("WWW-Authenticate")); ok {
+			resp.Body.Close()
+			re := credentialDenial(reasonInsufficientScope, errors.New("upstream requires more scope"))
+			re.scope = scope
+			return nil, re
+		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		resp.Body.Close()
 		return nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream status %d", resp.StatusCode))
 	}
 	return resp, nil
+}
+
+// insufficientScope reads an RFC 6750 Bearer challenge with
+// error="insufficient_scope" and returns its scope parameter.
+func insufficientScope(challenges []string) (string, bool) {
+	for _, ch := range challenges {
+		params, ok := bearerChallengeParams(ch)
+		if ok && params["error"] == "insufficient_scope" {
+			return params["scope"], true
+		}
+	}
+	return "", false
+}
+
+// bearerChallengeParams parses `Bearer k="v", k2=v2` into its parameters.
+func bearerChallengeParams(ch string) (map[string]string, bool) {
+	scheme, rest, _ := strings.Cut(strings.TrimSpace(ch), " ")
+	if !strings.EqualFold(scheme, "Bearer") {
+		return nil, false
+	}
+	params := map[string]string{}
+	for rest = strings.TrimSpace(rest); rest != ""; {
+		key, after, ok := strings.Cut(rest, "=")
+		if !ok {
+			break
+		}
+		key, after = strings.ToLower(strings.TrimSpace(key)), strings.TrimSpace(after)
+		var value string
+		if strings.HasPrefix(after, `"`) {
+			end := strings.Index(after[1:], `"`)
+			if end < 0 {
+				break
+			}
+			value, after = after[1:end+1], after[end+2:]
+		} else {
+			value, after, _ = strings.Cut(after, ",")
+			value = strings.TrimSpace(value)
+			after = "," + after
+		}
+		params[key] = value
+		rest = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(after), ","))
+	}
+	return params, true
 }
 
 // exchange sends one request the route originates (tools/list) and returns
@@ -230,6 +335,7 @@ func (h *Handler) denyUpstream(w http.ResponseWriter, rec *AuditRecord, id any, 
 	h.logUpstreamFailure(d, err)
 	re := upstreamFailure(reasonUpstreamUnreachable, err)
 	errors.As(err, &re)
+	rec.ChallengedScope = re.scope
 	h.deny(w, rec, id, re.code, re.reason)
 }
 

@@ -62,21 +62,24 @@ type Authorizer interface {
 	Authorize(ctx context.Context, d Decision) (Verdict, error)
 }
 
-// TokenSource provides a per-request upstream Bearer token for a subject and
-// connector slug. Called after authorize, before the upstream HTTP request.
-// An error fail-closes the request: the upstream is never contacted and a
-// JSON-RPC error is returned to the client. The returned token must never
-// appear in log output.
-type TokenSource interface {
-	Token(ctx context.Context, subject, connectorSlug string) (string, error)
+// ConnectorCredential is a connector's token released for a session, with
+// the audience recorded for it (HAI-577).
+type ConnectorCredential struct {
+	ConnectorID, Issuer, Resource, AccountModel, AccessToken string
 }
 
-// StaticToken is a TokenSource that always returns the same fixed token.
-type StaticToken string
-
-func (t StaticToken) Token(_ context.Context, _, _ string) (string, error) {
-	return string(t), nil
+// CredentialSource resolves the session's credential for an mcp connector
+// and its canonical resource (ADR-036 §4.8).
+type CredentialSource interface {
+	UseCredential(ctx context.Context, sess *Session, connectorID, resource string, fn func(ConnectorCredential) error) error
+	Discard(sess *Session, connectorID, resource string)
 }
+
+// CredentialDenied is why the session has no credential for a connector:
+// a credential release reason such as AUDIENCE_MISMATCH or NOT_CONNECTED.
+type CredentialDenied struct{ Reason string }
+
+func (e *CredentialDenied) Error() string { return "credential denied: " + e.Reason }
 
 // Catalog is the route's read-only view of the policy bundle in force: the
 // installation workspace's v2 connector descriptors and agent bindings
@@ -114,10 +117,8 @@ type Config struct {
 	Auditor Auditor
 	// Catalog is the bundle in force. When nil, no connector is found and
 	// nothing is dialed.
-	Catalog Catalog
-	// TokenSource provides the Bearer token sent upstream. When nil, no
-	// Authorization header is set.
-	TokenSource TokenSource
+	Catalog     Catalog
+	Credentials CredentialSource
 	// UpstreamTimeout bounds one upstream exchange, response body included
 	// (ADR-036 §4.9). Zero means 60 s; values above 300 s are capped.
 	UpstreamTimeout time.Duration

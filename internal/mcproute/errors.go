@@ -34,11 +34,16 @@ const (
 	reasonManifestDrift         = "mcp_manifest_drift"
 	reasonToolNotApproved       = "mcp_tool_not_approved"
 	reasonCredentialUnavailable = "credential_unavailable"
-	reasonUpstreamBlocked       = "upstream_blocked"
-	reasonUpstreamUnreachable   = "upstream_unreachable"
-	reasonUpstreamTimeout       = "upstream_timeout"
-	reasonUpstreamProtocolError = "upstream_protocol_error"
-	reasonResponseTooLarge      = "response_too_large"
+	// reasonCredentialAudienceMismatch: the released token is for another
+	// connector or resource (HAI-577 AUDIENCE_MISMATCH, or a wrong echo).
+	reasonCredentialAudienceMismatch = "credential_audience_mismatch"
+	reasonCredentialRejected         = "credential_rejected"
+	reasonInsufficientScope          = "insufficient_scope"
+	reasonUpstreamBlocked            = "upstream_blocked"
+	reasonUpstreamUnreachable        = "upstream_unreachable"
+	reasonUpstreamTimeout            = "upstream_timeout"
+	reasonUpstreamProtocolError      = "upstream_protocol_error"
+	reasonResponseTooLarge           = "response_too_large"
 )
 
 // routeError is a failure that ends a request with one §4.5 code and reason.
@@ -47,6 +52,8 @@ type routeError struct {
 	code   int
 	reason string
 	err    error
+	// scope is the challenged scope of an insufficient_scope answer.
+	scope string
 }
 
 func (e *routeError) Error() string {
