@@ -106,6 +106,9 @@ type Config struct {
 	Authorizer Authorizer
 	// Logger for audit and errors. When nil, logs are discarded.
 	Logger *slog.Logger
+	// Submitter receives observed manifests the route cannot verify
+	// (§5.4). When nil, nothing is submitted.
+	Submitter ManifestSubmitter
 	// Auditor receives one record per tools/list and tools/call (§4.9).
 	// When nil, nothing is recorded.
 	Auditor Auditor
@@ -153,6 +156,10 @@ type Handler struct {
 	// blocked records, per (session, connector), the approval under which
 	// the upstream drifted.
 	blocked map[listingKey]string
+	// submitted holds the (connector, manifest_hash) candidates submitted;
+	// submits tracks submissions in flight.
+	submitted map[string]bool
+	submits   sync.WaitGroup
 }
 
 // Size and time limits of the route (ADR-036 §4.5 step 2, §4.9).
@@ -186,6 +193,7 @@ func NewHandler(cfg Config) *Handler {
 		now:       time.Now,
 		listings:  make(map[listingKey]*cachedListing),
 		blocked:   make(map[listingKey]string),
+		submitted: make(map[string]bool),
 	}
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
@@ -397,6 +405,16 @@ func (h *Handler) serveToolsList(w http.ResponseWriter, ctx context.Context, id 
 	rec.describe(d)
 	if !h.config.Catalog.AgentBoundToConnector(sess.Agent, d.ID) {
 		h.deny(w, rec, id, codeDenied, reasonConnectorNotBound)
+		return
+	}
+	if d.MCP.ApprovedManifestHash == "" {
+		// §5.3: no approval yet. Observe the listing so it can be submitted
+		// as a candidate; nothing from it reaches the harness.
+		if tools, err := h.fetchListing(ctx, d, sess); err == nil {
+			rec.Unapproved = len(tools)
+			h.submitCandidate(d, tools)
+		}
+		h.deny(w, rec, id, codeManifest, reasonManifestUnapproved)
 		return
 	}
 	listing, err := h.verifiedListingFor(ctx, sess, d)

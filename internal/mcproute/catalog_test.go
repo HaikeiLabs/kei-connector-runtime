@@ -244,7 +244,9 @@ func TestMCPRouteCatalog_ChangedToolHashIsDrift(t *testing.T) {
 	assertNoTools(t, w)
 }
 
-func TestMCPRouteCatalog_UnapprovedDeniesWithoutDialing(t *testing.T) {
+// An unapproved connector is never called. tools/list observes its listing
+// (to submit it as a candidate, §5.3) and returns none of it.
+func TestMCPRouteCatalog_UnapprovedNeverForwardsACall(t *testing.T) {
 	up := newListingUpstream(t, namedTool("a"))
 	h, _, key := catalogHandler(t, catalogFor(up.srv.URL, nil))
 
@@ -253,8 +255,8 @@ func TestMCPRouteCatalog_UnapprovedDeniesWithoutDialing(t *testing.T) {
 		h.ServeHTTP(w, routeRequest(key, body))
 		assertDenied(t, w, -31409, "mcp_manifest_unapproved")
 	}
-	if up.lists.Load()+up.calls.Load() != 0 {
-		t.Fatal("an unapproved connector reached the upstream")
+	if up.calls.Load() != 0 || up.lists.Load() != 1 {
+		t.Fatalf("lists %d calls %d: want the one observing tools/list and no tools/call", up.lists.Load(), up.calls.Load())
 	}
 }
 

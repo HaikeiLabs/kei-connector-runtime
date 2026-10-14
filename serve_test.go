@@ -1387,3 +1387,38 @@ func TestMCPRoute_WritesAuditRecordsToTheSpool(t *testing.T) {
 		t.Fatalf("the collector parses %+v (%v), want the deny decision for mcp:other_slug.test_tool", event, ok)
 	}
 }
+
+// TestMCPRoute_SubmitsCandidatesToTheControlPlane builds the route through
+// the serve wiring: its manifest submitter posts to the configured control
+// plane with the runtime token and the identity's org and workspace (ADR-036
+// §5.4).
+func TestMCPRoute_SubmitsCandidatesToTheControlPlane(t *testing.T) {
+	const runtimeToken = "kh_live_runtime_test_token_1234567890"
+	var gotPath, gotAuth string
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.Method+" "+r.URL.Path, r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(catalog.Close)
+	cfg := Config{RuntimeToken: runtimeToken, RuntimeControlPlaneURL: catalog.URL, RuntimeStateDir: t.TempDir()}
+	local := keiruntime.NewLocalPDP(cfg, nil)
+	t.Cleanup(local.Close)
+	ws := "ws-fixture-0001"
+	local.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &ws, AgentID: "test-agent"})
+
+	route := newMCPRoute(cfg, local)
+	if route.submitter == nil {
+		t.Fatal("the route has no manifest submitter")
+	}
+	tool := json.RawMessage(`{"name":"test_tool","description":"","inputSchema":{"type":"object"}}`)
+	if err := route.submitter.Submit(context.Background(), "conn-mcp-1", "sha256:0000000000000000000000000000000000000000000000000000000000000000", []json.RawMessage{tool}); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "POST /api/v1/organizations/org-fixture-0001/workspaces/ws-fixture-0001/data-connectors/conn-mcp-1/tool-manifests" || gotAuth != "Bearer "+runtimeToken {
+		t.Fatalf("submitted %s with %q", gotPath, gotAuth)
+	}
+
+	if newMCPRoute(Config{RuntimeToken: runtimeToken}, local).submitter != nil {
+		t.Fatal("a route without a control plane URL must not submit")
+	}
+}

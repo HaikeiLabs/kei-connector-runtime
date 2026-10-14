@@ -104,6 +104,9 @@ func (h *Handler) verifiedListingFor(ctx context.Context, sess *Session, d polic
 		listing, err = verifyListing(tools, d.MCP.ApprovedTools)
 	}
 	if errors.Is(err, errManifestDrift) {
+		if tools != nil {
+			h.submitCandidate(d, tools)
+		}
 		h.mu.Lock()
 		h.blocked[key] = approved
 		delete(h.listings, key)

@@ -320,8 +320,9 @@ func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Ha
 // mcpRoute is the /mcp/{slug} route as serve wires it: the handler and the
 // registry of route keys for live sessions.
 type mcpRoute struct {
-	handler http.Handler
-	keys    *mcproute.KeyRegistry
+	handler   http.Handler
+	keys      *mcproute.KeyRegistry
+	submitter mcproute.ManifestSubmitter
 }
 
 // newMCPRoute builds the /mcp/{slug} route with PDP-based authorization and
@@ -329,7 +330,13 @@ type mcpRoute struct {
 func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 	keys := mcproute.NewKeyRegistry()
 	auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir)
+	// Candidate manifests go to the control plane (ADR-036 §5.4).
+	var submitter mcproute.ManifestSubmitter
+	if cfg.RuntimeControlPlaneURL != "" {
+		submitter = mcproute.CatalogManifestClient{BaseURL: cfg.RuntimeControlPlaneURL, RuntimeToken: cfg.RuntimeToken, Scope: local.AuditScope}
+	}
 	handler := mcproute.NewHandler(mcproute.Config{
+		Submitter:   submitter,
 		KeyRegistry: keys,
 		Authorizer:  pdpAuthorizer{pdp: local},
 		// One §4.9 record per tools/list and tools/call, in the local spool;
@@ -348,8 +355,9 @@ func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 	local.OnSessionEnd(keys.Revoke)
 	local.OnSessionEnd(handler.EndSession)
 	return &mcpRoute{
-		keys:    keys,
-		handler: handler,
+		keys:      keys,
+		handler:   handler,
+		submitter: submitter,
 	}
 }
 
