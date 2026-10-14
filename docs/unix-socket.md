@@ -33,7 +33,12 @@ For v2 bundles, named-session `POST /v1/authorize` calls evaluate local
 `tool_policies` only for tools explicitly registered with a
 `harness_executor` route. Pass the runtime-issued session ID in
 `X-Kei-Session`. This is a decision-only path: the harness executes the tool;
-no preflight handle or connector credential is returned. V1 socket behavior is
+no preflight handle or connector credential is returned. The agent is the
+default agent of the authenticated runtime identity (`whoami`), never the
+request's `agent_id`: omit it, or send that same agent. A request that names
+any other agent, including another agent assigned to the installation, is
+denied with `agent_mismatch`, and the audit event records the resolved agent.
+V1 socket behavior is
 unchanged, and one-shot `kei-proxy authorize` does not authorize v2.
 
 There are three reasons for this design.

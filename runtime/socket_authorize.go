@@ -834,6 +834,9 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
 	d := pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
+	// auditTrustedAgent is set when the decision used the runtime identity's
+	// agent, so the audit records that agent instead of the request's.
+	auditTrustedAgent := req.Tool == "pi.bash"
 	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
 	} else if e := l.evaluator.Load(); e != nil {
@@ -852,6 +855,16 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		case req.ShellCommand != "":
 			d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
 		case e.IsV2HarnessTool(req.Tool):
+			// The request's AgentID is untrusted: decide for the authenticated
+			// runtime identity's default agent, and deny a request that names
+			// any other agent instead of trusting it.
+			trusted := l.trustedAgentID()
+			auditTrustedAgent = true
+			if req.AgentID != "" && req.AgentID != trusted {
+				d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+				break
+			}
+			preq.AgentID = trusted
 			d, err = e.AuthorizeV2HarnessTool(r.Context(), preq)
 		default:
 			d, err = e.Evaluate(r.Context(), preq)
@@ -864,18 +877,25 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 	resp := socketAuthorizeResponseForDecision(d, includeEnrollment)
 	if l.emit != nil {
 		auditReq := req
-		if req.Tool == "pi.bash" {
+		if auditTrustedAgent {
 			// The request's AgentID is untrusted. Record the same assigned
-			// default identity used for the shell policy decision.
-			if identity := l.identity.Load(); identity != nil {
-				auditReq.AgentID = identity.AgentID
-			}
+			// default identity used for the policy decision.
+			auditReq.AgentID = l.trustedAgentID()
 		}
 		data := l.decisionEventJSON(auditReq, sessionID, d)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// trustedAgentID is the default agent of the authenticated runtime identity,
+// or "" when none is assigned. It never comes from a caller's request.
+func (l *LocalPDP) trustedAgentID() string {
+	if identity := l.identity.Load(); identity != nil {
+		return identity.AgentID
+	}
+	return ""
 }
 
 func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {

@@ -485,3 +485,97 @@ func TestPlanContextChangeInvalidatesPreflight(t *testing.T) {
 }
 
 func withSessionHeader(r *http.Request, id string) *http.Request { session.SetHeader(r, id); return r }
+
+// v2AgentBoundHarnessBundle permits github.read_repo for the trusted agent
+// (agent-bound, priority 20) and, below it, for the person user-alice.
+func v2AgentBoundHarnessBundle(t *testing.T, now time.Time) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(v2HarnessAuthorizationBundle(t, now), &doc); err != nil {
+		t.Fatal(err)
+	}
+	set := doc["policy_set"].(map[string]any)
+	set["tool_policies"] = []any{
+		map[string]any{
+			"policy_id": "agent-bound-policy", "name": "trusted agent", "effect": "permit", "priority": 20,
+			"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": "agent-fixture-0001"},
+			"selector": map[string]any{"source_principal": "agent:agent-fixture-0001", "source": "discord", "tool": "github.read_repo"},
+		},
+		map[string]any{
+			"policy_id": "person-policy", "name": "person", "effect": "permit", "priority": 10,
+			"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
+			"selector": map[string]any{"source_principal": "user:user-alice", "source": "discord", "tool": "github.read_repo"},
+		},
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// The daemon's trusted identity carries one agent: the installation's default
+// (whoami agent_id, or the single is_default assignment). A v2 harness tool is
+// decided for that agent. The request's agent_id is only checked against it:
+// any other agent, including another agent assigned to the installation, is
+// denied as agent_mismatch rather than trusted.
+func TestSocketAuthorizeV2HarnessToolResolvesAgentFromTrustedIdentity(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	tests := []struct {
+		name           string
+		defaultAgent   string
+		requestAgent   string
+		wantDecision   string
+		wantPolicy     string
+		wantReason     string
+		wantAuditAgent string
+	}{
+		{name: "agent-bound permit allows with no request agent", defaultAgent: "agent-fixture-0001", wantDecision: "permit", wantPolicy: "agent-bound-policy", wantAuditAgent: "agent-fixture-0001"},
+		{name: "request agent equal to trusted default is accepted", defaultAgent: "agent-fixture-0001", requestAgent: "agent-fixture-0001", wantDecision: "permit", wantPolicy: "agent-bound-policy", wantAuditAgent: "agent-fixture-0001"},
+		{name: "request agent other than trusted default is denied as agent mismatch", defaultAgent: "agent-fixture-0001", requestAgent: "agent-other-0002", wantDecision: "deny", wantReason: "agent_mismatch", wantAuditAgent: "agent-fixture-0001"},
+		{name: "request agent with no trusted default is denied as agent mismatch", requestAgent: "agent-fixture-0001", wantDecision: "deny", wantReason: "agent_mismatch"},
+		{name: "person-sourced permit works with no trusted default agent", wantDecision: "permit", wantPolicy: "person-policy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+			var auditEvent json.RawMessage
+			local := NewLocalPDP(cfg, func(event json.RawMessage) { auditEvent = append(json.RawMessage(nil), event...) })
+			identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: tt.defaultAgent}
+			local.SetIdentity(identity)
+			store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = store.Activate(v2AgentBoundHarnessBundle(t, now), identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+				t.Fatal(err)
+			}
+			h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+			put := httptest.NewRecorder()
+			h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+			var sessionResponse socketSessionResponse
+			if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil {
+				t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+			}
+			body := `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","framework":"discord"}`
+			if tt.requestAgent != "" {
+				body = `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","framework":"discord","agent_id":"` + tt.requestAgent + `"}`
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
+			withSessionHeader(req, sessionResponse.SessionID)
+			h.ServeHTTP(rec, req)
+			var response socketAuthorizeResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK || response.Decision != tt.wantDecision || response.PolicyID != tt.wantPolicy || (tt.wantReason != "" && response.ReasonCode != tt.wantReason) {
+				t.Fatalf("status=%d response=%+v err=%v", rec.Code, response, err)
+			}
+			var audit struct {
+				AgentID string `json:"agent_id"`
+			}
+			if err := json.Unmarshal(auditEvent, &audit); err != nil || audit.AgentID != tt.wantAuditAgent {
+				t.Fatalf("audit agent_id=%q want %q event=%s", audit.AgentID, tt.wantAuditAgent, auditEvent)
+			}
+		})
+	}
+}
