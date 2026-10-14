@@ -320,9 +320,10 @@ func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Ha
 // mcpRoute is the /mcp/{slug} route as serve wires it: the handler and the
 // registry of route keys for live sessions.
 type mcpRoute struct {
-	handler   http.Handler
-	keys      *mcproute.KeyRegistry
-	submitter mcproute.ManifestSubmitter
+	handler     http.Handler
+	keys        *mcproute.KeyRegistry
+	submitter   mcproute.ManifestSubmitter
+	credentials mcproute.CredentialSource
 }
 
 // newMCPRoute builds the /mcp/{slug} route with PDP-based authorization and
@@ -335,7 +336,10 @@ func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 	if cfg.RuntimeControlPlaneURL != "" {
 		submitter = mcproute.CatalogManifestClient{BaseURL: cfg.RuntimeControlPlaneURL, RuntimeToken: cfg.RuntimeToken, Scope: local.AuditScope}
 	}
+	credentials := mcpCredentials{local: local}
 	handler := mcproute.NewHandler(mcproute.Config{
+		// Step 10: the session's connector credential, never the harness's.
+		Credentials: credentials,
 		Submitter:   submitter,
 		KeyRegistry: keys,
 		Authorizer:  pdpAuthorizer{pdp: local},
@@ -355,9 +359,10 @@ func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 	local.OnSessionEnd(keys.Revoke)
 	local.OnSessionEnd(handler.EndSession)
 	return &mcpRoute{
-		keys:      keys,
-		handler:   handler,
-		submitter: submitter,
+		keys:        keys,
+		handler:     handler,
+		submitter:   submitter,
+		credentials: credentials,
 	}
 }
 
@@ -377,6 +382,27 @@ func (m mcpRouteKeys) Mint(sessionID, agentID, harnessKind string) (string, erro
 }
 
 func (m mcpRouteKeys) Revoke(key string) { m.keys.RevokeKey(key) }
+
+// mcpCredentials is the route's credential source: the session-held,
+// connector-scoped credential release of the local PDP (HAI-577). A release
+// failure becomes a CredentialDenied with its reason; errors from the route's
+// own callback pass through unchanged.
+type mcpCredentials struct{ local *keiruntime.LocalPDP }
+
+func (m mcpCredentials) UseCredential(ctx context.Context, sess *mcproute.Session, connectorID, resource string, fn func(mcproute.ConnectorCredential) error) error {
+	err := m.local.UseConnectorCredential(ctx, sess.SessionID, sess.Subject, connectorID, resource, func(c credrelease.ConnectorCredential) error {
+		return fn(mcproute.ConnectorCredential{ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource, AccountModel: c.AccountModel, AccessToken: c.AccessToken})
+	})
+	var denied *credrelease.DeniedError
+	if errors.As(err, &denied) {
+		return &mcproute.CredentialDenied{Reason: denied.Reason}
+	}
+	return err
+}
+
+func (m mcpCredentials) Discard(sess *mcproute.Session, connectorID, resource string) {
+	m.local.DropConnectorCredential(sess.SessionID, connectorID, resource)
+}
 
 // pdpAuthorizer maps an MCP decision to a PDP tool call and denies on any
 // PDP denial or error. When the PDP is unavailable, every call is denied.

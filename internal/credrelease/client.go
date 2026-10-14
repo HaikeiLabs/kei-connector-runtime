@@ -61,6 +61,7 @@ const (
 	ReasonReconnectRequired   = "RECONNECT_REQUIRED"
 	ReasonMaxLifetimeExceeded = "MAX_LIFETIME_EXCEEDED"
 	ReasonProviderUnavailable = "PROVIDER_UNAVAILABLE"
+	ReasonAudienceMismatch    = "AUDIENCE_MISMATCH"
 )
 
 // Client calls I11 with the runtime token and a subject token.

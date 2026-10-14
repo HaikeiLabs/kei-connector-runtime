@@ -67,18 +67,43 @@ func (tc testConfig) config() Config {
 		bindings[[2]string{b.AgentID, b.ConnectorID}] = true
 	}
 	cat := &fakeCatalog{bindings: bindings, digest: "bundle-1"}
-	var tokens TokenSource
+	var creds CredentialSource
 	for _, c := range connectors {
 		if u, ok := tc.Upstreams[c.Slug]; ok {
-			c.MCP = &policybundle.MCPDescriptor{URL: u.URL, Transport: "streamable_http", AuthMethod: "oauth", ApprovedManifestHash: u.ApprovedToolsHash, ApprovedTools: u.ApprovedTools}
+			authMethod := "none"
 			if u.TokenSource != nil {
-				tokens = u.TokenSource
+				authMethod, creds = "oauth", tokenCredentials{u.TokenSource}
 			}
+			c.MCP = &policybundle.MCPDescriptor{URL: u.URL, Transport: "streamable_http", AuthMethod: authMethod, ApprovedManifestHash: u.ApprovedToolsHash, ApprovedTools: u.ApprovedTools}
 		}
 		cat.connectors = append(cat.connectors, c)
 	}
-	return Config{KeyRegistry: tc.KeyRegistry, Authorizer: tc.Authorizer, Catalog: cat, TokenSource: tokens, Logger: tc.Logger, UpstreamTimeout: tc.UpstreamTimeout}
+	return Config{KeyRegistry: tc.KeyRegistry, Authorizer: tc.Authorizer, Catalog: cat, Credentials: creds, Logger: tc.Logger, UpstreamTimeout: tc.UpstreamTimeout}
 }
+
+// TokenSource is the older tests' per-subject token fixture.
+type TokenSource interface {
+	Token(ctx context.Context, subject, connector string) (string, error)
+}
+
+// StaticToken always returns the same token.
+type StaticToken string
+
+func (t StaticToken) Token(context.Context, string, string) (string, error) { return string(t), nil }
+
+// tokenCredentials releases a TokenSource's token for exactly the requested
+// connector and resource; a TokenSource error is NOT_CONNECTED.
+type tokenCredentials struct{ src TokenSource }
+
+func (c tokenCredentials) UseCredential(ctx context.Context, sess *Session, connectorID, resource string, fn func(ConnectorCredential) error) error {
+	token, err := c.src.Token(ctx, sess.Subject, connectorID)
+	if err != nil {
+		return &CredentialDenied{Reason: "NOT_CONNECTED"}
+	}
+	return fn(ConnectorCredential{ConnectorID: connectorID, Resource: resource, AccessToken: token})
+}
+
+func (tokenCredentials) Discard(*Session, string, string) {}
 
 // buildHandler is NewHandler over a testConfig, with the real SSRF checks.
 func buildHandler(tc testConfig) *Handler { return NewHandler(tc.config()) }

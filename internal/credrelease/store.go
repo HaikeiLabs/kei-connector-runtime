@@ -44,6 +44,7 @@ func (e *DeniedError) Connect() bool {
 // resolver is the I11 call the store makes; *Client implements it.
 type resolver interface {
 	resolve(ctx context.Context, subjectToken string, providers []string) (resolved, error)
+	resolveConnector(ctx context.Context, subjectToken, connectorID, resource string) (heldConnectorToken, error)
 }
 
 // Store holds one session's connector credentials in the serve daemon's
@@ -59,6 +60,9 @@ type Store struct {
 	tokens       map[string][]byte
 	failures     map[string]string
 	loadErr      error
+	// connectorTokens are per-connector credentials (UseConnector), by
+	// connector and resource.
+	connectorTokens map[string]heldConnectorToken
 }
 
 // NewStore returns an empty store that fetches through client.
@@ -109,6 +113,10 @@ func (s *Store) Flush() {
 func (s *Store) flushLocked() {
 	s.gen++
 	zeroAll(s.tokens)
+	for _, held := range s.connectorTokens {
+		zero(held.token)
+	}
+	s.connectorTokens = nil
 	s.tokens, s.failures, s.subject, s.subjectToken, s.loadErr = nil, nil, "", "", nil
 }
 

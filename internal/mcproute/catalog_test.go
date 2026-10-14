@@ -119,6 +119,8 @@ type listingUpstream struct {
 	mu    sync.Mutex
 	tools []map[string]any
 	seen  []http.Header
+	// onCall, when set, answers tools/call instead of the empty result.
+	onCall http.HandlerFunc
 }
 
 func newListingUpstream(t *testing.T, tools ...map[string]any) *listingUpstream {
@@ -138,6 +140,13 @@ func newListingUpstream(t *testing.T, tools ...map[string]any) *listingUpstream 
 			json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"tools": tools}})
 		default:
 			u.calls.Add(1)
+			u.mu.Lock()
+			onCall := u.onCall
+			u.mu.Unlock()
+			if onCall != nil {
+				onCall(w, r)
+				return
+			}
 			w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
 		}
 	}))
@@ -156,7 +165,7 @@ func (u *listingUpstream) setTools(tools ...map[string]any) {
 func catalogHandler(t *testing.T, cat Catalog) (*Handler, *KeyRegistry, string) {
 	t.Helper()
 	reg, key := testKey(t)
-	h := NewHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Catalog: cat, TokenSource: StaticToken("ct_test")})
+	h := NewHandler(Config{KeyRegistry: reg, Authorizer: fakeAuthorizer{}, Catalog: cat, Credentials: tokenCredentials{StaticToken("ct_test")}})
 	h.checkSSRF = func(*url.URL) error { return nil }
 	h.dialCtl = func(string, string, syscall.RawConn) error { return nil }
 	return h, reg, key

@@ -306,6 +306,28 @@ func (l *LocalPDP) UseCredential(ctx context.Context, id, subject, provider stri
 	return store.Use(ctx, subject, provider, fn)
 }
 
+// UseConnectorCredential runs fn with the credential session id holds for
+// subject, one connector and one resource (HAI-577, ADR-036 §4.8). fn's error
+// is returned unchanged.
+func (l *LocalPDP) UseConnectorCredential(ctx context.Context, id, subject, connectorID, resource string, fn func(credrelease.ConnectorCredential) error) error {
+	if l.creds == nil {
+		return errCredentialReleaseOff
+	}
+	store := l.credentialStore(id)
+	if store == nil {
+		return &credrelease.DeniedError{Provider: connectorID, Reason: credrelease.ReasonNoSession}
+	}
+	return store.UseConnector(ctx, subject, connectorID, resource, fn)
+}
+
+// DropConnectorCredential forgets session id's credential for one connector
+// and resource after the upstream rejected it.
+func (l *LocalPDP) DropConnectorCredential(id, connectorID, resource string) {
+	if store := l.credentialStore(id); store != nil {
+		store.DropConnector(connectorID, resource)
+	}
+}
+
 // credentialStore is session id's credential store, or nil.
 func (l *LocalPDP) credentialStore(id string) *credrelease.Store {
 	if id == pdp.DefaultSession {
