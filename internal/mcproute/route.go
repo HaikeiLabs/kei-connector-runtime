@@ -296,7 +296,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Method {
 	case "initialize":
-		initializeResult := any(map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "kei-connector-runtime", "version": "1.0.0"}})
+		initializeResult := any(map[string]any{
+			"protocolVersion": negotiateProtocolVersion(req.Params),
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":      map[string]any{"name": "kei-connector-runtime", "version": "1.0.0"},
+		})
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(jsonrpcResponse{
 			JSONRPC: "2.0",
@@ -580,6 +584,25 @@ func extractTool(params json.RawMessage) string {
 		return ""
 	}
 	return p.Name
+}
+
+// Protocol revisions the route speaks to harnesses (ADR-036 §4.2), latest
+// first.
+var harnessProtocolVersions = []string{"2026-07-28", "2025-11-25", "2025-06-18"}
+
+// negotiateProtocolVersion answers initialize's protocolVersion: the
+// client's requested revision when the route speaks it, else its latest.
+func negotiateProtocolVersion(params json.RawMessage) string {
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	_ = json.Unmarshal(params, &p)
+	for _, v := range harnessProtocolVersions {
+		if p.ProtocolVersion == v {
+			return v
+		}
+	}
+	return harnessProtocolVersions[0]
 }
 
 // extractArguments returns params.arguments, for audit digests only.
