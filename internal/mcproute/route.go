@@ -75,6 +75,12 @@ type CredentialSource interface {
 	Discard(sess *Session, connectorID, resource string)
 }
 
+// SecretFields resolves one credential_fields secret of a secret_ref mcp
+// connector, kei://connectors/<connector id>/<field>.
+type SecretFields interface {
+	Resolve(ctx context.Context, d policybundle.Connector, field string) (string, error)
+}
+
 // CredentialDenied is why the session has no credential for a connector:
 // a credential release reason such as AUDIENCE_MISMATCH or NOT_CONNECTED.
 type CredentialDenied struct{ Reason string }
@@ -119,6 +125,7 @@ type Config struct {
 	// nothing is dialed.
 	Catalog     Catalog
 	Credentials CredentialSource
+	Secrets     SecretFields
 	// UpstreamTimeout bounds one upstream exchange, response body included
 	// (ADR-036 §4.9). Zero means 60 s; values above 300 s are capped.
 	UpstreamTimeout time.Duration

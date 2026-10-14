@@ -32,38 +32,42 @@ const (
 // the guard. Every error is a *routeError that never names the upstream URL
 // or carries the credential. A 3xx is never followed (§4.10).
 func (h *Handler) callUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, *echoGuard, error) {
-	resp, token, err := h.sendUpstream(ctx, d, sess, body)
+	resp, sent, err := h.sendUpstream(ctx, d, sess, body)
 	if err != nil {
 		return nil, nil, err
 	}
-	return resp, newEchoGuard(token), nil
+	return resp, newEchoGuard(sent...), nil
 }
 
-// sendUpstream is callUpstream returning the credential it attached.
-func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, string, error) {
+// sendUpstream is callUpstream returning the credentials it attached.
+func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, []string, error) {
 	if d.MCP.Transport != transportStreamableHTTP {
-		return nil, "", upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream transport %q is not supported", d.MCP.Transport))
+		return nil, nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream transport %q is not supported", d.MCP.Transport))
 	}
 	u, err := url.Parse(d.MCP.URL)
 	if err != nil {
-		return nil, "", upstreamFailure(reasonUpstreamBlocked, errors.New("invalid upstream URL"))
+		return nil, nil, upstreamFailure(reasonUpstreamBlocked, errors.New("invalid upstream URL"))
 	}
 	if err := h.checkSSRF(u); err != nil {
-		return nil, "", upstreamFailure(reasonUpstreamBlocked, errSSRFBlocked)
+		return nil, nil, upstreamFailure(reasonUpstreamBlocked, errSSRFBlocked)
 	}
 	switch d.MCP.AuthMethod {
 	case authMethodNone:
-		resp, err := h.post(ctx, d, sess, body, "")
-		return resp, "", err
+		resp, err := h.post(ctx, d, sess, body, "", nil)
+		return resp, nil, err
 	case authMethodSecretRef:
-		// credential_fields headers from the tenant secret store are not
-		// implemented for mcp connectors yet.
-		return nil, "", credentialDenial(reasonCredentialUnavailable, errors.New("secret_ref mcp connectors are not supported yet"))
+		// §4.8: the credential_fields headers, from the tenant secret store.
+		headers, values, err := h.secretHeaders(ctx, d)
+		if err != nil {
+			return nil, nil, credentialDenial(reasonCredentialUnavailable, err)
+		}
+		resp, err := h.post(ctx, d, sess, body, "", headers)
+		return resp, values, err
 	}
 	// Step 10 (§4.8): the session's credential for this connector, released
 	// for exactly its canonical resource.
 	if h.config.Credentials == nil {
-		return nil, "", credentialDenial(reasonCredentialUnavailable, errors.New("no credential source"))
+		return nil, nil, credentialDenial(reasonCredentialUnavailable, errors.New("no credential source"))
 	}
 	var resp *http.Response
 	var sent string
@@ -71,7 +75,7 @@ func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, se
 		if c.ConnectorID != d.ID || c.Resource != d.MCP.URL {
 			return credentialDenial(reasonCredentialAudienceMismatch, errors.New("the credential was released for another connector or resource"))
 		}
-		r, err := h.post(ctx, d, sess, body, c.AccessToken)
+		r, err := h.post(ctx, d, sess, body, c.AccessToken, nil)
 		// A copy outlives the callback only for this response's echo check.
 		resp, sent = r, strings.Clone(c.AccessToken)
 		return err
@@ -81,16 +85,16 @@ func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, se
 		if re.reason == reasonCredentialRejected {
 			h.config.Credentials.Discard(sess, d.ID, d.MCP.URL)
 		}
-		return nil, "", re
+		return nil, nil, re
 	}
 	if err != nil {
 		var denied *CredentialDenied
 		if errors.As(err, &denied) && denied.Reason == "AUDIENCE_MISMATCH" {
-			return nil, "", credentialDenial(reasonCredentialAudienceMismatch, err)
+			return nil, nil, credentialDenial(reasonCredentialAudienceMismatch, err)
 		}
-		return nil, "", credentialDenial(reasonCredentialUnavailable, err)
+		return nil, nil, credentialDenial(reasonCredentialUnavailable, err)
 	}
-	return resp, sent, nil
+	return resp, []string{sent}, nil
 }
 
 func credentialDenial(reason string, err error) *routeError {
@@ -101,7 +105,7 @@ func credentialDenial(reason string, err error) *routeError {
 // HTTP status: 3xx and other non-2xx are upstream_protocol_error, 401 is
 // credential_rejected, and 403 insufficient_scope carries the challenged
 // scope (§4.8). The route retries nothing.
-func (h *Handler) post(ctx context.Context, d policybundle.Connector, sess *Session, body []byte, token string) (*http.Response, error) {
+func (h *Handler) post(ctx context.Context, d policybundle.Connector, sess *Session, body []byte, token string, headers http.Header) (*http.Response, error) {
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.MCP.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, upstreamFailure(reasonUpstreamBlocked, errors.New("cannot build upstream request"))
@@ -110,6 +114,9 @@ func (h *Handler) post(ctx context.Context, d policybundle.Connector, sess *Sess
 	upReq.Header.Set("Accept", "application/json, text/event-stream")
 	if token != "" {
 		upReq.Header.Set("Authorization", "Bearer "+token)
+	}
+	for name, values := range headers {
+		upReq.Header[name] = values
 	}
 	resp, err := h.client.Do(upReq)
 	if err != nil {

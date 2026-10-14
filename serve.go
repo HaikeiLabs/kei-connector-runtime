@@ -324,6 +324,7 @@ type mcpRoute struct {
 	keys        *mcproute.KeyRegistry
 	submitter   mcproute.ManifestSubmitter
 	credentials mcproute.CredentialSource
+	secrets     mcproute.SecretFields
 }
 
 // newMCPRoute builds the /mcp/{slug} route with PDP-based authorization and
@@ -336,10 +337,12 @@ func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 	if cfg.RuntimeControlPlaneURL != "" {
 		submitter = mcproute.CatalogManifestClient{BaseURL: cfg.RuntimeControlPlaneURL, RuntimeToken: cfg.RuntimeToken, Scope: local.AuditScope}
 	}
-	credentials := mcpCredentials{local: local}
+	sessionCredentials := mcpCredentials{local: local}
+	secretFields := mcpSecretFields{resolver: invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: connectorSecretStore()}}
 	handler := mcproute.NewHandler(mcproute.Config{
 		// Step 10: the session's connector credential, never the harness's.
-		Credentials: credentials,
+		Credentials: sessionCredentials,
+		Secrets:     secretFields,
 		Submitter:   submitter,
 		KeyRegistry: keys,
 		Authorizer:  pdpAuthorizer{pdp: local},
@@ -362,7 +365,8 @@ func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
 		keys:        keys,
 		handler:     handler,
 		submitter:   submitter,
-		credentials: credentials,
+		credentials: sessionCredentials,
+		secrets:     secretFields,
 	}
 }
 
@@ -402,6 +406,18 @@ func (m mcpCredentials) UseCredential(ctx context.Context, sess *mcproute.Sessio
 
 func (m mcpCredentials) Discard(sess *mcproute.Session, connectorID, resource string) {
 	m.local.DropConnectorCredential(sess.SessionID, connectorID, resource)
+}
+
+// mcpSecretFields resolves a secret_ref mcp connector's credential_fields
+// (HAI-581) exactly as an opaque_ref connector's credential: the reference
+// kei://connectors/<id>/<field> through the connector reference index, the
+// backend the descriptor names, and the tenant secret store.
+type mcpSecretFields struct{ resolver invoke.SecretResolver }
+
+func (m mcpSecretFields) Resolve(ctx context.Context, d policybundle.Connector, field string) (string, error) {
+	c := d
+	c.CredentialRef = "kei://connectors/" + d.ID + "/" + field
+	return m.resolver.Resolve(ctx, c)
 }
 
 // pdpAuthorizer maps an MCP decision to a PDP tool call and denies on any

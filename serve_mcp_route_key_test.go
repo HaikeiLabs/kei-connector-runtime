@@ -9,7 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
 // HAI-488 (ADR-036 §4.4): `kei-proxy run --harness-kind <kind> -- <harness>`
@@ -114,5 +118,55 @@ func TestMCPRoute_ResolvesTheSessionsConnectorCredential(t *testing.T) {
 	other := &mcproute.Session{Subject: "someone-else", SessionID: id}
 	if err := rig.mcp.credentials.UseCredential(context.Background(), other, mcpConnectorID, "https://mcp.example/mcp", func(mcproute.ConnectorCredential) error { return nil }); !errors.As(err, &denied) {
 		t.Fatalf("another subject: err = %v, want a denial", err)
+	}
+}
+
+type memorySecretStore map[string]string
+
+func (m memorySecretStore) Get(_ context.Context, backend, ref string) (*string, error) {
+	v, ok := m[backend+"|"+ref]
+	if !ok {
+		return nil, errors.New("no such secret")
+	}
+	return &v, nil
+}
+
+// TestMCPSecretFields_ResolveEachFieldFromTheConnectorIndex: the serve
+// adapter resolves kei://connectors/<id>/<field> through the connector
+// reference index and the tenant secret store, as for opaque_ref connectors.
+func TestMCPSecretFields_ResolveEachFieldFromTheConnectorIndex(t *testing.T) {
+	stateDir := t.TempDir()
+	index := credentials.ConnectorIndexPath(stateDir)
+	ref := "aws-secrets-manager://us-west-2/kei/acme/connectors/00000000-0000-4000-8000-000000000581/app_key"
+	if err := credentials.WriteConnectorReference(index, credentials.ConnectorReference{ConnectorID: "00000000-0000-4000-8000-000000000581", Field: "app_key", SecretBackend: "aws-secrets-manager", SecretRef: ref, Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	s := mcpSecretFields{resolver: invoke.SecretResolver{IndexPath: index, Store: memorySecretStore{"aws-secrets-manager|" + ref: "app-key-value"}}}
+	d := policybundle.Connector{ID: "00000000-0000-4000-8000-000000000581", CredentialSource: "opaque_ref", CredentialRef: "kei://connectors/00000000-0000-4000-8000-000000000581/api_key", CredentialBackend: "aws-secrets-manager"}
+
+	if v, err := s.Resolve(context.Background(), d, "app_key"); err != nil || v != "app-key-value" {
+		t.Fatalf("app_key = %q, %v", v, err)
+	}
+	if _, err := s.Resolve(context.Background(), d, "api_key"); err == nil {
+		t.Fatal("an undelivered field resolved")
+	}
+	other := d
+	other.CredentialBackend = "azure-key-vault"
+	if _, err := s.Resolve(context.Background(), other, "app_key"); err == nil {
+		t.Fatal("a field resolved from another backend than the descriptor names")
+	}
+}
+
+// TestMCPRoute_WiresSecretFieldsToTheConnectorIndex builds the route
+// through the serve wiring: its secret source reads the state directory's
+// connector reference index.
+func TestMCPRoute_WiresSecretFieldsToTheConnectorIndex(t *testing.T) {
+	cfg := Config{RuntimeToken: "kh_live_runtime_test_token_1234567890", RuntimeStateDir: t.TempDir()}
+	local := keiruntime.NewLocalPDP(cfg, nil)
+	t.Cleanup(local.Close)
+	route := newMCPRoute(cfg, local)
+	s, ok := route.secrets.(mcpSecretFields)
+	if !ok || s.resolver.IndexPath != credentials.ConnectorIndexPath(cfg.RuntimeStateDir) {
+		t.Fatalf("route secrets = %#v, want the connector index of the state dir", route.secrets)
 	}
 }
