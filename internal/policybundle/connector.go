@@ -39,11 +39,22 @@ type Connector struct {
 
 // MCPDescriptor is the mcp block of a v2 connector descriptor (ADR-036 §4.3).
 type MCPDescriptor struct {
-	URL                  string            `json:"url"`
-	Transport            string            `json:"transport"`
-	AuthMethod           string            `json:"auth_method"`
-	ApprovedManifestHash string            `json:"approved_manifest_hash,omitempty"`
-	ApprovedTools        []MCPApprovedTool `json:"approved_tools,omitempty"`
+	URL                  string               `json:"url"`
+	Transport            string               `json:"transport"`
+	AuthMethod           string               `json:"auth_method"`
+	ApprovedManifestHash string               `json:"approved_manifest_hash,omitempty"`
+	ApprovedTools        []MCPApprovedTool    `json:"approved_tools,omitempty"`
+	CredentialFields     []MCPCredentialField `json:"credential_fields,omitempty"`
+}
+
+// MCPCredentialField is one credential_fields entry of a secret_ref mcp
+// descriptor (contract "mcp.credential_fields exact schema"): the secret at
+// kei://connectors/<connector id>/<field> is sent in header, after prefix.
+// It never carries a value.
+type MCPCredentialField struct {
+	Field  string `json:"field"`
+	Header string `json:"header"`
+	Prefix string `json:"prefix,omitempty"`
 }
 
 // MCPApprovedTool is one approved tool of an mcp descriptor (ADR-036 §4.3).
