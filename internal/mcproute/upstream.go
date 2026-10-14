@@ -16,8 +16,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// transportStreamableHTTP is the one upstream transport the route speaks
-// today. HTTP+SSE (2024-11-05) upstreams are denied upstream_protocol_error.
+// transportStreamableHTTP is the Streamable HTTP upstream transport; the
+// other one is transportSSE (HTTP+SSE, legacy_sse.go).
 const transportStreamableHTTP = "streamable_http"
 
 // Auth methods of an mcp descriptor (ADR-036 §3.3).
@@ -41,7 +41,7 @@ func (h *Handler) callUpstream(ctx context.Context, d policybundle.Connector, se
 
 // sendUpstream is callUpstream returning the credentials it attached.
 func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, sess *Session, body []byte) (*http.Response, []string, error) {
-	if d.MCP.Transport != transportStreamableHTTP {
+	if d.MCP.Transport != transportStreamableHTTP && d.MCP.Transport != transportSSE {
 		return nil, nil, upstreamFailure(reasonUpstreamProtocolError, fmt.Errorf("upstream transport %q is not supported", d.MCP.Transport))
 	}
 	u, err := url.Parse(d.MCP.URL)
@@ -51,9 +51,17 @@ func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, se
 	if err := h.checkSSRF(u); err != nil {
 		return nil, nil, upstreamFailure(reasonUpstreamBlocked, errSSRFBlocked)
 	}
+	// exchange is one request over the connector's transport, with the
+	// Bearer token or credential_fields headers (either may be empty).
+	exchange := func(token string, headers http.Header) (*http.Response, error) {
+		if d.MCP.Transport == transportSSE {
+			return h.legacyExchange(ctx, d, body, token, headers)
+		}
+		return h.send(ctx, http.MethodPost, d.MCP.URL, body, token, headers, "application/json, text/event-stream")
+	}
 	switch d.MCP.AuthMethod {
 	case authMethodNone:
-		resp, err := h.post(ctx, d, sess, body, "", nil)
+		resp, err := exchange("", nil)
 		return resp, nil, err
 	case authMethodSecretRef:
 		// §4.8: the credential_fields headers, from the tenant secret store.
@@ -61,7 +69,7 @@ func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, se
 		if err != nil {
 			return nil, nil, credentialDenial(reasonCredentialUnavailable, err)
 		}
-		resp, err := h.post(ctx, d, sess, body, "", headers)
+		resp, err := exchange("", headers)
 		return resp, values, err
 	}
 	// Step 10 (§4.8): the session's credential for this connector, released
@@ -75,7 +83,7 @@ func (h *Handler) sendUpstream(ctx context.Context, d policybundle.Connector, se
 		if c.ConnectorID != d.ID || c.Resource != d.MCP.URL {
 			return credentialDenial(reasonCredentialAudienceMismatch, errors.New("the credential was released for another connector or resource"))
 		}
-		r, err := h.post(ctx, d, sess, body, c.AccessToken, nil)
+		r, err := exchange(c.AccessToken, nil)
 		// A copy outlives the callback only for this response's echo check.
 		resp, sent = r, strings.Clone(c.AccessToken)
 		return err
@@ -101,17 +109,25 @@ func credentialDenial(reason string, err error) *routeError {
 	return &routeError{code: codeCredential, reason: reason, err: err}
 }
 
-// post sends body to d's mcp.url with token (none when empty) and maps the
-// HTTP status: 3xx and other non-2xx are upstream_protocol_error, 401 is
-// credential_rejected, and 403 insufficient_scope carries the challenged
-// scope (§4.8). The route retries nothing.
-func (h *Handler) post(ctx context.Context, d policybundle.Connector, sess *Session, body []byte, token string, headers http.Header) (*http.Response, error) {
-	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.MCP.URL, bytes.NewReader(body))
+// send makes one upstream request (a POST of body, or the GET of an sse
+// stream when body is nil) with token and the credential_fields headers
+// (either may be empty) and maps the HTTP status: 3xx and other non-2xx are
+// upstream_protocol_error, 401 is credential_rejected, and 403
+// insufficient_scope carries the challenged scope (§4.8). The route retries
+// nothing.
+func (h *Handler) send(ctx context.Context, method, target string, body []byte, token string, headers http.Header, accept string) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	upReq, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
 		return nil, upstreamFailure(reasonUpstreamBlocked, errors.New("cannot build upstream request"))
 	}
-	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Accept", "application/json, text/event-stream")
+	if body != nil {
+		upReq.Header.Set("Content-Type", "application/json")
+	}
+	upReq.Header.Set("Accept", accept)
 	if token != "" {
 		upReq.Header.Set("Authorization", "Bearer "+token)
 	}
