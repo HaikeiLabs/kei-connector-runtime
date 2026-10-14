@@ -31,6 +31,7 @@ func runViaDaemon(args []string, stdout, stderr io.Writer, cfg Config, parentEnv
 	flags.SetOutput(io.Discard)
 	connectorID := flags.String("connector", "", "connector id for resolved credentials")
 	sessionID := flags.String("session", session.IDFromEnv(), "kei-proxy daemon session id (default $KEI_SESSION_ID)")
+	harnessKind := flags.String("harness-kind", "", "harness kind bound into the MCP route key (claude_code, codex, opencode, custom)")
 	sep := -1
 	for i, arg := range args {
 		if arg == "--" {
@@ -48,7 +49,7 @@ func runViaDaemon(args []string, stdout, stderr io.Writer, cfg Config, parentEnv
 	}
 	body, err := json.Marshal(daemonRunRequest{
 		Schema: daemonRunSchema, Argv: args[sep+1:], Env: parentEnv, Dir: dir,
-		Connector: *connectorID, AgentID: os.Getenv("KEI_PROXY_AGENT_ID"),
+		Connector: *connectorID, AgentID: os.Getenv("KEI_PROXY_AGENT_ID"), HarnessKind: *harnessKind,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, "Error: run request could not be encoded")

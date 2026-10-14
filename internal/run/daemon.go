@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -70,7 +71,29 @@ type Daemon struct {
 	// Secrets resolves references to opaque_ref connectors from the bundle's
 	// connector descriptors (HAI-378).
 	Secrets invoke.SecretResolver
+	// RouteKeys, when set, gives each run in a named session an MCP route
+	// key in KEI_MCP_ROUTE_KEY (ADR-036 §4.4), and makes credential
+	// references optional: `kei-proxy run -- <harness>` launches a harness.
+	RouteKeys RouteKeys
 }
+
+// RouteKeys mints and revokes /mcp/{slug} route keys. Mint returns a
+// *RouteKeyDenied when the session cannot have one.
+type RouteKeys interface {
+	Mint(sessionID, agentID, harnessKind string) (string, error)
+	Revoke(key string)
+}
+
+// RouteKeyDenied is why a run's session gets no route key.
+type RouteKeyDenied struct{ Code, Reason string }
+
+func (e *RouteKeyDenied) Error() string { return e.Code + ": " + e.Reason }
+
+// routeKeyEnv names the child environment variable that carries the key.
+const routeKeyEnv = "KEI_MCP_ROUTE_KEY"
+
+// harnessKindPattern is the shape of a harness kind (claude_code, codex, ...).
+var harnessKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 
 // daemonRunRequest is the route's body. Env is the caller's environment as
 // KEY=VALUE entries; entries whose value is a kei://connectors reference are
@@ -82,6 +105,9 @@ type daemonRunRequest struct {
 	Dir       string   `json:"dir,omitempty"`
 	Connector string   `json:"connector,omitempty"`
 	AgentID   string   `json:"agent_id,omitempty"`
+	// HarnessKind names the harness for harness:<kind> policy sources on the
+	// MCP route (claude_code, codex, opencode, custom).
+	HarnessKind string `json:"harness_kind,omitempty"`
 }
 
 // runFrame is one line of the response stream: a chunk of the child's output
@@ -148,6 +174,10 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRunError(w, http.StatusBadRequest, "dir must be absolute")
 		return
 	}
+	if req.HarnessKind != "" && !harnessKindPattern.MatchString(req.HarnessKind) {
+		writeRunError(w, http.StatusBadRequest, "harness_kind must match "+harnessKindPattern.String())
+		return
+	}
 	rc := http.NewResponseController(w)
 	// A child may run longer than the socket's write timeout.
 	_ = rc.SetWriteDeadline(time.Time{})
@@ -186,6 +216,10 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 		if !ok || key == "" {
 			continue
 		}
+		if key == routeKeyEnv {
+			// Only the daemon sets the route key; a caller's value is dropped.
+			continue
+		}
 		ref, isRef := parseConnectorCredentialRef(value)
 		if !isRef {
 			plain = append(plain, entry)
@@ -197,7 +231,8 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 		}
 		refs = append(refs, resolvedRef{key: key, ref: ref})
 	}
-	if len(refs) == 0 {
+	mintsRouteKey := d.RouteKeys != nil && sessionID != ""
+	if len(refs) == 0 && !mintsRouteKey {
 		return deny("credential_reference_missing", "run requires at least one kei://connectors/<id>/<field> environment reference", 2, nil, nil)
 	}
 
@@ -240,9 +275,29 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 		subject, refs[i].provider = grant.Subject, grant.Provider
 	}
 
+	// The route key is minted last, after every reference is authorized, and
+	// lives only as long as the child.
+	var routeKey string
+	if mintsRouteKey {
+		key, err := d.RouteKeys.Mint(sessionID, req.AgentID, req.HarnessKind)
+		if err != nil {
+			var denied *RouteKeyDenied
+			if errors.As(err, &denied) {
+				return deny(denied.Code, denied.Reason, 1, connectorIDs, fields)
+			}
+			return deny("route_key_unavailable", "the MCP route key could not be minted", 1, connectorIDs, fields)
+		}
+		routeKey = key
+		defer d.RouteKeys.Revoke(routeKey)
+		plain = append(plain, routeKeyEnv+"="+routeKey)
+	}
+
 	var exitCode int
 	var spawnErr error
 	err := d.withCredentials(ctx, sessionID, subject, refs, plain, func(env []string, secrets []string) {
+		if routeKey != "" {
+			secrets = append(secrets, routeKey)
+		}
 		exitCode, spawnErr = spawn(ctx, argv, env, req.Dir, frames, secrets)
 	})
 	if err != nil {

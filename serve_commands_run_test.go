@@ -232,7 +232,7 @@ func TestCommandRunRequiresRuntimeTokenAndIdentityMode(t *testing.T) {
 
 	cfg := rig.cfg
 	cfg.CredentialRelease = CredentialReleaseLegacy
-	local, err := newServeLocalPDP(cfg, serveSeams{})
+	local, _, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}

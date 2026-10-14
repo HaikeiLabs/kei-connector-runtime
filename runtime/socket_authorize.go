@@ -405,6 +405,29 @@ func (l *LocalPDP) AuthorizeMCPTool(ctx context.Context, sessionID, slug, tool, 
 	return e.AuthorizeV2MCP(ctx, sessionID, slug, tool, agentID, harnessKind)
 }
 
+// RouteKeySession checks that a named session may have an MCP route key
+// (ADR-036 §4.4) and returns its subject and agent: agentID, or the runtime
+// identity's agent. reason is a deny code when it may not.
+func (l *LocalPDP) RouteKeySession(sessionID, agentID string) (subject, agent, reason string) {
+	if sessionID == pdp.DefaultSession || !l.Sessions.Exists(sessionID) {
+		return "", "", pdp.ReasonSessionNotFound
+	}
+	sub, ok := l.Sessions.Get(sessionID)
+	if !ok || sub.Status != pdp.StatusLinked || sub.UserID == "" {
+		return "", "", "subject_unlinked"
+	}
+	agent = agentID
+	if agent == "" {
+		if id := l.identity.Load(); id != nil {
+			agent = id.AgentID
+		}
+	}
+	if agent == "" {
+		return "", "", "agent_not_assigned"
+	}
+	return sub.UserID, agent, ""
+}
+
 // mcpBundle is the verified bundle in force, or nil before the identity
 // resolves or while no valid bundle is held.
 func (l *LocalPDP) mcpBundle() *policybundle.Verified {

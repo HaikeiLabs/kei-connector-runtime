@@ -35,6 +35,7 @@ type invokeRig struct {
 	t      *testing.T
 	cfg    Config
 	local  *keiruntime.LocalPDP
+	mcp    *mcpRoute
 	client *http.Client
 	socket string
 
@@ -49,12 +50,18 @@ type invokeRig struct {
 	githubPaths  []string
 }
 
-func newInvokeRig(t *testing.T) *invokeRig {
+func newInvokeRig(t *testing.T) *invokeRig { return newInvokeRigConfig(t, nil) }
+
+// newInvokeRigConfig is newInvokeRig with mutate applied to the serve config.
+func newInvokeRigConfig(t *testing.T, mutate func(*Config)) *invokeRig {
 	t.Helper()
 	rig := &invokeRig{t: t, githubTokens: []string{credentialCanary}, githubStatus: []int{http.StatusOK}}
 	i11 := httptest.NewServer(http.HandlerFunc(rig.serveI11))
 	t.Cleanup(i11.Close)
 	rig.cfg = identityServeConfig(t, i11.URL)
+	if mutate != nil {
+		mutate(&rig.cfg)
+	}
 
 	store, err := policybundle.OpenStore(rig.cfg.RuntimeStateDir)
 	if err != nil {
@@ -63,7 +70,7 @@ func newInvokeRig(t *testing.T) *invokeRig {
 	if _, err := store.Activate(connectorTestBundle(t), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	rig.local, err = newServeLocalPDP(rig.cfg, serveSeams{providerTransport: roundTripFunc(rig.serveGitHub)})
+	rig.local, rig.mcp, err = newServeLocalPDP(rig.cfg, serveSeams{providerTransport: roundTripFunc(rig.serveGitHub)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +399,7 @@ func TestDaemonConnectorInvokeRequiresRuntimeTokenAndIdentityMode(t *testing.T) 
 	// legacy: the route is not served.
 	cfg := rig.cfg
 	cfg.CredentialRelease = CredentialReleaseLegacy
-	local, err := newServeLocalPDP(cfg, serveSeams{})
+	local, _, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}

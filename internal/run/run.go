@@ -198,6 +198,7 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 	flags.SetOutput(io.Discard)
 	connectorID := flags.String("connector", "", "connector id for resolved credentials")
 	sessionID := flags.String("session", session.IDFromEnv(), "kei-proxy daemon session id (default $KEI_SESSION_ID)")
+	harnessKind := flags.String("harness-kind", "", "harness kind bound into the MCP route key")
 	sep := -1
 	for i, arg := range args {
 		if arg == "--" {
@@ -215,6 +216,9 @@ func runCommand(args []string, stdout, stderr io.Writer, cfg Config, parentEnv [
 		return 2
 	}
 	cfg.SessionID = *sessionID
+	if *harnessKind != "" {
+		fmt.Fprintln(stderr, "Note: an MCP route key (KEI_MCP_ROUTE_KEY) is minted only by the serve daemon; set KEI_CREDENTIAL_RELEASE=identity.")
+	}
 	if resolver == nil {
 		fmt.Fprintln(stderr, "run credential resolver is unavailable")
 		return 1
