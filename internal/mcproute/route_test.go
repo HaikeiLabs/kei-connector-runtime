@@ -116,12 +116,12 @@ func primeTools(t *testing.T, h *Handler, slug string, names ...string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolNames := make(map[string]bool, len(names))
-	for _, n := range names {
-		toolNames[n] = true
+	listing, err := newVerifiedListing(hsh, raw)
+	if err != nil {
+		t.Fatal(err)
 	}
 	h.mu.Lock()
-	h.listings[slug] = &verifiedListing{hash: hsh, tools: raw, toolNames: toolNames}
+	h.listings[slug] = listing
 	h.mu.Unlock()
 }
 
