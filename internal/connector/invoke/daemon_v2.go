@@ -49,6 +49,9 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	if grant.Subject == "" {
 		return finish(deny("subject_unlinked", "the session subject is not linked"))
 	}
+	if denied := d.checkUserAssertion(grant, dr.UserAssertion); denied != nil {
+		return finish(denied)
+	}
 	agentID := grant.AgentID
 	contextRaw := []byte(dr.Context)
 	if len(contextRaw) == 0 {

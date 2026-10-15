@@ -422,6 +422,16 @@ func (e *Evaluator) LookupLinkedUser(userID string) (policybundle.Identity, bool
 	return v.LookupLinkedUser(userID, e.now().UTC())
 }
 
+// LookupLinkedSourceIdentity resolves the one fresh linked identity userID
+// holds on source in the current verified bundle.
+func (e *Evaluator) LookupLinkedSourceIdentity(userID, source string) (policybundle.Identity, bool) {
+	v, _, err := e.check()
+	if err != nil {
+		return policybundle.Identity{}, false
+	}
+	return v.LookupLinkedSourceIdentity(userID, source, e.now().UTC())
+}
+
 // BundleIdentities returns the identities from the current verified bundle,
 // or nil when the bundle is missing, invalid, expired, or has no identities.
 func (e *Evaluator) BundleIdentities() []policybundle.Identity {

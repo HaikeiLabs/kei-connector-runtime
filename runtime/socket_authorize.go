@@ -1173,3 +1173,18 @@ func (l *LocalPDP) ConnectorDescriptor(id string) (policybundle.Connector, bool)
 	}
 	return v.Connector(id)
 }
+
+// LinkedIdentity returns the external id of the linked identity userID holds
+// on source in the bundle in force (HAI-669: the user's Entra object id, for
+// the on_behalf_of exchanger). With no valid bundle there is none.
+func (l *LocalPDP) LinkedIdentity(userID, source string) (string, bool) {
+	e := l.evaluator.Load()
+	if e == nil {
+		return "", false
+	}
+	id, ok := e.LookupLinkedSourceIdentity(userID, source)
+	if !ok || id.ExternalID == "" {
+		return "", false
+	}
+	return id.ExternalID, true
+}

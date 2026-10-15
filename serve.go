@@ -280,6 +280,8 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpR
 	if creds != nil {
 		store := connectorSecretStore()
 		secretResolver := invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: store}
+		exchanger := obo.New(obo.Config{Descriptors: local, Identities: local, Secrets: oboClientSecrets{resolver: secretResolver}})
+		local.SetOnBehalfOfExchanger(exchanger)
 		local.SetCredentialStore(creds)
 		local.SetConnectorInvoker(&invoke.Daemon{
 			Env:       daemonInvokeEnv(cfg, seams, store, emitFunc),
@@ -292,8 +294,8 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpR
 			ConsumeV2Plan: local.ConsumeV2Plan,
 			UseCredential: local.UseCredential,
 			Secrets:       secretResolver,
+			Assertions:    exchanger,
 		})
-		local.SetOnBehalfOfExchanger(obo.New(obo.Config{Descriptors: local, Secrets: oboClientSecrets{resolver: secretResolver}}))
 		local.SetCommandRunner(&runcommand.Daemon{
 			Authorize:     local.ConnectorGrant,
 			UseCredential: local.UseCredential,

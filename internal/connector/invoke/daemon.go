@@ -25,6 +25,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-contracts/setup"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials/obo"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
@@ -122,6 +123,52 @@ type Daemon struct {
 	UseCredential func(ctx context.Context, session, subject, provider string, fn func(token string) error) error
 	// Secrets resolves opaque_ref descriptors' credentials (HAI-378).
 	Secrets SecretResolver
+	// Assertions checks a user_assertion against the session subject for an
+	// on_behalf_of connector (HAI-669); nil denies every such call.
+	Assertions AssertionChecker
+}
+
+// maxUserAssertionBytes bounds the user token a harness hands over.
+const maxUserAssertionBytes = 16 << 10
+
+// AssertionChecker is the on_behalf_of exchanger's pre-exchange check
+// (obo.Exchanger.CheckAssertion): the descriptor, the token's tenant, and
+// that its user is the session subject's own Entra identity. It sends
+// nothing and keeps nothing.
+type AssertionChecker interface {
+	CheckAssertion(subject, connectorID, assertion string) error
+}
+
+// checkUserAssertion gates the per-call user token (ADR-036 amendment
+// 2026-10-15, decision 3). An on_behalf_of connector requires one that
+// passes the checker for the session subject; any other connector refuses
+// one, so a token is never silently accepted. The token is used for this
+// check only and never appears in an outcome, a log line or audit.
+func (d *Daemon) checkUserAssertion(g Grant, assertion string) *denial {
+	if len(assertion) > maxUserAssertionBytes {
+		return deny("assertion_invalid", "the user token exceeds the size limit")
+	}
+	onBehalfOf := g.Descriptors && g.Connector != nil && contract.CredentialSource(g.Connector.CredentialSource) == contract.CredentialSourceOnBehalfOf
+	if !onBehalfOf {
+		if assertion != "" {
+			return deny("assertion_not_applicable", "user_assertion is accepted only for on_behalf_of connectors")
+		}
+		return nil
+	}
+	if assertion == "" {
+		return deny("assertion_required", "an on_behalf_of connector needs the user's token in user_assertion")
+	}
+	if d.Assertions == nil {
+		return deny("credential_source_not_supported", "this daemon does not run on_behalf_of connectors")
+	}
+	if err := d.Assertions.CheckAssertion(g.Subject, g.Connector.ID, assertion); err != nil {
+		var checkErr *obo.Error
+		if errors.As(err, &checkErr) {
+			return deny(checkErr.Code, checkErr.Reason)
+		}
+		return deny("assertion_invalid", "the user token could not be checked")
+	}
+	return nil
 }
 
 // daemonRequest is the route's body. It names the call only: the subject
@@ -143,6 +190,7 @@ type daemonRequest struct {
 	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
 	AgentID         string          `json:"agent_id,omitempty"`
 	Framework       string          `json:"framework,omitempty"`
+	UserAssertion   string          `json:"user_assertion,omitempty"`
 }
 
 // daemonResponse is the route's answer: the same object `connector invoke`
@@ -264,6 +312,9 @@ func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest)
 	if grant.Subject == "" {
 		return finish(deny("subject_unlinked", "the session subject is not linked"))
 	}
+	if dn := d.checkUserAssertion(grant, dr.UserAssertion); dn != nil {
+		return finish(dn)
+	}
 
 	exec = &execution{provider: contract.Provider(grant.Provider)}
 	meta, inv, secret, dn := daemonCall(grant, dr)
@@ -350,6 +401,10 @@ func descriptorCall(g Grant, dr daemonRequest) (contract.Metadata, contract.Invo
 		// its shared subject); the contract's account models apply to oauth.
 		meta.CredentialSource, meta.AccountModel, meta.CredentialRef = contract.CredentialSourceOpaqueRef, "", descriptorCredentialRef
 		return meta, inv, c, nil
+	case contract.CredentialSourceOnBehalfOf:
+		// The user_assertion gate already ran; injecting the exchanged token
+		// is HAI-669 R3.
+		return contract.Metadata{}, contract.Invocation{}, nil, deny("credential_source_not_supported", "on_behalf_of connectors are not executed yet")
 	}
 	return contract.Metadata{}, contract.Invocation{}, nil, deny("descriptor_invalid", "the descriptor's credential source is not supported")
 }

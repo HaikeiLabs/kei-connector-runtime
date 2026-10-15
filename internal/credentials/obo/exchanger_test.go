@@ -84,6 +84,14 @@ func (f *fakeDescriptors) set(c policybundle.Connector) {
 	f.m[c.ID] = c
 }
 
+// fakeIdentities is the bundle's linked identities by (user id, source).
+type fakeIdentities map[[2]string]string
+
+func (f fakeIdentities) LinkedIdentity(userID, source string) (string, bool) {
+	id, ok := f[[2]string{userID, source}]
+	return id, ok
+}
+
 type fakeSecrets struct {
 	got policybundle.Connector
 }
@@ -137,6 +145,7 @@ type rig struct {
 	ex      *Exchanger
 	ts      *tokenServer
 	descs   *fakeDescriptors
+	ids     fakeIdentities
 	secrets *fakeSecrets
 	now     time.Time
 	logs    *bytes.Buffer
@@ -146,13 +155,18 @@ func newRig(t *testing.T) *rig {
 	r := &rig{
 		ts:      newTokenServer(t),
 		descs:   &fakeDescriptors{m: map[string]policybundle.Connector{}},
+		ids:     fakeIdentities{},
 		secrets: &fakeSecrets{},
 		now:     time.Unix(1_800_000_000, 0),
 		logs:    &bytes.Buffer{},
 	}
 	r.descs.set(oboDescriptor(testResource, testScope))
+	for _, user := range []string{testSubject, "user-2", "user-3"} {
+		r.ids[[2]string{user, IdentitySource}] = userOID
+	}
 	r.ex = New(Config{
 		Descriptors: r.descs,
+		Identities:  r.ids,
 		Secrets:     r.secrets,
 		Client:      r.ts.Client(),
 		Authority:   r.ts.URL,
@@ -412,7 +426,7 @@ func TestExchangePurgesTheConnectorWhenItLeavesTheBundle(t *testing.T) {
 // so only the dial guard stands between it and the endpoint.
 func TestExchangeDefaultClientRefusesALoopbackTokenEndpoint(t *testing.T) {
 	r := newRig(t)
-	r.ex = New(Config{Descriptors: r.descs, Secrets: r.secrets, Authority: r.ts.URL, Now: func() time.Time { return r.now }})
+	r.ex = New(Config{Descriptors: r.descs, Identities: r.ids, Secrets: r.secrets, Authority: r.ts.URL, Now: func() time.Time { return r.now }})
 	r.ex.client.Transport.(*http.Transport).TLSClientConfig = r.ts.Client().Transport.(*http.Transport).TLSClientConfig
 	_, _, err := r.ex.Exchange(context.Background(), testSubject, testConnector, userAssertion(t, testTenant, userOID))
 	wantCode(t, err, "exchange_failed")
@@ -425,7 +439,7 @@ func TestExchangeRefusesANonHTTPSAuthority(t *testing.T) {
 	r := newRig(t)
 	plain := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { r.ts.calls.Add(1) }))
 	t.Cleanup(plain.Close)
-	r.ex = New(Config{Descriptors: r.descs, Secrets: r.secrets, Client: plain.Client(), Authority: plain.URL, Now: func() time.Time { return r.now }})
+	r.ex = New(Config{Descriptors: r.descs, Identities: r.ids, Secrets: r.secrets, Client: plain.Client(), Authority: plain.URL, Now: func() time.Time { return r.now }})
 	_, _, err := r.ex.Exchange(context.Background(), testSubject, testConnector, userAssertion(t, testTenant, userOID))
 	wantCode(t, err, "exchange_failed")
 	if n := r.ts.calls.Load(); n != 0 {
@@ -472,5 +486,66 @@ func TestExchangeNeverLogsOrReturnsSecrets(t *testing.T) {
 		if strings.Contains(out, secret) {
 			t.Errorf("%s leaked:\n%s", name, out)
 		}
+	}
+}
+
+// HAI-669 (R2), ADR-036 amendment decision 3: the assertion's user must be
+// the session subject's own Entra identity, the bundle identity
+// {source: "entra", external_id: <oid>} of the subject's user id. On a
+// mismatch, or with no such identity, nothing is sent to the token endpoint.
+func TestExchangeDeniesAnAssertionForAnotherUserWithoutExchanging(t *testing.T) {
+	r := newRig(t)
+	r.ids[[2]string{testSubject, IdentitySource}] = "99999999-0000-0000-0000-000000000002"
+	_, _, err := r.ex.Exchange(context.Background(), testSubject, testConnector, userAssertion(t, testTenant, userOID))
+	wantCode(t, err, "assertion_subject_mismatch")
+	if n := r.ts.calls.Load(); n != 0 {
+		t.Fatalf("token endpoint calls = %d, want 0", n)
+	}
+}
+
+func TestExchangeDeniesASubjectWithoutAnEntraIdentityWithoutExchanging(t *testing.T) {
+	r := newRig(t)
+	delete(r.ids, [2]string{testSubject, IdentitySource})
+	r.ids[[2]string{testSubject, "discord"}] = userOID
+	_, _, err := r.ex.Exchange(context.Background(), testSubject, testConnector, userAssertion(t, testTenant, userOID))
+	wantCode(t, err, "assertion_subject_unlinked")
+
+	// Without an identity source at all, every exchange fails closed too.
+	noIDs := New(Config{Descriptors: r.descs, Secrets: r.secrets, Client: r.ts.Client(), Authority: r.ts.URL, Now: func() time.Time { return r.now }})
+	_, _, err = noIDs.Exchange(context.Background(), testSubject, testConnector, userAssertion(t, testTenant, userOID))
+	wantCode(t, err, "assertion_subject_unlinked")
+	if n := r.ts.calls.Load(); n != 0 {
+		t.Fatalf("token endpoint calls = %d, want 0", n)
+	}
+}
+
+// A cached token is never served to a subject whose identity no longer
+// matches the assertion.
+func TestExchangeChecksTheSubjectBeforeServingTheCache(t *testing.T) {
+	r := newRig(t)
+	assertion := userAssertion(t, testTenant, userOID)
+	if _, _, err := r.ex.Exchange(context.Background(), testSubject, testConnector, assertion); err != nil {
+		t.Fatal(err)
+	}
+	delete(r.ids, [2]string{testSubject, IdentitySource})
+	token, _, err := r.ex.Exchange(context.Background(), testSubject, testConnector, assertion)
+	wantCode(t, err, "assertion_subject_unlinked")
+	if token != "" {
+		t.Fatal("cached token served after the identity was unlinked")
+	}
+}
+
+// CheckAssertion runs every pre-exchange check and sends nothing: the
+// connector invoke route calls it when the harness hands over an assertion.
+func TestCheckAssertionRunsThePreExchangeChecksOnly(t *testing.T) {
+	r := newRig(t)
+	if err := r.ex.CheckAssertion(testSubject, testConnector, userAssertion(t, testTenant, userOID)); err != nil {
+		t.Fatalf("matching assertion rejected: %v", err)
+	}
+	wantCode(t, r.ex.CheckAssertion(testSubject, testConnector, userAssertion(t, otherTenant, userOID)), "assertion_invalid")
+	wantCode(t, r.ex.CheckAssertion("user-9", testConnector, userAssertion(t, testTenant, userOID)), "assertion_subject_unlinked")
+	wantCode(t, r.ex.CheckAssertion(testSubject, "c-absent", userAssertion(t, testTenant, userOID)), "descriptor_invalid")
+	if n := r.ts.calls.Load(); n != 0 {
+		t.Fatalf("token endpoint calls = %d, want 0", n)
 	}
 }

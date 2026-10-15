@@ -224,6 +224,33 @@ prints. Which connectors run here depends on the bundle
   schemas). Connectors that need config or an opaque_ref secret deny
   `credential_source_not_supported`.
 
+**`user_assertion` (on_behalf_of connectors, HAI-669).** A connector whose
+descriptor has `credential_source: on_behalf_of` calls an Entra-protected API
+as the signed-in user (ADR-036 amendment 2026-10-15). The harness signs the
+user in to the organization's own app and puts that user token in the
+request, on every call to such a connector:
+
+```json
+{"schema":"kei.connector-invoke-request/v1", "…":"…",
+ "user_assertion":"<the user's Entra access token for the org's app>"}
+```
+
+- It is per call. The daemon uses it for that call only and never stores,
+  logs, audits or echoes it. It is a socket body field only: there is no
+  `kei-proxy connector invoke` flag or environment variable for it.
+- Before anything else runs, the daemon checks it. The token must be from
+  the descriptor's `on_behalf_of.tenant_id` and carry an `oid`
+  (`assertion_invalid`). Its `oid` must equal the `external_id` of the
+  session user's linked bundle identity with `source: "entra"`
+  (`assertion_subject_mismatch`). A user with no such identity denies
+  `assertion_subject_unlinked`. On any deny nothing is sent to Entra.
+- A call to an on_behalf_of connector without it denies `assertion_required`.
+  A call to any other connector with it denies `assertion_not_applicable`.
+  It is at most 16 KiB (`assertion_invalid`).
+- Executing on_behalf_of connectors (the exchange and token injection) is not
+  done yet, so a call that passes the check still denies
+  `credential_source_not_supported`.
+
 In identity mode `kei-proxy connector invoke` is a
 thin client of this route. It needs no control plane and holds no credential.
 For v2 tool calls, `agent_id` may be omitted: the daemon uses the default

@@ -52,6 +52,17 @@ type Descriptors interface {
 	ConnectorDescriptor(id string) (policybundle.Connector, bool)
 }
 
+// Identities answers which linked identity a Kei user holds on a source in
+// the bundle in force (the local PDP in serve).
+type Identities interface {
+	LinkedIdentity(userID, source string) (externalID string, ok bool)
+}
+
+// IdentitySource is the bundle identity source whose external_id is the
+// user's Entra object id; the catalog emits it per user from the login
+// subject (ADR-036 amendment 2026-10-15, decision 3).
+const IdentitySource = "entra"
+
 // SecretResolver resolves an opaque_ref descriptor's credential from the
 // tenant credential store (invoke.SecretResolver in serve). The exchanger
 // passes the descriptor with credential_ref set to the on_behalf_of block's
@@ -64,7 +75,10 @@ type SecretResolver interface {
 // Config configures an Exchanger. Descriptors and Secrets are required.
 type Config struct {
 	Descriptors Descriptors
-	Secrets     SecretResolver
+	// Identities proves the session subject's Entra user; nil denies every
+	// exchange.
+	Identities Identities
+	Secrets    SecretResolver
 	// Client sends the token request; nil means an SSRF-guarded client
 	// (ADR-036 §4.10 dial rules, no proxy, no redirects). Tests only.
 	Client *http.Client
@@ -90,6 +104,8 @@ func (e *Error) Error() string { return e.Code + ": " + e.Reason }
 const (
 	CodeDescriptorInvalid     = "descriptor_invalid"
 	CodeAssertionInvalid      = "assertion_invalid"
+	CodeSubjectMismatch       = "assertion_subject_mismatch"
+	CodeSubjectUnlinked       = "assertion_subject_unlinked"
 	CodeCredentialUnavailable = "credential_unavailable"
 	CodeExchangeFailed        = "exchange_failed"
 	CodeAudienceMismatch      = "credential_audience_mismatch"
@@ -102,6 +118,7 @@ func fail(code, reason string) *Error { return &Error{Code: code, Reason: reason
 // per (subject, connector, resource and scopes).
 type Exchanger struct {
 	descriptors Descriptors
+	identities  Identities
 	secrets     SecretResolver
 	client      *http.Client
 	authority   string
@@ -133,6 +150,7 @@ type cacheEntry struct {
 func New(cfg Config) *Exchanger {
 	e := &Exchanger{
 		descriptors: cfg.Descriptors,
+		identities:  cfg.Identities,
 		secrets:     cfg.Secrets,
 		client:      cfg.Client,
 		authority:   cfg.Authority,
@@ -192,23 +210,56 @@ func (e *Exchanger) Exchange(ctx context.Context, subject, connectorID, assertio
 	return token, expiry, nil
 }
 
-func (e *Exchanger) exchange(ctx context.Context, subject, connectorID, assertion string) (string, time.Time, error) {
+// CheckAssertion runs every check Exchange makes before it sends anything:
+// connectorID has a valid on_behalf_of descriptor, assertion is a token from
+// the descriptor's tenant, and its user (oid) is subject's own Entra
+// identity in the bundle. It sends nothing and keeps nothing.
+func (e *Exchanger) CheckAssertion(subject, connectorID, assertion string) error {
+	_, _, err := e.preflight(subject, connectorID, assertion)
+	if err != nil {
+		var xe *Error
+		if errors.As(err, &xe) {
+			e.log.Warn("on_behalf_of assertion denied", "connector_id", connectorID, "reason_code", xe.Code)
+		}
+	}
+	return err
+}
+
+// preflight is CheckAssertion returning the descriptor and the user.
+func (e *Exchanger) preflight(subject, connectorID, assertion string) (policybundle.Connector, string, error) {
 	if subject == "" {
-		return "", time.Time{}, fail(CodeAssertionInvalid, "no session subject")
+		return policybundle.Connector{}, "", fail(CodeAssertionInvalid, "no session subject")
 	}
 	d, err := e.descriptor(connectorID)
 	if err != nil {
 		e.purge(connectorID)
+		return policybundle.Connector{}, "", err
+	}
+	e.observe(connectorID, exchangeConfig(d.OnBehalfOf))
+	oid, err := assertionUser(assertion, d.OnBehalfOf.TenantID)
+	if err != nil {
+		return policybundle.Connector{}, "", err
+	}
+	if e.identities == nil {
+		return policybundle.Connector{}, "", fail(CodeSubjectUnlinked, "the session subject has no Entra identity")
+	}
+	linked, ok := e.identities.LinkedIdentity(subject, IdentitySource)
+	if !ok || linked == "" {
+		return policybundle.Connector{}, "", fail(CodeSubjectUnlinked, "the session subject has no Entra identity")
+	}
+	if !strings.EqualFold(linked, oid) {
+		return policybundle.Connector{}, "", fail(CodeSubjectMismatch, "the user token is not the session subject's")
+	}
+	return d, oid, nil
+}
+
+func (e *Exchanger) exchange(ctx context.Context, subject, connectorID, assertion string) (string, time.Time, error) {
+	d, oid, err := e.preflight(subject, connectorID, assertion)
+	if err != nil {
 		return "", time.Time{}, err
 	}
 	o := d.OnBehalfOf
 	config := exchangeConfig(o)
-	e.observe(connectorID, config)
-
-	oid, err := assertionUser(assertion, o.TenantID)
-	if err != nil {
-		return "", time.Time{}, err
-	}
 	key := cacheKey{subject: subject, connector: connectorID, config: config}
 	now := e.now()
 	if entry, ok := e.cached(key); ok && entry.oid == oid && now.Add(e.skew).Before(entry.expiry) {

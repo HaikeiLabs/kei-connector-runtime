@@ -296,3 +296,24 @@ func needsMemberships(pattern string) bool {
 	}
 	return !strings.Contains(pattern, ":") && !strings.HasPrefix(pattern, "*")
 }
+
+// LookupLinkedSourceIdentity returns the one fresh linked identity userID
+// holds on source (for the on_behalf_of exchange, source "entra" with the
+// user's Entra object id). None, or more than one, resolves nothing.
+func (v *Verified) LookupLinkedSourceIdentity(userID, source string, now time.Time) (Identity, bool) {
+	if v == nil || !v.SubjectSnapshotFresh(now) || userID == "" || source == "" {
+		return Identity{}, false
+	}
+	var found Identity
+	matched := false
+	for _, id := range v.Payload.Identities {
+		if id.UserID != userID || id.Source != source || id.Status != SubjectLinked || (!id.ExpireTime.IsZero() && !now.Before(id.ExpireTime)) {
+			continue
+		}
+		if matched {
+			return Identity{}, false
+		}
+		found, matched = id, true
+	}
+	return found, matched
+}

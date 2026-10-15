@@ -47,6 +47,13 @@ func crmAndGitHubDescriptors(githubID string) []any {
 // in a named session and returns the invoke response.
 func invokeV2RepositoryRead(t *testing.T, rig *invokeRig, bundle []byte) socketResponse {
 	t.Helper()
+	return invokeV2RepositoryReadWith(t, rig, bundle, nil)
+}
+
+// invokeV2RepositoryReadWith is invokeV2RepositoryRead with extra fields in
+// the invoke request body.
+func invokeV2RepositoryReadWith(t *testing.T, rig *invokeRig, bundle []byte, extra map[string]any) socketResponse {
+	t.Helper()
 	store, err := policybundle.OpenStore(rig.cfg.RuntimeStateDir)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +73,13 @@ func invokeV2RepositoryRead(t *testing.T, rig *invokeRig, bundle []byte) socketR
 	if err := json.Unmarshal([]byte(preflight.dump[strings.Index(preflight.dump, "{"):]), &grant); err != nil || grant.Handle == "" {
 		t.Fatalf("preflight response=%s err=%v", preflight.dump, err)
 	}
-	body, _ := json.Marshal(map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.repository_read", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(`{}`), "context": json.RawMessage(contextMap), "trace_id": "trace-hai-378"})
+	request := map[string]any{"schema": "kei.connector-invoke-request/v1", "tool_name": "github.repository_read", "preflight_handle": grant.Handle, "session_id": sessionID, "agent_id": "agent-fixture-0001", "input": json.RawMessage(`{}`), "context": json.RawMessage(contextMap), "trace_id": "trace-hai-378"}
+	for k, v := range extra {
+		if v != "" {
+			request[k] = v
+		}
+	}
+	body, _ := json.Marshal(request)
 	return socketDoSession(t, rig.client, http.MethodPost, "/v1/connectors:invoke", sessionID, string(body))
 }
 
