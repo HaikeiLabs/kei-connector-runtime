@@ -211,6 +211,33 @@ jobs:
           # its current tag as semver and therefore needs the v-prefixed form.
           GORELEASER_CURRENT_TAG: v${{ needs.validate-tag.outputs.version }}
 
+      - name: Verify release binaries exclude the e2e build
+        # kei ADR-036 §10 (HAI-488 test 19): the private upstream allowance
+        # is compiled only with the e2e build tag and must never ship. Check
+        # each built binary's recorded build tags and its contents.
+        run: |
+          set -eu
+          found=0
+          checked=0
+          for bin in dist/*/kei-proxy; do
+            [ -f "$bin" ] || continue
+            checked=$((checked + 1))
+            if go version -m "$bin" | grep -E '^[[:space:]]+build[[:space:]]+-tags=' | grep -qw e2e; then
+              echo "ERROR: $bin was built with the e2e tag"
+              found=1
+            fi
+            if grep -q KEI_PROXY_E2E_ALLOW_CIDRS "$bin"; then
+              echo "ERROR: $bin contains the e2e upstream allowance"
+              found=1
+            fi
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "ERROR: no kei-proxy binaries under dist/"
+            exit 1
+          fi
+          echo "Checked $checked release binaries for the e2e build."
+          exit "$found"
+
       - name: Upload install.sh to public release endpoint
         run: |
           aws s3 cp scripts/install.sh \

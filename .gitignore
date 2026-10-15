@@ -8,4 +8,6 @@ proxy
 proxy-linux
 kei-connector-runtime
 dist/
+bin/
+.scratch/
 .runtime.env

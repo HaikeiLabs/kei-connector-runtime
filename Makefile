@@ -109,3 +109,15 @@ dev-openwebui-logs:
 
 test:
 	go test ./...
+
+# Build the e2e kei-proxy: the private upstream allowance (ADR-036 §10) is
+# compiled in only with the e2e tag. Release binaries stay untagged
+# (.goreleaser.yaml, Dockerfile without GO_TAGS).
+IMAGE ?= kei-connector-runtime
+VERSION ?= dev
+
+build-e2e:
+	go build -tags e2e -o bin/kei-proxy-e2e ./cmd/kei-proxy
+
+image-e2e:
+	docker build --build-arg GO_TAGS=e2e -t $(IMAGE):$(VERSION)-e2e .
