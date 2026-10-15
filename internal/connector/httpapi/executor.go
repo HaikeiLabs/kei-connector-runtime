@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
@@ -29,6 +30,7 @@ var (
 	errHTTPResponseTooLarge = errors.New("HTTP response exceeds configured limit")
 	errHTTPReservedTarget   = errors.New("HTTP target is reserved")
 	errHTTPInvocationDenied = errors.New("HTTP invocation denied")
+	errHTTPSSRFBlocked      = errors.New("HTTP address is reserved/blocked at dial")
 )
 
 // CredentialResolver resolves an opaque connector credential reference. An
@@ -262,9 +264,13 @@ func (e HTTPExecutor) checkHost(ctx context.Context, host string) error {
 // reservedIP reports whether ip must never be a connector target. It covers
 // loopback, private RFC1918, link-local (including the cloud metadata
 // addresses), CGNAT, benchmark, and documentation ranges, plus the
-// "this network" zero block.
+// "this network" zero block, the future-use /4, and the NAT64 well-known
+// prefix. IPv4-mapped IPv6 addresses are unwrapped by the caller before
+// they reach this function.
 func reservedIP(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast() {
 		return true
 	}
 	if ip4 := ip.To4(); ip4 != nil {
@@ -283,6 +289,10 @@ func reservedIP(ip net.IP) bool {
 		if ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0 {
 			return true
 		}
+		// 240.0.0.0/4 future use
+		if ip4[0] >= 240 {
+			return true
+		}
 		// Documentation ranges 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
 		if ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 2 {
 			return true
@@ -293,6 +303,15 @@ func reservedIP(ip net.IP) bool {
 		if ip4[0] == 203 && ip4[1] == 0 && ip4[2] == 113 {
 			return true
 		}
+	}
+	// 64:ff9b::/96 NAT64 well-known prefix
+	if len(ip) == net.IPv6len && ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b {
+		for i := 4; i < 12; i++ {
+			if ip[i] != 0 {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }
@@ -348,6 +367,41 @@ func redactJSON(value any, fields []string) {
 		for _, child := range v {
 			redactJSON(child, fields)
 		}
+	}
+}
+
+// defaultDialControl is the net.Dialer Control hook for the httpapi connector.
+// It sees the resolved IP actually being dialed, closing the DNS rebinding /
+// TOCTOU gap left by the URL-level checkHost.
+func defaultDialControl(network, address string, c syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return errHTTPSSRFBlocked
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || reservedIP(ip) {
+		return errHTTPSSRFBlocked
+	}
+	return nil
+}
+
+// GuardedHTTPTransport returns an *http.Transport that rejects any dial to
+// a reserved/private IP. Use this instead of http.DefaultTransport so the
+// SSRF guard runs at dial time, not just at host-resolution time.
+func GuardedHTTPTransport() *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   defaultDialControl,
+	}
+	return &http.Transport{
+		Proxy:                 nil,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext:           dialer.DialContext,
 	}
 }
 

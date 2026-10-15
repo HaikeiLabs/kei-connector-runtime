@@ -497,6 +497,82 @@ func TestExecuteHTTPGetSendsNoBody(t *testing.T) {
 	}
 }
 
+func TestDialGuard_RejectsReservedAddresses(t *testing.T) {
+	tests := []struct {
+		addr    string
+		blocked bool
+	}{
+		{"127.0.0.1:443", true},
+		{"[::1]:443", true},
+		{"10.1.2.3:443", true},
+		{"172.16.0.1:443", true},
+		{"192.168.1.1:443", true},
+		{"[fc00::1]:443", true},
+		{"[fd12:3456::1]:443", true},
+		{"169.254.169.254:80", true},
+		{"[fe80::1]:443", true},
+		{"[fe80::1ff:fe28]:443", true},
+		{"0.0.0.0:443", true},
+		{"[::]:443", true},
+		{"0.2.3.4:443", true},
+		{"192.0.0.8:443", true},
+		{"198.18.0.1:443", true},
+		{"198.19.255.254:443", true},
+		{"240.0.0.1:443", true},
+		{"255.255.255.255:443", true},
+		{"[64:ff9b::1]:443", true},
+		{"[64:ff9b::ffff:ffff]:443", true},
+		{"224.0.0.1:443", true},
+		{"239.255.255.254:443", true},
+		{"[ff02::1]:443", true},
+		{"100.64.0.1:443", true},
+		{"100.100.100.100:443", true},
+		{"100.127.255.254:443", true},
+		{"[::ffff:100.64.0.1]:443", true},
+		{"[::ffff:169.254.169.254]:443", true},
+		{"[fd00:ec2::254]:80", true},
+		{"[64:ff9b:1::1]:443", false},
+		{"100.128.0.1:443", false},
+		{"100.63.255.255:443", false},
+		{"1.1.1.1:443", false},
+		{"8.8.8.8:443", false},
+		{"93.184.216.34:443", false},
+		{"[2606:4700:4700::1111]:443", false},
+		{"[2001:4860:4860::8888]:443", false},
+	}
+	for _, tt := range tests {
+		err := defaultDialControl("tcp", tt.addr, nil)
+		if tt.blocked && err == nil {
+			t.Errorf("dialControl(%q) = nil, want blocked", tt.addr)
+		}
+		if !tt.blocked && err != nil {
+			t.Errorf("dialControl(%q) = %v, want nil", tt.addr, err)
+		}
+	}
+}
+
+func TestDialGuard_RejectsIPv4MappedIPv6(t *testing.T) {
+	for addr, blocked := range map[string]bool{
+		"[::ffff:127.0.0.1]:443":       true,
+		"[::ffff:192.168.1.1]:443":     true,
+		"[::ffff:10.0.0.1]:443":        true,
+		"[::ffff:169.254.169.254]:443": true,
+		"[::ffff:0.0.0.0]:443":         true,
+		"[::ffff:100.64.0.1]:443":      true,
+		"[::ffff:198.18.0.1]:443":      true,
+		"[::ffff:1.1.1.1]:443":         false,
+		"[::ffff:8.8.8.8]:443":         false,
+	} {
+		err := defaultDialControl("tcp", addr, nil)
+		if blocked && err == nil {
+			t.Errorf("dialControl(%q) = nil, want blocked", addr)
+		}
+		if !blocked && err != nil {
+			t.Errorf("dialControl(%q) = %v, want allowed", addr, err)
+		}
+	}
+}
+
 // Neither a write's success nor its failure writes the shared secret to the
 // process log.
 func TestExecuteHTTPWriteLogsNoSecret(t *testing.T) {
