@@ -24,6 +24,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials/obo"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
@@ -292,6 +293,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpR
 			UseCredential: local.UseCredential,
 			Secrets:       secretResolver,
 		})
+		local.SetOnBehalfOfExchanger(obo.New(obo.Config{Descriptors: local, Secrets: oboClientSecrets{resolver: secretResolver}}))
 		local.SetCommandRunner(&runcommand.Daemon{
 			Authorize:     local.ConnectorGrant,
 			UseCredential: local.UseCredential,
@@ -418,6 +420,20 @@ func (m mcpSecretFields) Resolve(ctx context.Context, d policybundle.Connector, 
 	c := d
 	c.CredentialRef = "kei://connectors/" + d.ID + "/" + field
 	return m.resolver.Resolve(ctx, c)
+}
+
+// oboClientSecrets resolves an on_behalf_of connector's client secret as an
+// opaque_ref credential (the exchanger names client_secret_ref as the
+// reference), keeping the resolver's fail-closed reason code.
+type oboClientSecrets struct{ resolver invoke.SecretResolver }
+
+func (o oboClientSecrets) Resolve(ctx context.Context, c policybundle.Connector) (string, error) {
+	value, err := o.resolver.Resolve(ctx, c)
+	var secretErr *invoke.SecretError
+	if errors.As(err, &secretErr) {
+		return "", &obo.Error{Code: secretErr.Code, Reason: secretErr.Reason}
+	}
+	return value, err
 }
 
 // pdpAuthorizer maps an MCP decision to a PDP tool call and denies on any

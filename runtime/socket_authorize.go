@@ -128,6 +128,7 @@ type LocalPDP struct {
 	sessionCreds sync.Map
 	invoker      http.Handler
 	runner       http.Handler
+	obo          OnBehalfOfExchanger
 	// deprecated records the routes already warned about the default session.
 	deprecated            sync.Map
 	stopSweep             chan struct{}
@@ -1146,4 +1147,29 @@ func writeRuntimeError(w http.ResponseWriter, status int, code, message string) 
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]string{"message": message, "type": "runtime_error", "code": code},
 	})
+}
+
+// OnBehalfOfExchanger exchanges a user's Entra token (the assertion) for a
+// token whose audience is an on_behalf_of connector's resource, cached per
+// session subject (ADR-036 amendment 2026-10-15, HAI-669). The assertion
+// handover and invoke injection call it; it never returns a token on error.
+type OnBehalfOfExchanger interface {
+	Exchange(ctx context.Context, subject, connectorID, assertion string) (token string, expiry time.Time, err error)
+}
+
+// SetOnBehalfOfExchanger installs the daemon's on_behalf_of exchanger.
+func (l *LocalPDP) SetOnBehalfOfExchanger(x OnBehalfOfExchanger) { l.obo = x }
+
+// OnBehalfOfExchanger returns the daemon's on_behalf_of exchanger, or nil
+// when serve runs no connector calls (legacy credential release).
+func (l *LocalPDP) OnBehalfOfExchanger() OnBehalfOfExchanger { return l.obo }
+
+// ConnectorDescriptor returns the bundle in force's descriptor for the
+// connector id. With no valid bundle there is none.
+func (l *LocalPDP) ConnectorDescriptor(id string) (policybundle.Connector, bool) {
+	v := l.mcpBundle()
+	if v == nil {
+		return policybundle.Connector{}, false
+	}
+	return v.Connector(id)
 }

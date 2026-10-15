@@ -35,6 +35,11 @@ type Connector struct {
 	Kind string         `json:"kind,omitempty"`
 	Slug string         `json:"slug,omitempty"`
 	MCP  *MCPDescriptor `json:"mcp,omitempty"`
+	// OnBehalfOf is the on_behalf_of descriptor block (HAI-669): the
+	// organization's Entra tenant, its own app's client ID, the API resource,
+	// the explicit delegated scopes and the kei://connectors/<id>/client_secret
+	// reference. Non-secret; the client secret is resolved in the daemon.
+	OnBehalfOf *contract.OnBehalfOf `json:"on_behalf_of,omitempty"`
 }
 
 // MCPDescriptor is the mcp block of a v2 connector descriptor (ADR-036 §4.3).

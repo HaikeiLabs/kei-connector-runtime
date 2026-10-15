@@ -68,6 +68,13 @@ func defaultDialControl(network, address string, c syscall.RawConn) error {
 	return nil
 }
 
+// GuardedDialControl is the §4.10 dial guard for other runtime egress
+// clients (the on-behalf-of token exchange, HAI-669): the same Control hook
+// the upstream client uses, so a blocked address is never connected to.
+func GuardedDialControl(network, address string, c syscall.RawConn) error {
+	return defaultDialControl(network, address, c)
+}
+
 func checkSSRF(u *url.URL) error {
 	if u.Scheme != "https" {
 		return errSSRFBlocked
