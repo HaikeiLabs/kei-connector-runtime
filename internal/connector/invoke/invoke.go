@@ -113,6 +113,7 @@ func (e Env) isRuntime() bool { return e.RuntimeToken != "" }
 // Client calls the control plane's governed connector endpoint.
 type Client struct {
 	baseURL string
+	token   string
 	secret  string
 	client  *http.Client
 }
@@ -121,6 +122,12 @@ type Client struct {
 // set; customer runtimes never have one.
 func NewClient(baseURL, secret string, timeout time.Duration) *Client {
 	return &Client{baseURL: baseURL, secret: secret, client: &http.Client{Timeout: timeout}}
+}
+
+// WithBearerToken sets the runtime bearer token sent as Authorization: Bearer.
+func (c *Client) WithBearerToken(token string) *Client {
+	c.token = token
+	return c
 }
 
 func (c *Client) withTransport(t http.RoundTripper) *Client {
@@ -145,6 +152,9 @@ func (c *Client) Invoke(ctx context.Context, req Request) (*Response, error) {
 		return nil, fmt.Errorf("build connector invoke request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
 	if c.secret != "" {
 		httpReq.Header.Set("X-KEI-API-Key", c.secret)
 	}
@@ -381,7 +391,7 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 	out.Audit = &outputAudit{InputDigest: plan.req.InputDigest}
 
 	catalogCtx, cancelCatalog := context.WithTimeout(ctx, catalogTimeout)
-	resp, err := NewClient(plan.abacURL, plan.abacSecret, plan.timeout).withTransport(env.CatalogTransport).Invoke(catalogCtx, plan.req)
+	resp, err := NewClient(plan.abacURL, plan.abacSecret, plan.timeout).WithBearerToken(env.RuntimeToken).withTransport(env.CatalogTransport).Invoke(catalogCtx, plan.req)
 	cancelCatalog()
 	if err != nil {
 		fmt.Fprintln(stderr, "Error: connector decision unavailable (fail closed)")
