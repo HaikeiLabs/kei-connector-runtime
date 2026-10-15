@@ -182,6 +182,41 @@ func TestInvokeConnectorPropagatesRequestAndCredential(t *testing.T) {
 	}
 }
 
+func TestInvokeConnectorSetsAuthorizationBearer(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/data-connectors/invoke" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		if gotKey := r.Header.Get("X-KEI-API-Key"); gotKey != "" {
+			t.Fatalf("X-KEI-API-Key = %q, want empty in runtime mode", gotKey)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "", 5*time.Second).WithBearerToken("kh_live_runtime_test_token_1234567890")
+	resp, err := client.Invoke(context.Background(), Request{
+		HarnessToken: "kh_live_runtime_test_token_1234567890",
+		ConnectorID:  "conn-1",
+		Capability:   "lead.read",
+		Action:       "read",
+		Resource:     "leads/42",
+		TraceID:      "trace-1",
+	})
+	if err != nil {
+		t.Fatalf("InvokeConnector: %v", err)
+	}
+	if resp.Decision != "allow" {
+		t.Fatalf("decision = %q", resp.Decision)
+	}
+	if gotAuth != "Bearer kh_live_runtime_test_token_1234567890" {
+		t.Fatalf("Authorization = %q, want Bearer kh_live_runtime_test_token_1234567890", gotAuth)
+	}
+}
+
 // TestInvokeConnectorFailsClosedOnRejectedCredentials: a 401/403 must surface
 // as an error, never as a decision the harness could act on.
 func TestInvokeConnectorFailsClosedOnRejectedCredentials(t *testing.T) {
