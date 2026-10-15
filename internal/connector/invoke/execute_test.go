@@ -23,7 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/httpapi"
 )
 
 // These tests drive `connector invoke` end to end against fakes: a fake
@@ -746,6 +748,41 @@ func TestConnectorInvokeCRMWithoutAssertionKeyDenies(t *testing.T) {
 // the injected shared-secret key.
 const httpAPIBlock = `,"http_api":{"registered_base_url":"https://api.example.com/v1","registered_hostname":"api.example.com","allowed_methods":["GET"],"allowed_path_patterns":["/contacts/*","/leads"],"query_allowlist":["limit"],"request_max_bytes":1024,"response_max_bytes":65536,"timeout_ms":5000,"credential_injection":{"location":"header","name":"X-API-Key"},"redaction":{"headers":["X-API-Key"],"query_parameters":[],"response_fields":["email"]}}`
 
+// TestHTTPAPIRebindingIsBlockedAtDial checks that the dial-level SSRF guard
+// catches a DNS-rebinding attack. The contract rejects loopback hostnames, so
+// this test verifies the guarded transport directly: a TLS server on loopback
+// receives zero connections when dialed through GuardedHTTPTransport.
+func TestHTTPAPIRebindingIsBlockedAtDial(t *testing.T) {
+	var mu sync.Mutex
+	connState := map[http.ConnState]int{}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// If we get here the guard failed.
+	}))
+	srv.Config.ConnState = func(c net.Conn, s http.ConnState) {
+		mu.Lock()
+		connState[s]++
+		mu.Unlock()
+	}
+	srv.Start()
+	defer srv.Close()
+
+	transport := httpapi.GuardedHTTPTransport()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	_, err := client.Get(srv.URL)
+
+	mu.Lock()
+	newConns := connState[http.StateNew]
+	mu.Unlock()
+
+	if err == nil {
+		t.Fatalf("expected dial error for loopback address, got nil (server received %d connections)", newConns)
+	}
+	if newConns > 0 {
+		t.Fatalf("loopback server received %d connections (expected 0) — the guard did not block the dial", newConns)
+	}
+	t.Logf("guarded transport correctly blocked loopback dial: %v", err)
+}
+
 // httpAPIAllow is a catalog allow for http.get on resource, the exact request
 // path the catalog authorized.
 func (h *execHarness) httpAPIAllow(resource string) {
@@ -1077,6 +1114,51 @@ func TestConnectorInvokeLinearIssueCreateFailureDoesNotRetry(t *testing.T) {
 	if strings.Contains(h.lastStdout, "private-bug-body") {
 		t.Fatalf("deny carries the description: %s", h.lastStdout)
 	}
+}
+
+// TestHTTPAPIDefaultTransportIsGuarded proves the SSRF guard is wired into
+// the invoke path. It calls the same selectProviderTransport that run() uses
+// and verifies the chosen transport rejects a loopback dial.
+func TestHTTPAPIDefaultTransportIsGuarded(t *testing.T) {
+	t.Run("http_api uses guarded transport", func(t *testing.T) {
+		env := Env{}
+		meta := contract.Metadata{Provider: contract.ProviderHTTPAPI}
+		rt := env.selectProviderTransport(meta)
+		tr, ok := rt.base.(*http.Transport)
+		if !ok {
+			t.Fatalf("expected *http.Transport, got %T", rt.base)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := tr.DialContext(ctx, "tcp", "127.0.0.1:1")
+		if err == nil {
+			t.Fatal("guarded transport must deny a loopback dial")
+		}
+		if !strings.Contains(err.Error(), "blocked") {
+			t.Fatalf("guard should fail with 'blocked', got: %v", err)
+		}
+	})
+
+	t.Run("non-http_api uses default transport", func(t *testing.T) {
+		env := Env{}
+		meta := contract.Metadata{Provider: contract.ProviderCRM}
+		rt := env.selectProviderTransport(meta)
+		tr, ok := rt.base.(*http.Transport)
+		if !ok {
+			t.Fatalf("expected *http.Transport, got %T", rt.base)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := tr.DialContext(ctx, "tcp", "127.0.0.1:1")
+		// Default transport does NOT block loopback — it attempts the dial
+		// and gets connection refused (or succeeds if something is listening).
+		if err == nil {
+			return // connected successfully; not a failure
+		}
+		if strings.Contains(err.Error(), "blocked") {
+			t.Fatalf("default transport must not block, got: %v", err)
+		}
+	})
 }
 
 // inputsAfter peeks at the request's input id without consuming the body.

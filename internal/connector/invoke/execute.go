@@ -277,10 +277,7 @@ func (e Env) prepare(req Request, raw json.RawMessage, meta contract.Metadata, i
 func (e Env) run(ctx context.Context, conn connector.Connector, meta contract.Metadata, inv contract.Invocation, in any, credential string, exec *execution) (int, *denial) {
 	providerCtx, cancel := context.WithTimeout(ctx, providerTimeout)
 	defer cancel()
-	transport := &recordingTransport{base: e.ProviderTransport, limit: maxProviderResponseBytes}
-	if transport.base == nil {
-		transport.base = http.DefaultTransport
-	}
+	transport := e.selectProviderTransport(meta)
 	data, err := conn.Execute(providerCtx, connector.Call{
 		Meta: meta, Invocation: inv, Input: in, Credential: credential,
 		HTTPClient: &http.Client{Transport: transport}, LookupIP: e.LookupIP, Now: e.Now,
@@ -309,6 +306,21 @@ func (e Env) run(ctx context.Context, conn connector.Connector, meta contract.Me
 	}
 	exec.result = result
 	return status, nil
+}
+
+// selectProviderTransport picks a provider transport. If ProviderTransport is
+// set, it wraps that; otherwise it chooses based on the provider type so
+// http_api always gets the dial-level SSRF guard.
+func (e Env) selectProviderTransport(meta contract.Metadata) *recordingTransport {
+	transport := &recordingTransport{base: e.ProviderTransport, limit: maxProviderResponseBytes}
+	if transport.base == nil {
+		if meta.Provider == contract.ProviderHTTPAPI {
+			transport.base = httpapi.GuardedHTTPTransport()
+		} else {
+			transport.base = http.DefaultTransport
+		}
+	}
+	return transport
 }
 
 // resultLimit is the largest encoded result conn may return for capability:
