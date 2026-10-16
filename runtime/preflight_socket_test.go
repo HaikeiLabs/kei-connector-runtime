@@ -321,7 +321,7 @@ func TestTokenlessOwnerPreflightAndConnectorInvokeUseOwnerSession(t *testing.T) 
 	local := NewLocalPDP(cfg, nil)
 	defer local.Close()
 	local.SetTokenlessOwnerSession(true)
-	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
 	local.SetIdentity(identity)
 	var doc map[string]any
 	if err := json.Unmarshal(v2PreflightBundle(t, now), &doc); err != nil {
@@ -370,7 +370,7 @@ func TestSocketV2PreflightConsumesAndInvalidatesBundlePlan(t *testing.T) {
 	now := time.Now().UTC()
 	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
 	local := NewLocalPDP(cfg, nil)
-	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
 	local.SetIdentity(identity)
 	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
 	if err != nil {
@@ -462,7 +462,7 @@ func TestPlanContextChangeInvalidatesPreflight(t *testing.T) {
 	now := time.Now().UTC()
 	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
 	local := NewLocalPDP(cfg, nil)
-	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
 	local.SetIdentity(identity)
 	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
 	if err != nil {
@@ -575,6 +575,140 @@ func TestSocketAuthorizeV2HarnessToolResolvesAgentFromTrustedIdentity(t *testing
 			}
 			if err := json.Unmarshal(auditEvent, &audit); err != nil || audit.AgentID != tt.wantAuditAgent {
 				t.Fatalf("audit agent_id=%q want %q event=%s", audit.AgentID, tt.wantAuditAgent, auditEvent)
+			}
+		})
+	}
+}
+
+func TestSocketV2PreflightResolvesAgentFromTrustedIdentity(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	tests := []struct {
+		name         string
+		defaultAgent string
+		requestAgent string
+		wantStatus   int
+		wantHandle   bool
+		wantReason   string
+	}{
+		{name: "no request agent uses trusted default", defaultAgent: "agent-fixture-0001", wantStatus: http.StatusOK, wantHandle: true},
+		{name: "matching request agent accepted", defaultAgent: "agent-fixture-0001", requestAgent: "agent-fixture-0001", wantStatus: http.StatusOK, wantHandle: true},
+		{name: "non-matching request agent denied", defaultAgent: "agent-fixture-0001", requestAgent: "agent-other-0002", wantStatus: http.StatusForbidden, wantReason: "agent_mismatch"},
+		{name: "request agent with no trusted default denied", requestAgent: "agent-fixture-0001", wantStatus: http.StatusForbidden, wantReason: "agent_mismatch"},
+		{name: "no agent and no trusted default denied", wantStatus: http.StatusForbidden, wantReason: "preflight_denied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+			local := NewLocalPDP(cfg, nil)
+			identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: tt.defaultAgent}
+			local.SetIdentity(identity)
+			store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = store.Activate(v2PreflightBundle(t, now), identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+				t.Fatal(err)
+			}
+			h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+			put := httptest.NewRecorder()
+			h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+			var sessionResponse socketSessionResponse
+			if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil {
+				t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+			}
+			args := json.RawMessage(`{}`)
+			contextMap := json.RawMessage(`{"repository":"acme/kei"}`)
+			preflightBody, _ := json.Marshal(socketPreflightRequest{Schema: "kei.preflight-request/v1", Tool: "github.read_repo", SessionID: sessionResponse.SessionID, AgentID: tt.requestAgent, Arguments: args, Context: contextMap})
+			pre := httptest.NewRecorder()
+			h.ServeHTTP(pre, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preflightBody))), sessionResponse.SessionID))
+			if tt.wantHandle {
+				if pre.Code != http.StatusOK {
+					t.Fatalf("preflight status=%d body=%s", pre.Code, pre.Body.String())
+				}
+				var grant socketPreflightResponse
+				if err := json.Unmarshal(pre.Body.Bytes(), &grant); err != nil || grant.Handle == "" {
+					t.Fatalf("preflight response=%s err=%v", pre.Body.String(), err)
+				}
+			} else {
+				if pre.Code != tt.wantStatus {
+					t.Fatalf("preflight status=%d want %d body=%s", pre.Code, tt.wantStatus, pre.Body.String())
+				}
+				var errResp struct {
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(pre.Body.Bytes(), &errResp); err != nil || errResp.Error.Code != tt.wantReason {
+					t.Fatalf("preflight error response=%s want reason=%q err=%v", pre.Body.String(), tt.wantReason, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSocketV2ConsumeResolvesAgentFromTrustedIdentity(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	tests := []struct {
+		name         string
+		requestAgent string
+		wantStatus   int
+		wantReason   string
+	}{
+		{name: "matching consume request agent accepted", requestAgent: "agent-fixture-0001", wantStatus: http.StatusNoContent},
+		{name: "non-matching consume request agent denied", requestAgent: "agent-other-0002", wantStatus: http.StatusForbidden, wantReason: "agent_mismatch"},
+		{name: "no consume request agent uses trusted default", wantStatus: http.StatusNoContent},
+	}
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	local := NewLocalPDP(cfg, nil)
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
+	local.SetIdentity(identity)
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Activate(v2PreflightBundle(t, now), identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil {
+		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preflightBody, _ := json.Marshal(socketPreflightRequest{Schema: "kei.preflight-request/v1", Tool: "github.read_repo", SessionID: sessionResponse.SessionID, Arguments: json.RawMessage(`{}`), Context: json.RawMessage(`{"repository":"acme/kei"}`)})
+			pre := httptest.NewRecorder()
+			h.ServeHTTP(pre, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preflightBody))), sessionResponse.SessionID))
+			if pre.Code != http.StatusOK {
+				t.Fatalf("preflight status=%d body=%s", pre.Code, pre.Body.String())
+			}
+			var grant socketPreflightResponse
+			if err := json.Unmarshal(pre.Body.Bytes(), &grant); err != nil || grant.Handle == "" {
+				t.Fatalf("preflight response=%s err=%v", pre.Body.String(), err)
+			}
+			_, ops, planErr := local.PlanV2(context.Background(), sessionResponse.SessionID, "github.read_repo", "agent-fixture-0001", json.RawMessage(`{}`), json.RawMessage(`{"repository":"acme/kei"}`), "", 0)
+			if planErr != nil || len(ops) != 1 {
+				t.Fatalf("PlanV2 ops=%+v err=%v", ops, planErr)
+			}
+			consumeBody, _ := json.Marshal(socketConsumeRequest{Schema: "kei.consume-request/v1", Handle: grant.Handle, Tool: "github.read_repo", SessionID: sessionResponse.SessionID, AgentID: tt.requestAgent, Arguments: json.RawMessage(`{}`), Context: json.RawMessage(`{"repository":"acme/kei"}`), Operation: socketConsumeOperation{ID: ops[0].ID, ConnectorID: ops[0].ConnectorID, Capability: ops[0].Capability, Action: ops[0].Action, Resource: ops[0].Resource, ResourceType: ops[0].ResourceType, ResourceID: ops[0].ResourceID, InputDigest: ops[0].InputDigest}})
+			con := httptest.NewRecorder()
+			h.ServeHTTP(con, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/consume", strings.NewReader(string(consumeBody))), sessionResponse.SessionID))
+			if con.Code != tt.wantStatus {
+				t.Fatalf("consume status=%d want %d body=%s", con.Code, tt.wantStatus, con.Body.String())
+			}
+			if tt.wantReason != "" {
+				var errResp struct {
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(con.Body.Bytes(), &errResp); err != nil || errResp.Error.Code != tt.wantReason {
+					t.Fatalf("consume error response=%s want reason=%q err=%v", con.Body.String(), tt.wantReason, err)
+				}
 			}
 		})
 	}

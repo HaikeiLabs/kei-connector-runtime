@@ -226,8 +226,8 @@ func (l *LocalPDP) AuthorizePlan(binding BindingContext, ops []Operation) (strin
 }
 
 func trustedDefaultAgentID(requestedAgentID, defaultAgentID string) string {
-	if requestedAgentID != "" {
-		return requestedAgentID
+	if requestedAgentID != "" && requestedAgentID != defaultAgentID {
+		return ""
 	}
 	return defaultAgentID
 }

@@ -874,6 +874,10 @@ func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
 		return
 	}
+	if req.AgentID != "" && req.AgentID != l.trustedAgentID() {
+		writeRuntimeError(w, http.StatusForbidden, "agent_mismatch", "the request agent is not this installation's default agent")
+		return
+	}
 	grant, err := l.PreflightV2(r.Context(), req.SessionID, req.Tool, req.AgentID, req.Arguments, req.Context, req.ParentSpan, req.DelegationDepth, 10*time.Second)
 	if err != nil {
 		writeRuntimeError(w, http.StatusForbidden, "preflight_denied", "the complete operation plan was not authorized")
@@ -896,6 +900,10 @@ func (l *LocalPDP) handleConsume(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SessionID == "" || boundSession != req.SessionID {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
+		return
+	}
+	if req.AgentID != "" && req.AgentID != l.trustedAgentID() {
+		writeRuntimeError(w, http.StatusForbidden, "agent_mismatch", "the request agent is not this installation's default agent")
 		return
 	}
 	op := Operation{ID: req.Operation.ID, ConnectorID: req.Operation.ConnectorID, Capability: req.Operation.Capability, Action: req.Operation.Action, Resource: req.Operation.Resource, ResourceType: req.Operation.ResourceType, ResourceID: req.Operation.ResourceID, ResourceParent: req.Operation.ResourceParent, ResourceParentType: req.Operation.ResourceParentType, InputDigest: req.Operation.InputDigest}

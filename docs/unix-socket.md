@@ -38,6 +38,14 @@ default agent of the authenticated runtime identity (`whoami`), never the
 request's `agent_id`: omit it, or send that same agent. A request that names
 any other agent, including another agent assigned to the installation, is
 denied with `agent_mismatch`, and the audit event records the resolved agent.
+
+`POST /v1/preflight` and `POST /v1/consume` follow the same agent resolution
+rule. If the request includes an `agent_id`, it must match the runtime
+identity's default agent (`whoami`), or the call is denied with
+`agent_mismatch`. If omitted, the default agent is used. The resolved agent
+is recorded in the preflight's binding context and enforced on consume;
+the request's `agent_id` is never passed through to the decision logic.
+
 V1 socket behavior is
 unchanged, and one-shot `kei-proxy authorize` does not authorize v2.
 
