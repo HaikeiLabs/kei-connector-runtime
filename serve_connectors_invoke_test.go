@@ -179,6 +179,7 @@ type invokeResult struct {
 	Schema     string          `json:"schema"`
 	Decision   string          `json:"decision"`
 	ReasonCode string          `json:"reason_code"`
+	Hint       string          `json:"hint"`
 	Provider   string          `json:"provider"`
 	Result     json.RawMessage `json:"result"`
 	Connect    json.RawMessage `json:"connect"`
@@ -362,6 +363,33 @@ func TestDaemonConnectorInvokeDenyPaths(t *testing.T) {
 	}
 	if i11, github := rig.counts(); len(i11) != 1 || len(github) != 0 {
 		t.Fatalf("after DELETE: I11 %v, GitHub %d", i11, len(github))
+	}
+}
+
+// TestDaemonConnectorInvokeDenyCarriesHint asserts a connector invoke deny
+// carries a hint for a reason_code in the denyhint table and omits it (omitempty)
+// for a code outside the table.
+func TestDaemonConnectorInvokeDenyCarriesHint(t *testing.T) {
+	rig := newInvokeRig(t)
+	rig.startSession(t)
+
+	// tool_not_registered is in the table: the deny must carry a non-empty hint.
+	out, resp := rig.invoke(t, invokeConnector, "workflow.read", "repos/acme/kei")
+	if out.Decision != "deny" || out.ReasonCode != "tool_not_registered" {
+		t.Fatalf("want tool_not_registered deny, got %+v (%s)", out, resp.dump)
+	}
+	if out.Hint == "" {
+		t.Fatalf("tool_not_registered deny missing hint: %s", resp.dump)
+	}
+
+	// no_session is outside the table: the deny must omit the hint.
+	socketDo(t, rig.client, http.MethodDelete, "/v1/session", "")
+	out2, resp2 := rig.invoke(t, invokeConnector, "repository.read", "repos/acme/kei")
+	if out2.ReasonCode != "no_session" {
+		t.Fatalf("want no_session, got %+v (%s)", out2, resp2.dump)
+	}
+	if out2.Hint != "" {
+		t.Fatalf("no_session deny must omit hint: %s", resp2.dump)
 	}
 }
 

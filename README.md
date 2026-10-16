@@ -127,6 +127,24 @@ harness again within three checks, the timer doubles, up to one hour, and
   directory exists (server installations), and its failures never affect
   bundle refresh or heartbeats.
 
+### Deny hints
+
+Every deny response — the one-shot `authorize` CLI, the socket `authorize`
+route, and `connector invoke` (daemon and CLI) — carries a stable `hint` field
+next to `reason_code`: the concrete next step a developer should take. The hint
+is a pure function of `reason_code`, held in one table (`pkg/denyhint`), and is
+omitted (`omitempty`) for any code outside the table rather than offering a
+generic or wrong command.
+
+| reason_code | hint |
+| --- | --- |
+| `agent_not_bound_to_connector` | Bind the agent to the connector on the console Connectors page (kei-cli has no bind command). |
+| `no_matching_policy` | Add a policy for this source and target: `kei policies create --name <name> --src-pattern <src> --dst-pattern <dst> --effect permit` |
+| `tool_not_registered` | Register the harness tools: `kei harness sync --harness custom --manifest tools.json` |
+| `agent_not_assigned` | Assign an agent to this runtime installation on the console Agents page so the runtime identity has a default agent. |
+| `credential_unavailable` | Connect the provider on the console Connectors page (or deliver the credential) so the runtime can resolve the connector credential. |
+| `subject_missing` | Link the invoking user to this installation on the console Users page so a subject can be resolved. |
+
 ## Linking a platform identity
 
 Harnesses can start a platform-neutral identity claim with the `identity-link`

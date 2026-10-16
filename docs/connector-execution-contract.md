@@ -693,6 +693,9 @@ in the invoke response's `reason_code` and the runtime passes them through
 unchanged. "Runtime" codes are decided locally. A catalog deny without a
 `reason_code` (an older catalog) is classified by the runtime as
 `enrollment_required` when it carries `enrollment`, and `policy_deny` otherwise.
+A deny whose `reason_code` is in the [deny hint table](../../README.md#deny-hints)
+also carries a `hint` field with the concrete next step; codes outside that
+table omit the field.
 
 | reason_code | Emitted by | When |
 | --- | --- | --- |

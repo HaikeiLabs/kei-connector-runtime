@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
 )
 
 // Error sentinels moved from root.
@@ -30,6 +31,7 @@ type CredentialResponse struct {
 type AuthorizeOutput struct {
 	Decision   string              `json:"decision"`
 	ReasonCode string              `json:"reason_code,omitempty"`
+	Hint       string              `json:"hint,omitempty"`
 	DenySource string              `json:"deny_source,omitempty"`
 	Reason     string              `json:"reason,omitempty"`
 	Service    string              `json:"service,omitempty"`
@@ -162,12 +164,13 @@ func AuthorizeTool(p AuthorizeParams) (AuthorizeOutput, error) {
 			resp.Decision = "enrollment_required"
 		}
 	} else {
-		return AuthorizeOutput{Decision: "deny", ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "no verified local policy bundle"}, nil
+		return AuthorizeOutput{Decision: "deny", ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "no verified local policy bundle", Hint: denyhint.Hint("policy_bundle_missing")}, nil
 	}
 
 	out := AuthorizeOutput{}
 	if localDecision != nil {
 		out.ReasonCode = localDecision.ReasonCode
+		out.Hint = denyhint.Hint(out.ReasonCode)
 		if localDecision.ReasonCode != "" {
 			out.DenySource = "policy"
 			if localDecision.ReasonCode == "subject_resolution_unavailable" || strings.HasPrefix(localDecision.ReasonCode, "identity_") || localDecision.ReasonCode == "enrollment_required" {
@@ -327,7 +330,7 @@ func WritePolicyStateDenial(stdout, stderr io.Writer, reason string, err error) 
 	if reason == "subject_resolution_unavailable" || reason == "enrollment_required" || strings.HasPrefix(reason, "identity_") {
 		source = "identity"
 	}
-	_ = WriteJSON(stdout, AuthorizeOutput{Decision: "deny", ReasonCode: reason, DenySource: source, Reason: reason})
+	_ = WriteJSON(stdout, AuthorizeOutput{Decision: "deny", ReasonCode: reason, DenySource: source, Reason: reason, Hint: denyhint.Hint(reason)})
 	if err != nil {
 		var failure *SubjectResolutionFailure
 		if reason == "subject_resolution_unavailable" && errors.As(err, &failure) {
