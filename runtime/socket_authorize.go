@@ -17,6 +17,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 )
 
@@ -57,6 +58,7 @@ type socketAuthorizeResponse struct {
 	Schema              string          `json:"schema"`
 	Decision            string          `json:"decision"`
 	ReasonCode          string          `json:"reason_code,omitempty"`
+	Hint                string          `json:"hint,omitempty"`
 	DenySource          string          `json:"deny_source,omitempty"`
 	Reason              string          `json:"reason,omitempty"`
 	PolicyID            string          `json:"policy_id,omitempty"`
@@ -1044,7 +1046,7 @@ func (l *LocalPDP) trustedAgentID() string {
 func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {
 	resp := socketAuthorizeResponse{
 		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: d.ReasonCode,
-		DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
+		Hint: denyhint.Hint(d.ReasonCode), DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
 		BundleState: d.BundleState,
 	}
 	if d.Allow {

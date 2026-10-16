@@ -20,6 +20,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
 )
 
 // maxDaemonResponseBytes bounds the daemon's answer; a result is at most
@@ -31,6 +32,7 @@ func runViaDaemon(plan connectorInvokePlan, env Env, stdout, stderr io.Writer) i
 	fail := func(code, reason, message string) int {
 		fmt.Fprintf(stderr, "Error: %s\n", message)
 		out.Decision, out.ReasonCode, out.Reason = "deny", code, reason
+		out.Hint = denyhint.Hint(code)
 		if err := writeJSON(stdout, out); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 		}

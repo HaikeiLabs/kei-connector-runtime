@@ -28,6 +28,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
 	"github.com/google/uuid"
 )
 
@@ -215,6 +216,7 @@ func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest)
 	finish := func(dn *denial) output {
 		if dn != nil {
 			out.Decision, out.ReasonCode, out.Reason, out.Result, out.Audit = "deny", dn.code, dn.reason, nil, nil
+			out.Hint = denyhint.Hint(dn.code)
 		}
 		d.Env.emitAudit(plan, exec, out, time.Since(started))
 		return out

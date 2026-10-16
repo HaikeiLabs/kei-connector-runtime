@@ -11,6 +11,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
 )
 
 type preparedOperation struct {
@@ -26,6 +27,7 @@ func (d *Daemon) invokeV2(ctx context.Context, dr daemonRequest, plan connectorI
 	finish := func(denied *denial) output {
 		if denied != nil {
 			out.Decision, out.ReasonCode, out.Reason, out.Result, out.Audit = "deny", denied.code, denied.reason, nil, nil
+			out.Hint = denyhint.Hint(denied.code)
 		}
 		d.Env.emitAudit(plan, nil, out, time.Since(started))
 		return out

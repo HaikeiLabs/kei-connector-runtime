@@ -23,6 +23,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/crm"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
 	"github.com/google/uuid"
 )
 
@@ -319,6 +320,7 @@ func parseConnectorInvokeArgs(args []string, env Env) (connectorInvokePlan, erro
 type output struct {
 	Decision    string             `json:"decision"`
 	ReasonCode  string             `json:"reason_code,omitempty"`
+	Hint        string             `json:"hint,omitempty"`
 	Reason      string             `json:"reason,omitempty"`
 	TraceID     string             `json:"trace_id,omitempty"`
 	ConnectorID string             `json:"connector_id,omitempty"`
@@ -367,6 +369,7 @@ func Run(args []string, env Env, stdout, stderr io.Writer) int {
 		code := 0
 		if d != nil {
 			out.Decision, out.ReasonCode, out.Reason, out.Result, out.Audit = "deny", d.code, d.reason, nil, nil
+			out.Hint = denyhint.Hint(d.code)
 			code = 1
 		}
 		env.emitAudit(plan, exec, out, time.Since(started))
