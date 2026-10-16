@@ -287,32 +287,40 @@ func matchPolicyPattern(input1, input2, pattern string) bool {
 	if pattern == "*" {
 		return true
 	}
-	if input1 != "" && "email:"+input1 == pattern {
-		return true
-	}
-	if input2 != "" && "email:"+input2 == pattern {
-		return true
-	}
 	if input1 != "" && "user:"+input1 == pattern {
 		return true
 	}
-	if strings.HasPrefix(pattern, "*") {
-		suffix := strings.TrimPrefix(pattern, "*")
-		if strings.HasSuffix(input1, suffix) || strings.HasSuffix(input2, suffix) {
-			return true
-		}
-	}
-	sep := strings.IndexByte(pattern, ':')
-	if sep < 0 {
-		return false
-	}
-	scheme, value := pattern[:sep], pattern[sep+1:]
-	for _, input := range []string{input1, input2} {
-		if input == "" || !strings.HasPrefix(input, scheme+":") {
+	for _, inp := range []string{input1, input2} {
+		if inp == "" {
 			continue
 		}
-		if value == "*" || strings.HasSuffix(input, value) || strings.TrimPrefix(input, scheme+":") == value {
+		if inp == pattern || "email:"+inp == pattern {
 			return true
+		}
+		if strings.HasSuffix(pattern, ":*") {
+			scheme := strings.TrimSuffix(pattern, ":*")
+			if scheme != "" && !strings.ContainsAny(scheme, ":*") {
+				value, ok := strings.CutPrefix(inp, scheme+":")
+				if ok && value != "" {
+					return true
+				}
+			}
+		}
+		domainPattern := pattern
+		if strings.HasPrefix(domainPattern, "email:") {
+			domainPattern = domainPattern[6:]
+		}
+		if strings.HasPrefix(domainPattern, "*@") {
+			domain := domainPattern[2:]
+			if domain != "" && !strings.ContainsAny(domain, "@*") {
+				at := strings.LastIndex(inp, "@")
+				if at > 0 {
+					local := strings.TrimPrefix(inp[:at], "email:")
+					if local != "" && !strings.Contains(local, ":") && strings.EqualFold(inp[at+1:], domain) {
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false
@@ -350,13 +358,22 @@ func matchPattern(input, pattern string) bool {
 	if input == pattern {
 		return true
 	}
-	if strings.HasPrefix(pattern, "*") {
-		return strings.HasSuffix(input, strings.TrimPrefix(pattern, "*"))
-	}
-	sep := strings.IndexByte(pattern, ':')
-	if sep < 0 || !strings.HasPrefix(input, pattern[:sep]+":") {
+	if strings.HasPrefix(pattern, "*@") {
+		domain := pattern[2:]
+		if domain != "" && !strings.ContainsAny(domain, "@*") {
+			at := strings.LastIndex(input, "@")
+			if at > 0 {
+				return strings.EqualFold(input[at+1:], domain)
+			}
+		}
 		return false
 	}
-	suffix := pattern[sep+1:]
-	return suffix == "*" || strings.HasSuffix(input, suffix)
+	if strings.HasSuffix(pattern, ":*") {
+		scheme := strings.TrimSuffix(pattern, ":*")
+		if scheme != "" && !strings.ContainsAny(scheme, ":*") {
+			value, ok := strings.CutPrefix(input, scheme+":")
+			return ok && value != ""
+		}
+	}
+	return false
 }

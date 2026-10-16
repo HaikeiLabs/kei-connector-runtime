@@ -8,6 +8,99 @@ import (
 	"time"
 )
 
+func TestMatchPatternExact(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		pattern string
+		want    bool
+	}{
+		{"agent exact", "agent:abc", "agent:abc", true},
+		{"capability exact", "capability:issue.read", "capability:issue.read", true},
+		{"connector exact", "connector:jira", "connector:jira", true},
+		{"tool exact", "tool:search_wiki", "tool:search_wiki", true},
+		{"user exact", "user:alice", "user:alice", true},
+		{"group match", "group:engineering", "group:engineering", true},
+
+		{"agent suffix must not match", "agent:abc", "agent:xabc", false},
+		{"agent suffix must not match 2", "agent:abc", "agent:bc", false},
+		{"capability suffix must not match", "capability:issue.read", "capability:read", false},
+		{"capability v1 target", "capability:issue.read", "capability:read", false},
+		{"connector suffix must not match", "connector:myjira", "connector:jira", false},
+		{"connector v1 target", "connector:myjira", "connector:jira", false},
+		{"connector prefix must not match", "connector:jira", "connector:jira_v2", false},
+		{"tool suffix must not match", "tool:search_wiki_admin", "tool:wiki", false},
+		{"user suffix must not match", "user:u-123", "user:evil-u-123", false},
+
+		{"domain match", "alice@corp.com", "*@corp.com", true},
+		{"domain case-insensitive", "alice@CORP.COM", "*@corp.com", true},
+		{"domain case-insensitive reverse", "ALICE@corp.com", "*@CORP.COM", true},
+		{"domain suffix lookalike rejected", "alice@evilcorp.com", "*@corp.com", false},
+		{"domain subdomain rejected", "alice@mail.corp.com", "*@corp.com", false},
+		{"domain extra labels rejected", "alice@corp.com.evil.io", "*@corp.com", false},
+		{"domain no local part rejected", "@corp.com", "*@corp.com", false},
+
+		{"star-suffix is literal", "otherleads/42", "*leads/42", false},
+		{"star-suffix scheme", "capability:issue.read", "*read", false},
+
+		{"scheme wildcard", "agent:anything", "agent:*", true},
+		{"scheme wildcard capability", "capability:issue.read", "capability:*", true},
+		{"scheme wildcard tool", "tool:search_wiki", "tool:*", true},
+		{"scheme wildcard needs value", "agent:", "agent:*", false},
+		{"scheme wildcard no cross-scheme", "agent:a-1", "service:*", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchPattern(tc.input, tc.pattern); got != tc.want {
+				t.Errorf("matchPattern(%q, %q) = %v, want %v", tc.input, tc.pattern, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMatchPolicyPatternExact(t *testing.T) {
+	cases := []struct {
+		name    string
+		input1  string
+		input2  string
+		pattern string
+		want    bool
+	}{
+		{"user exact on input1", "alice", "alice@corp.com", "user:alice", true},
+		{"email exact on input2", "u-1", "alice@corp.com", "email:alice@corp.com", true},
+		{"email exact on input1", "alice@corp.com", "", "email:alice@corp.com", true},
+
+		{"user suffix on input1", "evil-alice", "", "user:alice", false},
+		{"email suffix on input2", "u-1", "malice@corp.com", "email:alice@corp.com", false},
+
+		{"domain on input2", "u-1", "alice@corp.com", "*@corp.com", true},
+		{"domain on input1", "alice@corp.com", "", "*@corp.com", true},
+		{"domain case-insensitive", "u-1", "alice@CORP.com", "*@corp.com", true},
+		{"domain evil suffix rejected", "u-1", "alice@evilcorp.com", "*@corp.com", false},
+		{"domain subdomain rejected", "u-1", "alice@mail.corp.com", "*@corp.com", false},
+		{"domain no local part rejected", "", "@corp.com", "*@corp.com", false},
+
+		{"email domain form", "u-1", "alice@corp.com", "email:*@corp.com", true},
+		{"email domain case-insensitive", "u-1", "Alice@Corp.COM", "email:*@corp.com", true},
+		{"email domain lookalike rejected", "u-1", "alice@evilcorp.com", "email:*@corp.com", false},
+
+		{"scheme wildcard user", "user:anything", "", "user:*", true},
+		{"scheme wildcard needs value", "user:", "", "user:*", false},
+
+		{"star-suffix is literal in input1", "evil-alice", "", "*alice", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchPolicyPattern(tc.input1, tc.input2, tc.pattern); got != tc.want {
+				t.Errorf("matchPolicyPattern(%q, %q, %q) = %v, want %v",
+					tc.input1, tc.input2, tc.pattern, got, tc.want)
+			}
+		})
+	}
+}
+
 func v2ToolBundle(t *testing.T, now time.Time, checks []any) *Verified {
 	t.Helper()
 	doc := v2BundleDoc(now)
