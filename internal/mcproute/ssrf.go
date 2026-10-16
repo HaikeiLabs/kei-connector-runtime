@@ -4,12 +4,18 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"syscall"
 )
 
 var errSSRFBlocked = errors.New("ssrf: address not allowed")
+
+// AllowUpstream, when non-nil, reports whether an otherwise blocked upstream
+// address may be dialed. It is set only by the e2e build's wiring, never in
+// a release build; nil means the §4.10 guard applies unmodified.
+var AllowUpstream func(netip.Addr) bool
 
 // errEgressNotApproved is a dial to a host that no mcp descriptor in the
 // bundle in force names (ADR-036 §4.10).
@@ -41,6 +47,13 @@ var blockedNets = func() []*net.IPNet {
 
 // isBlockedIP reports whether ip must not be dialed by the upstream client.
 func isBlockedIP(ip net.IP) bool {
+	// Only the e2e build's wiring sets AllowUpstream; a release build
+	// leaves it nil, so the §4.10 guard applies unmodified.
+	if AllowUpstream != nil {
+		if addr, ok := netip.AddrFromSlice(ip); ok && AllowUpstream(addr.Unmap()) {
+			return false
+		}
+	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
 		return true
