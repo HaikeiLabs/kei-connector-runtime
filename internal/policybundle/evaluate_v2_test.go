@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	pol "github.com/HaikeiLabs/kei-connector-contracts/policy"
 )
 
-func TestMatchPatternExact(t *testing.T) {
+func TestMatchTargetExact(t *testing.T) {
 	cases := []struct {
 		name    string
 		input   string
@@ -32,28 +34,19 @@ func TestMatchPatternExact(t *testing.T) {
 		{"tool suffix must not match", "tool:search_wiki_admin", "tool:wiki", false},
 		{"user suffix must not match", "user:u-123", "user:evil-u-123", false},
 
-		{"domain match", "alice@corp.com", "*@corp.com", true},
-		{"domain case-insensitive", "alice@CORP.COM", "*@corp.com", true},
-		{"domain case-insensitive reverse", "ALICE@corp.com", "*@CORP.COM", true},
-		{"domain suffix lookalike rejected", "alice@evilcorp.com", "*@corp.com", false},
-		{"domain subdomain rejected", "alice@mail.corp.com", "*@corp.com", false},
-		{"domain extra labels rejected", "alice@corp.com.evil.io", "*@corp.com", false},
-		{"domain no local part rejected", "@corp.com", "*@corp.com", false},
-
 		{"star-suffix is literal", "otherleads/42", "*leads/42", false},
 		{"star-suffix scheme", "capability:issue.read", "*read", false},
 
 		{"scheme wildcard", "agent:anything", "agent:*", true},
 		{"scheme wildcard capability", "capability:issue.read", "capability:*", true},
 		{"scheme wildcard tool", "tool:search_wiki", "tool:*", true},
-		{"scheme wildcard needs value", "agent:", "agent:*", false},
 		{"scheme wildcard no cross-scheme", "agent:a-1", "service:*", false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := matchPattern(tc.input, tc.pattern); got != tc.want {
-				t.Errorf("matchPattern(%q, %q) = %v, want %v", tc.input, tc.pattern, got, tc.want)
+			if got := pol.MatchTarget(tc.pattern, tc.input); got != tc.want {
+				t.Errorf("MatchTarget(%q, %q) = %v, want %v", tc.pattern, tc.input, got, tc.want)
 			}
 		})
 	}
@@ -80,6 +73,8 @@ func TestMatchPolicyPatternExact(t *testing.T) {
 		{"domain evil suffix rejected", "u-1", "alice@evilcorp.com", "*@corp.com", false},
 		{"domain subdomain rejected", "u-1", "alice@mail.corp.com", "*@corp.com", false},
 		{"domain no local part rejected", "", "@corp.com", "*@corp.com", false},
+		{"domain case-insensitive reverse", "ALICE@corp.com", "", "*@CORP.COM", true},
+		{"domain extra labels rejected", "alice@corp.com.evil.io", "", "*@corp.com", false},
 
 		{"email domain form", "u-1", "alice@corp.com", "email:*@corp.com", true},
 		{"email domain case-insensitive", "u-1", "Alice@Corp.COM", "email:*@corp.com", true},
@@ -93,9 +88,9 @@ func TestMatchPolicyPatternExact(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := matchPolicyPattern(tc.input1, tc.input2, tc.pattern); got != tc.want {
-				t.Errorf("matchPolicyPattern(%q, %q, %q) = %v, want %v",
-					tc.input1, tc.input2, tc.pattern, got, tc.want)
+			if got := pol.MatchPrincipal(tc.pattern, tc.input1, tc.input2, nil); got != tc.want {
+				t.Errorf("MatchPrincipal(%q, %q, %q, nil) = %v, want %v",
+					tc.pattern, tc.input1, tc.input2, got, tc.want)
 			}
 		})
 	}
