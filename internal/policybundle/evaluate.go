@@ -2,6 +2,7 @@ package policybundle
 
 import (
 	"encoding/json"
+	pol "github.com/HaikeiLabs/kei-connector-contracts/policy"
 	"strings"
 )
 
@@ -266,7 +267,7 @@ func srcMatch(pattern string, c Call, groups, roles []string) bool {
 	if pattern == "*" {
 		return true
 	}
-	if c.AgentID != "" && matchPattern("agent:"+c.AgentID, pattern) {
+	if c.AgentID != "" && (pattern == "agent:"+c.AgentID || pattern == "agent:*") {
 		return true
 	}
 	if strings.HasPrefix(pattern, "org:") {
@@ -276,59 +277,9 @@ func srcMatch(pattern string, c Call, groups, roles []string) bool {
 			}
 		}
 	}
-	for _, g := range groups {
-		if pattern == "group:"+g || pattern == g {
-			return true
-		}
-	}
-	return matchPolicyPattern(c.UserID, c.Email, pattern)
-}
-func matchPolicyPattern(input1, input2, pattern string) bool {
-	if pattern == "*" {
-		return true
-	}
-	if input1 != "" && "user:"+input1 == pattern {
-		return true
-	}
-	for _, inp := range []string{input1, input2} {
-		if inp == "" {
-			continue
-		}
-		if inp == pattern || "email:"+inp == pattern {
-			return true
-		}
-		if strings.HasSuffix(pattern, ":*") {
-			scheme := strings.TrimSuffix(pattern, ":*")
-			if scheme != "" && !strings.ContainsAny(scheme, ":*") {
-				value, ok := strings.CutPrefix(inp, scheme+":")
-				if ok && value != "" {
-					return true
-				}
-			}
-		}
-		domainPattern := pattern
-		if strings.HasPrefix(domainPattern, "email:") {
-			domainPattern = domainPattern[6:]
-		}
-		if strings.HasPrefix(domainPattern, "*@") {
-			domain := domainPattern[2:]
-			if domain != "" && !strings.ContainsAny(domain, "@*") {
-				at := strings.LastIndex(inp, "@")
-				if at > 0 {
-					local := strings.TrimPrefix(inp[:at], "email:")
-					if local != "" && !strings.Contains(local, ":") && strings.EqualFold(inp[at+1:], domain) {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
+	return pol.MatchPrincipal(pattern, c.UserID, c.Email, groups)
 }
 func dstMatch(pattern string, c Call, t tool) bool {
-	if pattern == "*" {
-		return true
-	}
 	var candidates []string
 	if c.ConnectorInvocation {
 		candidates = []string{"connector:" + c.ConnectorID, "capability:" + c.Capability, "resource:" + c.Resource, c.Action + ":" + c.Resource, c.Capability, c.Resource}
@@ -345,7 +296,7 @@ func dstMatch(pattern string, c Call, t tool) bool {
 		}
 	}
 	for _, candidate := range candidates {
-		if candidate != "" && matchPattern(candidate, pattern) {
+		if candidate != "" && pol.MatchTarget(pattern, candidate) {
 			return true
 		}
 	}
@@ -353,27 +304,4 @@ func dstMatch(pattern string, c Call, t tool) bool {
 }
 func requiresSubject(pattern string) bool {
 	return pattern != "*" && !strings.HasPrefix(pattern, "agent:")
-}
-func matchPattern(input, pattern string) bool {
-	if input == pattern {
-		return true
-	}
-	if strings.HasPrefix(pattern, "*@") {
-		domain := pattern[2:]
-		if domain != "" && !strings.ContainsAny(domain, "@*") {
-			at := strings.LastIndex(input, "@")
-			if at > 0 {
-				return strings.EqualFold(input[at+1:], domain)
-			}
-		}
-		return false
-	}
-	if strings.HasSuffix(pattern, ":*") {
-		scheme := strings.TrimSuffix(pattern, ":*")
-		if scheme != "" && !strings.ContainsAny(scheme, ":*") {
-			value, ok := strings.CutPrefix(input, scheme+":")
-			return ok && value != ""
-		}
-	}
-	return false
 }
