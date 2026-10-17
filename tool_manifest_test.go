@@ -306,6 +306,27 @@ func TestSyncTools500IsNonFatal(t *testing.T) {
 	}
 }
 
+func TestSyncTools400SurfacesCatalogBodyMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"message": "tool 'codex.shell' is missing a route"})
+	}))
+	defer server.Close()
+
+	client := NewRuntimeClient(server.URL, time.Second)
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{
+		{Name: "codex.shell", Source: "test", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
+	}}
+	err := client.SyncTools(context.Background(), "test-token", manifest)
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if !strings.Contains(err.Error(), "tool 'codex.shell' is missing a route") {
+		t.Fatalf("400 error does not surface the catalog body message: %q", err.Error())
+	}
+}
+
 func TestSyncToolsTransportError(t *testing.T) {
 	client := NewRuntimeClient("http://127.0.0.1:1", time.Millisecond)
 	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{

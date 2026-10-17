@@ -265,13 +265,18 @@ func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *T
 		return fmt.Errorf("tool sync request failed: %w", err)
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	if response.StatusCode == http.StatusConflict {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 		return &ToolSyncError{StatusCode: response.StatusCode, Conflict: true}
 	}
+	if response.StatusCode == http.StatusBadRequest {
+		return &ToolSyncError{StatusCode: response.StatusCode, Message: toolSyncBodyMessage(response.Body)}
+	}
 	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 		return &ToolSyncError{StatusCode: response.StatusCode}
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	ack := response.Header.Get(ToolManifestProtocolHeader)
 	if ack != "" && ack != manifest.Schema {
 		return fmt.Errorf("tool sync protocol acknowledgment mismatch")
@@ -298,11 +303,37 @@ func containsManifestSchema(header, schema string) bool {
 	return false
 }
 
+// toolSyncBodyMessage reads a bounded catalog error body and returns the
+// human-readable message to surface to the caller: the JSON "message" field
+// when present, otherwise the trimmed raw body capped at 500 bytes.
+func toolSyncBodyMessage(body io.Reader) string {
+	raw, err := io.ReadAll(io.LimitReader(body, 4<<10))
+	if err != nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return ""
+	}
+	var envelope struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Message != "" {
+		return envelope.Message
+	}
+	const cap = 500
+	if len(trimmed) > cap {
+		return trimmed[:cap]
+	}
+	return trimmed
+}
+
 // ToolSyncError is a non-fatal error from SyncTools. Callers log it and
 // continue bootstrap.
 type ToolSyncError struct {
 	StatusCode int
 	Conflict   bool
+	Message    string
 	Wrapped    error
 }
 
@@ -311,7 +342,13 @@ func (e *ToolSyncError) Error() string {
 		return e.Wrapped.Error()
 	}
 	if e.Conflict {
+		if e.Message != "" {
+			return fmt.Sprintf("tool sync conflict (HTTP %d): %s", e.StatusCode, e.Message)
+		}
 		return fmt.Sprintf("tool sync conflict (HTTP %d)", e.StatusCode)
+	}
+	if e.Message != "" {
+		return fmt.Sprintf("tool sync failed (HTTP %d): %s", e.StatusCode, e.Message)
 	}
 	return fmt.Sprintf("tool sync failed (HTTP %d)", e.StatusCode)
 }
