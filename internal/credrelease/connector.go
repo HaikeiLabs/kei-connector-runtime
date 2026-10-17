@@ -25,14 +25,16 @@ func connectorResolvePath(connectorID string) string {
 
 // ConnectorCredential is one connector's released token with the audience
 // the bridge recorded for it. AccessToken reaches code only inside a
-// UseConnector callback.
+// UseConnector callback. ExpiresAt is the bridge-issued token's lifetime; the
+// runtime does not extend it.
 type ConnectorCredential struct {
-	ConnectorID, Issuer, Resource, AccountModel, AccessToken string
+	ConnectorID, Issuer, Resource, AccountModel, AccessToken, ExpiresAt string
 }
 
 type heldConnectorToken struct {
 	token                                       []byte
 	connectorID, issuer, resource, accountModel string
+	expireTime                                  string
 }
 
 type connectorResolveResponse struct {
@@ -43,6 +45,7 @@ type connectorResolveResponse struct {
 	Credential   *struct {
 		AccessToken string `json:"access_token"`
 		TokenType   string `json:"token_type"`
+		ExpireTime  string `json:"expire_time"`
 	} `json:"credential"`
 	Failure *struct {
 		Reason string `json:"reason"`
@@ -101,6 +104,7 @@ func (c *Client) resolveConnector(ctx context.Context, subjectToken, connectorID
 		return held, &DeniedError{Provider: connectorID, Reason: ReasonNotConnected}
 	}
 	held.token = []byte(decoded.Credential.AccessToken)
+	held.expireTime = decoded.Credential.ExpireTime
 	return held, nil
 }
 
@@ -143,7 +147,7 @@ func (s *Store) UseConnector(ctx context.Context, subject, connectorID, resource
 	}
 	return fn(ConnectorCredential{
 		ConnectorID: held.connectorID, Issuer: held.issuer, Resource: held.resource,
-		AccountModel: held.accountModel, AccessToken: string(held.token),
+		AccountModel: held.accountModel, AccessToken: string(held.token), ExpiresAt: held.expireTime,
 	})
 }
 

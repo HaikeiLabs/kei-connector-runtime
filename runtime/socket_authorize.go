@@ -24,7 +24,11 @@ import (
 const (
 	authorizeRequestSchema  = "kei.authorize-request/v1"
 	authorizeResponseSchema = "kei.authorize-response/v1"
-	sessionSchema           = "kei.session/v1"
+	// credentialReleaseRequestSchema/ResponseSchema are the HAI-722
+	// pass-through route (kei-connector-contracts docs/credential-passthrough.md).
+	credentialReleaseRequestSchema  = "kei.credential-release-request/v1"
+	credentialReleaseResponseSchema = "kei.credential-release-response/v1"
+	sessionSchema                   = "kei.session/v1"
 	// sessionSchemaV2 creates a named session (multi-session socket API).
 	sessionSchemaV2      = "kei.session/v2"
 	bundleStatusSchema   = "kei.policy-bundle-status/v1"
@@ -69,6 +73,32 @@ type socketAuthorizeResponse struct {
 	Enrollment          json.RawMessage `json:"enrollment,omitempty"`
 }
 
+// socketCredentialReleaseResponse is the HAI-722 pass-through answer. On
+// allow it carries the connector credential value + expiry and the policy
+// metadata; on a policy deny or a missing/expired credential it carries a
+// typed reason_code and no credential (never a fallback).
+type socketCredentialReleaseResponse struct {
+	Schema              string                       `json:"schema"`
+	Decision            string                       `json:"decision"`
+	ReasonCode          string                       `json:"reason_code,omitempty"`
+	Reason              string                       `json:"reason,omitempty"`
+	Credential          *socketCredentialReleaseCred `json:"credential,omitempty"`
+	PolicyID            string                       `json:"policy_id,omitempty"`
+	PolicyBundleVersion *int64                       `json:"policy_bundle_version,omitempty"`
+	PolicyBundleDigest  string                       `json:"policy_bundle_digest,omitempty"`
+	PolicyRevision      *int64                       `json:"policy_revision,omitempty"`
+	BundleState         string                       `json:"bundle_state"`
+}
+
+type socketCredentialReleaseCred struct {
+	ConnectorID  string `json:"connector_id"`
+	Issuer       string `json:"issuer"`
+	Resource     string `json:"resource"`
+	AccountModel string `json:"account_model"`
+	AccessToken  string `json:"access_token"`
+	ExpiresAt    string `json:"expires_at"`
+}
+
 type socketSessionRequest struct {
 	Schema     string          `json:"schema"`
 	UserID     string          `json:"user_id,omitempty"`
@@ -104,6 +134,10 @@ type socketDecisionEvent struct {
 	ParentSpan          *string  `json:"parent_span,omitempty"`
 	ToolArgsDigest      *string  `json:"tool_args_digest,omitempty"`
 	SessionID           *string  `json:"session_id,omitempty"`
+	// CredentialReleased is set only by the HAI-722 pass-through route: true
+	// when a credential value crossed the socket. The value itself is never
+	// recorded.
+	CredentialReleased *bool `json:"credential_released,omitempty"`
 }
 
 // SessionKeychain provides CLI login token storage and verification.
@@ -609,6 +643,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/consume" && r.Method == http.MethodPost && l.preflight != nil:
 		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
 		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
+		case r.URL.Path == "/v1/credentials:release" && r.Method == http.MethodPost && l.creds != nil:
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -618,7 +653,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			return
 		}
 		authenticated := checkAuth(r)
-		routeAllowsOwner := r.Method == http.MethodPost && (r.URL.Path == "/v1/authorize" || r.URL.Path == "/v1/preflight" || r.URL.Path == "/v1/consume" || r.URL.Path == "/v1/connectors:invoke")
+		routeAllowsOwner := r.Method == http.MethodPost && (r.URL.Path == "/v1/authorize" || r.URL.Path == "/v1/preflight" || r.URL.Path == "/v1/consume" || r.URL.Path == "/v1/connectors:invoke" || r.URL.Path == "/v1/credentials:release")
 		l.ownerMu.RLock()
 		ownerID, ownerEnabled, ownerUnavailable := l.ownerID, l.tokenlessOwnerSession, l.ownerUnavailable
 		l.ownerMu.RUnlock()
@@ -658,6 +693,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.invoker.ServeHTTP(w, r)
 		case r.URL.Path == "/v1/commands:run":
 			l.runner.ServeHTTP(w, r)
+		case r.URL.Path == "/v1/credentials:release":
+			l.handleCredentialRelease(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:
@@ -982,50 +1019,10 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		return
 	}
 	sessionID := session.FromRequest(r)
-	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
-	if req.Connector != nil {
-		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
-	}
-	d := pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
-	// auditTrustedAgent is set when the decision used the runtime identity's
-	// agent, so the audit records that agent instead of the request's.
-	auditTrustedAgent := req.Tool == "pi.bash"
-	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
-		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
-	} else if e := l.evaluator.Load(); e != nil {
-		var err error
-		switch {
-		case req.Tool == "pi.bash":
-			if !validArgumentDigest(req.ToolArgsDigest) {
-				d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
-			} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
-				d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
-			} else {
-				// Never use the caller's optional AgentID; the authenticated
-				// runtime identity supplies the installation's assigned default.
-				d, err = e.AuthorizePiShell(r.Context(), sessionID, req.ShellCommand, identity.AgentID)
-			}
-		case req.ShellCommand != "":
-			d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
-		case e.IsV2HarnessTool(req.Tool):
-			// The request's AgentID is untrusted: decide for the authenticated
-			// runtime identity's default agent, and deny a request that names
-			// any other agent instead of trusting it.
-			trusted := l.trustedAgentID()
-			auditTrustedAgent = true
-			if req.AgentID != "" && req.AgentID != trusted {
-				d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
-				break
-			}
-			preq.AgentID = trusted
-			d, err = e.AuthorizeV2HarnessTool(r.Context(), preq)
-		default:
-			d, err = e.Evaluate(r.Context(), preq)
-		}
-		if err != nil {
-			writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
-			return
-		}
+	d, auditTrustedAgent, err := l.decideAuthorize(r.Context(), sessionID, req)
+	if err != nil {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
+		return
 	}
 	resp := socketAuthorizeResponseForDecision(d, includeEnrollment)
 	if l.emit != nil {
@@ -1035,11 +1032,164 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 			// default identity used for the policy decision.
 			auditReq.AgentID = l.trustedAgentID()
 		}
-		data := l.decisionEventJSON(auditReq, sessionID, d)
+		data := l.decisionEventJSON(auditReq, sessionID, d, nil)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// decideAuthorize computes the /v1/authorize decision for req in sessionID.
+// It is shared by /v1/authorize and /v1/credentials:release so the two always
+// agree. auditTrustedAgent is true when the decision used the runtime
+// identity's default agent (the audit records that agent instead of the
+// request's). The error is non-nil only when ctx is done.
+func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent bool, err error) {
+	d = pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
+	auditTrustedAgent = req.Tool == "pi.bash"
+	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
+		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
+		return d, auditTrustedAgent, nil
+	}
+	e := l.evaluator.Load()
+	if e == nil {
+		return d, auditTrustedAgent, nil
+	}
+	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
+	if req.Connector != nil {
+		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
+	}
+	switch {
+	case req.Tool == "pi.bash":
+		if !validArgumentDigest(req.ToolArgsDigest) {
+			d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
+		} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
+			d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+		} else {
+			// Never use the caller's optional AgentID; the authenticated
+			// runtime identity supplies the installation's assigned default.
+			d, err = e.AuthorizePiShell(ctx, sessionID, req.ShellCommand, identity.AgentID)
+		}
+	case req.ShellCommand != "":
+		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
+	case e.IsV2HarnessTool(req.Tool):
+		// The request's AgentID is untrusted: decide for the authenticated
+		// runtime identity's default agent, and deny a request that names
+		// any other agent instead of trusting it.
+		trusted := l.trustedAgentID()
+		auditTrustedAgent = true
+		if req.AgentID != "" && req.AgentID != trusted {
+			d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+			break
+		}
+		preq.AgentID = trusted
+		d, err = e.AuthorizeV2HarnessTool(ctx, preq)
+	default:
+		d, err = e.Evaluate(ctx, preq)
+	}
+	return d, auditTrustedAgent, err
+}
+
+// handleCredentialRelease serves POST /v1/credentials:release (HAI-722,
+// kei-connector-contracts docs/credential-passthrough.md). It re-runs the
+// /v1/authorize decision for the request and, only on allow, releases the
+// session-held connector credential (value + expiry). On a policy deny, or on
+// an allow whose credential is missing/expired, it returns a typed reason_code
+// and no credential — never a fallback. The audit records the decision and
+// whether a credential was released, never the credential value.
+func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Request) {
+	var req socketAuthorizeRequest
+	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != credentialReleaseRequestSchema {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+credentialReleaseRequestSchema+" object with no unknown fields")
+		return
+	}
+	if (req.Tool == "") == (req.Connector == nil) || (req.Connector != nil && (req.Connector.ConnectorID == "" || req.Connector.Capability == "")) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs exactly one of tool or connector{connector_id, capability}")
+		return
+	}
+	if req.Connector == nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a connector{connector_id, capability} is required for a credential release")
+		return
+	}
+	if req.Resource == "" {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a resource is required")
+		return
+	}
+	sessionID := session.FromRequest(r)
+	d, auditTrustedAgent, err := l.decideAuthorize(r.Context(), sessionID, req)
+	if err != nil {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
+		return
+	}
+	resp := socketCredentialReleaseResponse{Schema: credentialReleaseResponseSchema, Decision: "deny", ReasonCode: d.ReasonCode, Reason: d.Reason, BundleState: d.BundleState}
+	if d.Allow {
+		subject := ""
+		if sub, ok := l.Sessions.Get(sessionID); ok {
+			subject = sub.UserID
+		}
+		var cred *socketCredentialReleaseCred
+		releaseErr := l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, req.Resource, func(c credrelease.ConnectorCredential) error {
+			cred = &socketCredentialReleaseCred{
+				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
+				AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
+			}
+			return nil
+		})
+		if releaseErr != nil {
+			var denied *credrelease.DeniedError
+			if errors.As(releaseErr, &denied) {
+				resp.ReasonCode = credentialReleaseReason(denied.Reason)
+			} else {
+				resp.ReasonCode = "credential_provider_unavailable"
+			}
+			resp.Reason = "the session credential could not be released"
+		} else {
+			resp.Decision = "allow"
+			resp.Credential = cred
+		}
+	}
+	if d.PolicyID != "" {
+		resp.PolicyID = d.PolicyID
+	}
+	if d.BundleVersion > 0 {
+		resp.PolicyBundleVersion, resp.PolicyBundleDigest, resp.PolicyRevision = &d.BundleVersion, d.BundleDigest, &d.PolicyRevision
+	}
+	if l.emit != nil {
+		auditReq := req
+		if auditTrustedAgent {
+			auditReq.AgentID = l.trustedAgentID()
+		}
+		released := resp.Decision == "allow" && resp.Credential != nil
+		data := l.decisionEventJSON(auditReq, sessionID, d, &released)
+		l.emit(data)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// credentialReleaseReason maps an internal credrelease deny reason to the
+// HAI-722 contract's typed reason_code. An unknown I11 failure reason is
+// reported as not connected.
+func credentialReleaseReason(reason string) string {
+	switch reason {
+	case credrelease.ReasonNotConnected:
+		return "credential_not_connected"
+	case credrelease.ReasonReconnectRequired:
+		return "credential_reconnect_required"
+	case credrelease.ReasonMaxLifetimeExceeded:
+		return "credential_max_lifetime_exceeded"
+	case credrelease.ReasonAudienceMismatch:
+		return "credential_audience_mismatch"
+	case credrelease.ReasonProviderUnavailable:
+		return "credential_provider_unavailable"
+	case credrelease.ReasonProviderUnauthorized:
+		return "credential_provider_unauthorized"
+	case credrelease.ReasonNoSession:
+		return "no_session"
+	default:
+		return "credential_not_connected"
+	}
 }
 
 // trustedAgentID is the default agent of the authenticated runtime identity,
@@ -1069,7 +1219,7 @@ func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) 
 	return resp
 }
 
-func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision) json.RawMessage {
+func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialReleased *bool) json.RawMessage {
 	spanID := req.SpanID
 	if spanID == "" {
 		spanID = uuid.NewString()
@@ -1082,6 +1232,7 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID strin
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: d.ReasonCode,
+		CredentialReleased: credentialReleased,
 	}
 	if d.Allow {
 		e.Decision = "allow"

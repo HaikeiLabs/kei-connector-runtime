@@ -118,7 +118,7 @@ func TestUseConnectorReleasesTheConnectorsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := ConnectorCredential{ConnectorID: testConnector, Issuer: "https://auth.example.com", Resource: testResource, AccountModel: "per_user", AccessToken: canary}
+	want := ConnectorCredential{ConnectorID: testConnector, Issuer: "https://auth.example.com", Resource: testResource, AccountModel: "per_user", AccessToken: canary, ExpiresAt: "2026-10-14T20:00:00Z"}
 	if got != want {
 		t.Fatalf("credential = %+v, want %+v", got, want)
 	}
