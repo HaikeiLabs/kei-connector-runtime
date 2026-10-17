@@ -24,3 +24,8 @@ its schema-tagged JSON body:
 
 Negotiation happens only at bootstrap tool sync, never per tool decision.
 Unsupported protocols never mutate the catalog's installation tool set.
+
+A non-2xx sync is non-fatal on the runtime: it is logged and bootstrap
+continues. For a 400, the surfaced error additionally carries the catalog's
+`message` field (or the trimmed body, capped at 500 bytes) so the caller sees
+why the manifest was rejected.
