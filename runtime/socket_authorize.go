@@ -172,11 +172,12 @@ type LocalPDP struct {
 
 	// creds is the legacy default session's credential store; each named
 	// session has its own in sessionCreds (id -> *credrelease.Store).
-	creds         *credrelease.Store
-	sessionCreds  sync.Map
-	invoker       http.Handler
-	runner        http.Handler
-	toolRegistrar ToolRegistrar
+	creds              *credrelease.Store
+	sessionCreds       sync.Map
+	invoker            http.Handler
+	runner             http.Handler
+	toolRegistrar      ToolRegistrar
+	modelConfigHandler http.Handler
 	// deprecated records the routes already warned about the default session.
 	deprecated            sync.Map
 	stopSweep             chan struct{}
@@ -447,6 +448,11 @@ func (l *LocalPDP) SetCommandRunner(h http.Handler) { l.runner = h }
 // the route remains fail closed and reports that tool registration is unavailable.
 func (l *LocalPDP) SetToolRegistrar(registrar ToolRegistrar) { l.toolRegistrar = registrar }
 
+// SetModelConfigHandler serves GET /v1/model-config with h (HAI-671):
+// returns the runtime's assigned model profile as a config source (model,
+// endpoint, credential) for the harness. Without one the route is not served.
+func (l *LocalPDP) SetModelConfigHandler(h http.Handler) { l.modelConfigHandler = h }
+
 // AuthorizeConnector decides a connector call with the local PDP and the
 // session subject, and returns the runtime identity it was decided under.
 // Before the identity resolves, every call denies policy_bundle_missing. The
@@ -665,6 +671,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		case r.URL.Path == "/v1/credentials:release" && r.Method == http.MethodPost && l.creds != nil:
 		case r.URL.Path == "/v1/tools:register" && r.Method == http.MethodPost:
+		case r.URL.Path == "/v1/model-config" && r.Method == http.MethodGet && l.modelConfigHandler != nil:
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -718,6 +725,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.handleToolRegistration(w, r)
 		case r.URL.Path == "/v1/credentials:release":
 			l.handleCredentialRelease(w, r)
+		case r.URL.Path == "/v1/model-config":
+			l.modelConfigHandler.ServeHTTP(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:

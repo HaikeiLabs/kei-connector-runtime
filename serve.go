@@ -28,7 +28,6 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
@@ -38,7 +37,6 @@ import (
 const (
 	defaultListenAddr     = ":8085"
 	defaultMCPListenAddr  = "127.0.0.1:8086"
-	maxModelRequest       = 4 << 20
 	shutdownFlushTimeout  = 5 * time.Second
 	collectorPollInterval = time.Minute
 )
@@ -313,7 +311,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpR
 // routes still require the runtime token. The TCP handler exposes no PDP route.
 func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Handler) {
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
-	base.models = local
+	local.SetModelConfigHandler(http.HandlerFunc(base.handleModelConfig))
 	return base, local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
 }
 
@@ -510,14 +508,6 @@ type runtimeHTTPHandler struct {
 	profiles ControlPlaneModelProfileClient
 	client   *http.Client
 	sessions *pdp.Sessions
-	// models decides v2 model calls locally (ADR-035 §6); nil keeps only the
-	// v1 path.
-	models modelAuthorizer
-}
-
-// modelAuthorizer is the local PDP's v2 model decision.
-type modelAuthorizer interface {
-	AuthorizeModel(ctx context.Context, sessionID, agentID, profileID string) (pdp.Decision, bool, error)
 }
 
 func newRuntimeHTTPHandler(cfg Config, sessions *pdp.Sessions) http.Handler {
@@ -535,55 +525,11 @@ func (h *runtimeHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleHealth(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/readyz":
 		h.handleReady(w)
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
-		h.handleModels(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
-		h.handleChatCompletions(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/model-config":
+		h.handleModelConfig(w, r)
 	default:
 		http.NotFound(w, r)
 	}
-}
-
-type openAIModelList struct {
-	Object string        `json:"object"`
-	Data   []openAIModel `json:"data"`
-}
-
-type openAIModel struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Object  string `json:"object"`
-	OwnedBy string `json:"owned_by"`
-}
-
-func (h *runtimeHTTPHandler) handleModels(w http.ResponseWriter, r *http.Request) {
-	if err := h.runtimeConfigError(); err != nil {
-		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
-		return
-	}
-	if !h.authorized(r) {
-		writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	profile, err := h.resolveAssignedOrDefaultProfile(ctx)
-	if err != nil {
-		writeRuntimeError(w, http.StatusBadGateway, "profile_unavailable", err.Error())
-		return
-	}
-	models := openAIModelList{Object: "list", Data: []openAIModel{}}
-	if profile != nil && profile.Status == "active" {
-		models.Data = append(models.Data, openAIModel{
-			ID:      profile.ProfileID,
-			Name:    profile.DisplayName,
-			Object:  "model",
-			OwnedBy: "kei",
-		})
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(models)
 }
 
 func (h *runtimeHTTPHandler) handleReady(w http.ResponseWriter) {
@@ -654,173 +600,64 @@ func (h *runtimeHTTPHandler) handleHealth(w http.ResponseWriter, r *http.Request
 	_, _ = io.WriteString(w, "ok\n")
 }
 
-func (h *runtimeHTTPHandler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+// handleModelConfig serves GET /v1/model-config (HAI-671): returns the runtime's
+// assigned model profile as a config source for the harness. The Unix-socket
+// handler applies auth before reaching this method; on the external TCP listener
+// this path requires runtime-token auth.
+func (h *runtimeHTTPHandler) handleModelConfig(w http.ResponseWriter, r *http.Request) {
 	if err := h.runtimeConfigError(); err != nil {
 		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
 		return
 	}
+
 	if !h.authorized(r) {
 		writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
 		return
 	}
 
-	var invokingSubject pdp.Subject
-	sessionID := session.FromRequest(r)
-	if h.sessions != nil {
-		id := sessionID
-		sub, ok := h.sessions.Get(id)
-		if !ok && id != pdp.DefaultSession {
-			writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
-			return
-		}
-		if ok {
-			invokingSubject = sub
-		}
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxModelRequest))
-	if err != nil {
-		writeRuntimeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the configured limit")
-		return
-	}
-	var request struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &request); err != nil {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	profile, err := h.resolveProfile(ctx, request.Model)
+
+	profile, err := h.profiles.GetRuntimeAssignedModelProfile(ctx)
 	if err != nil {
-		writeRuntimeError(w, http.StatusBadGateway, "profile_unavailable", err.Error())
+		slog.Warn("model_config_no_profile", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "no_profile"})
 		return
 	}
 	if profile == nil {
-		writeRuntimeError(w, http.StatusNotFound, "model_not_found", "requested model is not configured")
+		slog.Warn("model_config_nil_profile")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "no_profile"})
 		return
 	}
-	if profile.Status != "active" {
-		writeRuntimeError(w, http.StatusServiceUnavailable, "model_unavailable", "configured model is not active")
+	if profile.Status != "" && profile.Status != "active" {
+		slog.Warn("model_config_profile_revoked", "profile_id", profile.ProfileID, "status", profile.Status)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "profile_revoked"})
 		return
 	}
-	if err := h.authorizeModel(ctx, profile, sessionID, invokingSubject); err != nil {
-		writeRuntimeError(w, http.StatusForbidden, "model_invocation_denied", err.Error())
-		return
-	}
-	providerBody, err := rewriteProviderModel(body, profile.DefaultModel)
-	if err != nil {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	response, err := h.invokeProvider(ctx, profile, providerBody)
-	if err != nil {
-		writeRuntimeError(w, http.StatusBadGateway, "provider_unavailable", err.Error())
-		return
-	}
-	defer response.Body.Close()
-	for key, values := range response.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, response.Body)
-}
 
-// rewriteProviderModel translates the OpenAI-facing model profile ID into the
-// provider's configured model name. OpenWebUI selects profiles by ID, while
-// the upstream endpoint expects profile.DefaultModel.
-func rewriteProviderModel(body []byte, defaultModel string) ([]byte, error) {
-	if defaultModel == "" {
-		return body, nil
-	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, errors.New("request body must be valid JSON")
-	}
-	model, err := json.Marshal(defaultModel)
-	if err != nil {
-		return nil, errors.New("could not encode configured model")
-	}
-	payload["model"] = model
-	return json.Marshal(payload)
-}
-
-// modelSubjectRequest picks the subject identity the catalog accepts for the
-// session's source. A cli session resolves by its Kei user_id; a chat session
-// (openwebui, discord, ...) resolves by its platform_user_id, which the catalog
-// scopes to the installation's own platform, org and workspace. The catalog
-// rejects user_id from non-cli installations, so sending it for a chat session
-// would fail closed with every model call denied.
-func modelSubjectRequest(sub pdp.Subject, providerUserID, tenantID string) (keiruntime.SubjectResolveRequest, bool) {
-	switch {
-	case sub.UserID != "" && sub.Source != "" && sub.Source != "cli" && sub.ExternalID != "":
-		return keiruntime.SubjectResolveRequest{PlatformUserID: sub.ExternalID, TenantID: tenantID}, true
-	case sub.UserID != "":
-		return keiruntime.SubjectResolveRequest{UserID: sub.UserID}, true
-	case providerUserID != "":
-		return keiruntime.SubjectResolveRequest{PlatformUserID: providerUserID, TenantID: tenantID}, true
-	}
-	return keiruntime.SubjectResolveRequest{}, false
-}
-
-// authorizeModel decides a model call. Under a v2 bundle the local PDP decides
-// from the refresher's identity and the bundle's agent_model_profiles, with no
-// control-plane request; the calling agent is the default agent the resolved
-// profile was served for. The v1 path below is unchanged.
-func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelProfile, sessionID string, invokingSubject pdp.Subject) error {
-	if h.models != nil {
-		decision, v2, err := h.models.AuthorizeModel(ctx, sessionID, profile.AgentID, profile.ProfileID)
+	var credential string
+	if profile.AuthType == "api_key" {
+		apiKey, err := getModelProfileAPIKey(profile)
 		if err != nil {
-			return err
+			slog.Warn("model_config_credential_unavailable", "profile_id", profile.ProfileID, "error", err)
+			writeRuntimeError(w, http.StatusInternalServerError, "credential_unavailable", "provider credential could not be resolved")
+			return
 		}
-		if v2 {
-			if !decision.Allow {
-				return fmt.Errorf("local policy denied model invocation (%s)", decision.ReasonCode)
-			}
-			return nil
-		}
+		credential = apiKey
 	}
-	identity, err := NewRuntimeClient(h.cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, h.cfg.RuntimeToken)
-	if err != nil {
-		return fmt.Errorf("resolve runtime identity for local policy: %w", err)
-	}
-	if identity == nil || identity.Status != "active" || identity.BindingStatus != "verified" || identity.WorkspaceID == nil {
-		return errors.New("runtime installation is inactive, unverified, or unscoped")
-	}
-	store, err := policybundle.OpenStore(h.cfg.RuntimeStateDir)
-	if err != nil {
-		return err
-	}
-	bundle, _, err := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("local policy bundle unavailable: %w", err)
-	}
-	if bundle.Payload.Schema == "kei.policy-bundle/v2" {
-		return errors.New("v2 model authorization needs the resolved runtime identity; refusing the legacy online subject path")
-	}
-	var attrs *policybundle.Subject
-	if req, ok := modelSubjectRequest(invokingSubject, h.cfg.ProviderUserID, os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")); ok {
-		client := keiruntime.NewPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
-		resolved, e := client.ResolveSubject(ctx, req)
-		if errors.Is(e, ErrPolicyInstallationRevoked) {
-			_ = store.Revoke(time.Now().UTC())
-			return e
-		}
-		if e != nil {
-			return fmt.Errorf("subject resolution unavailable: %w", e)
-		}
-		attrs = &resolved
-	}
-	agentID := envOr("KEI_PROXY_AGENT_ID", "")
-	decision := bundle.EvaluateAction("model:invoke", "model:"+profile.ProfileID, agentID, attrs)
-	if decision.Outcome != "allow" {
-		return fmt.Errorf("local policy denied model invocation (%s)", decision.ReasonCode)
-	}
-	return nil
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"model":      profile.DefaultModel,
+		"endpoint":   profile.Endpoint,
+		"credential": credential,
+	})
 }
 
 func (h *runtimeHTTPHandler) runtimeConfigError() error {
@@ -846,17 +683,6 @@ func (h *runtimeHTTPHandler) authorized(r *http.Request) bool {
 	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(h.cfg.RuntimeToken)) == 1
 }
 
-func (h *runtimeHTTPHandler) resolveProfile(ctx context.Context, model string) (*ModelProfile, error) {
-	profile, err := h.resolveAssignedOrDefaultProfile(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if model != "" && model != profile.ProfileID {
-		return nil, fmt.Errorf("model %q is not assigned to the runtime's default agent", model)
-	}
-	return profile, nil
-}
-
 func (h *runtimeHTTPHandler) resolveAssignedOrDefaultProfile(ctx context.Context) (*ModelProfile, error) {
 	profile, err := h.profiles.GetRuntimeAssignedModelProfile(ctx)
 	if err != nil {
@@ -866,25 +692,6 @@ func (h *runtimeHTTPHandler) resolveAssignedOrDefaultProfile(ctx context.Context
 		return nil, fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
 	}
 	return profile, nil
-}
-
-func (h *runtimeHTTPHandler) invokeProvider(ctx context.Context, profile *ModelProfile, body []byte) (*http.Response, error) {
-	endpoint := strings.TrimRight(profile.Endpoint, "/") + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, fmt.Errorf("build provider request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if profile.AuthType == "api_key" {
-		apiKey, err := getModelProfileAPIKey(profile)
-		if err != nil {
-			return nil, fmt.Errorf("resolve provider credentials: %w", err)
-		}
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-	}
-	return h.client.Do(req)
 }
 
 func writeRuntimeError(w http.ResponseWriter, status int, code, message string) {

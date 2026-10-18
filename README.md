@@ -440,21 +440,16 @@ KEI_RUNTIME_TOKEN=kh_live_... \
 kei-proxy serve
 ```
 
-The initial endpoints are `GET /healthz`, `GET /readyz`, `GET /v1/models`,
-`POST /v1/chat/completions`, `POST /v1/authorize`, and
-`PUT/DELETE/GET /v1/session`. The models endpoint advertises the active profile
-assigned to the runtime. Chat requests authenticate with the runtime token,
-obtain a `model.invoke` decision from the local PDP, and only then resolve
-provider credentials and call the model endpoint. The runtime remains
-independently usable without OpenWebUI.
-
-#### End-user subject attribution
-
-The end-user subject for `model.invoke` authorization is obtained exclusively
-from the runtime session (Unix socket `/v1/session`). If no session is active,
-the subject is empty. This ensures that subject identity is governed by the
-runtime's per-connection session, not by request headers or environment
-variables.
+The initial endpoints are `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
+`POST /v1/authorize`, and `PUT/DELETE/GET /v1/session`. The model-config
+endpoint returns the runtime's assigned model profile — model name, endpoint,
+and credential — as a config source for the harness. Inference **never** goes
+through kei-proxy: the harness uses the returned config to call the model
+provider directly. When no profile is assigned the endpoint returns
+`{"status":"no_profile"}` and the harness falls back to its own configuration
+(environment, config file, or Open WebUI connections). Profile assignment and
+credentials are resolved entirely within the daemon; no `model.invoke` policy
+decision is made. The runtime remains independently usable without Open WebUI.
 
 ### Local daemon socket
 
