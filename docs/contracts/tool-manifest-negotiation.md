@@ -3,6 +3,16 @@
 `PUT /api/v1/runtime/tools` uses explicit negotiation headers in addition to
 its schema-tagged JSON body:
 
+Clients that do not bootstrap through Agentware may send that same manifest
+body to `POST /v1/tools:register` on the authenticated local runtime socket.
+The runtime validates the manifest and forwards it through the same catalog
+sync client, returning the catalog's `added`, `updated`, `removed`, and
+`unchanged` counts. Invalid/empty manifests return `400 invalid_manifest`;
+catalog errors return `tool_sync_error` (catalog `400` messages are preserved).
+The route uses the runtime installation credential and never reads or writes a
+manifest file. It accepts the runtime's supported v2, v3, and v4 manifest
+schemas.
+
 - Request `Accept` includes `application/json` for the sync-count response and
   exactly one versioned protocol media type:
   `application/vnd.kei.tool-manifest.v2+json` or
