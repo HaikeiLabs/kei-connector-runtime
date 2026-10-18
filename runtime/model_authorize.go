@@ -21,7 +21,7 @@ func (l *LocalPDP) AuthorizeModel(ctx context.Context, sessionID, agentID, profi
 		return d, v2, err
 	}
 	if l.emit != nil {
-		l.emit(l.decisionEventJSON(socketAuthorizeRequest{Schema: authorizeRequestSchema, Tool: "model:" + profileID, AgentID: agentID}, sessionID, d))
+		l.emit(l.decisionEventJSON(socketAuthorizeRequest{Schema: authorizeRequestSchema, Tool: "model:" + profileID, AgentID: agentID}, sessionID, d, nil))
 	}
 	return d, true, nil
 }

@@ -238,7 +238,10 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 
 // TestServeNoSocketRouteReturnsCredential checks that no socket route, with
 // or without a linked session holding credentials, returns a 2xx carrying
-// credential material, and that the option-C routes do not exist.
+// credential material, and that the option-C routes do not exist. The HAI-722
+// /v1/credentials:release route is the one deliberate exception — it releases
+// a session credential over the owner-only socket after an allow — and is
+// covered by TestServeCredentialsReleaseRoute.
 func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 	var calls atomic.Int32
 	i11 := canaryI11(t, &calls)
