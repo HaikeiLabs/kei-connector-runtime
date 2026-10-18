@@ -238,60 +238,81 @@ type ToolSyncResponse struct {
 // an explicit catalog acknowledgment; missing acknowledgments remain
 // compatible only for v2 peers predating negotiation.
 func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *ToolManifest) error {
+	_, err := c.syncTools(ctx, token, manifest, false)
+	return err
+}
+
+// SyncToolsWithResponse sends the manifest through the same negotiated
+// catalog path as SyncTools and returns the catalog's registration counts.
+func (c *runtimeClient) SyncToolsWithResponse(ctx context.Context, token string, manifest *ToolManifest) (*ToolSyncResponse, error) {
+	return c.syncTools(ctx, token, manifest, true)
+}
+
+func (c *runtimeClient) syncTools(ctx context.Context, token string, manifest *ToolManifest, readCounts bool) (*ToolSyncResponse, error) {
 	if manifest == nil || (manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4) {
-		return fmt.Errorf("unsupported tool manifest protocol")
+		return nil, fmt.Errorf("unsupported tool manifest protocol")
 	}
 	if err := validateToolManifestSyncMode(manifest.Schema, manifest.SyncMode); err != nil {
-		return fmt.Errorf("invalid tool manifest sync mode")
+		return nil, fmt.Errorf("invalid tool manifest sync mode")
 	}
 	if manifest.Schema == ToolManifestSchemaV4 {
 		if err := validateToolManifest(manifest); err != nil {
-			return fmt.Errorf("invalid v4 tool manifest")
+			return nil, fmt.Errorf("invalid v4 tool manifest")
 		}
 	}
 	body, err := json.Marshal(manifest)
 	if err != nil {
-		return fmt.Errorf("encode tool manifest: %w", err)
+		return nil, fmt.Errorf("encode tool manifest: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/api/v1/runtime/tools", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build tool sync request: %w", err)
+		return nil, fmt.Errorf("build tool sync request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, "+toolManifestMediaType(manifest.Schema))
 	response, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("tool sync request failed: %w", err)
+		return nil, fmt.Errorf("tool sync request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusConflict {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-		return &ToolSyncError{StatusCode: response.StatusCode, Conflict: true}
+		return nil, &ToolSyncError{StatusCode: response.StatusCode, Conflict: true}
 	}
 	if response.StatusCode == http.StatusBadRequest {
-		return &ToolSyncError{StatusCode: response.StatusCode, Message: toolSyncBodyMessage(response.Body)}
+		return nil, &ToolSyncError{StatusCode: response.StatusCode, Message: toolSyncBodyMessage(response.Body)}
 	}
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-		return &ToolSyncError{StatusCode: response.StatusCode}
+		return nil, &ToolSyncError{StatusCode: response.StatusCode}
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	var syncResponse ToolSyncResponse
+	if readCounts {
+		if err := json.NewDecoder(io.LimitReader(response.Body, 4<<10)).Decode(&syncResponse); err != nil {
+			return nil, fmt.Errorf("decode tool sync response: %w", err)
+		}
+	} else {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	}
 	ack := response.Header.Get(ToolManifestProtocolHeader)
 	if ack != "" && ack != manifest.Schema {
-		return fmt.Errorf("tool sync protocol acknowledgment mismatch")
+		return nil, fmt.Errorf("tool sync protocol acknowledgment mismatch")
 	}
 	supportedHeader := response.Header.Get(ToolManifestSupportedHeader)
 	if supportedHeader != "" && !containsManifestSchema(supportedHeader, manifest.Schema) {
-		return fmt.Errorf("tool sync protocol is not in the catalog's supported schemas")
+		return nil, fmt.Errorf("tool sync protocol is not in the catalog's supported schemas")
 	}
 	if supportedHeader != "" && (ack != manifest.Schema || response.Header.Get("Content-Type") != "application/json") {
-		return fmt.Errorf("tool sync protocol was advertised but not explicitly selected")
+		return nil, fmt.Errorf("tool sync protocol was advertised but not explicitly selected")
 	}
 	if (manifest.Schema == ToolManifestSchemaV3 || manifest.Schema == ToolManifestSchemaV4) && (ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema) || response.Header.Get("Content-Type") != "application/json") {
-		return fmt.Errorf("tool sync protocol was not explicitly negotiated")
+		return nil, fmt.Errorf("tool sync protocol was not explicitly negotiated")
 	}
-	return nil
+	if !readCounts {
+		return nil, nil
+	}
+	return &syncResponse, nil
 }
 
 func containsManifestSchema(header, schema string) bool {

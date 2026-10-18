@@ -111,6 +111,18 @@ type socketSessionRequest struct {
 
 type EmitAuditFunc func(json.RawMessage)
 
+// ToolRegistrar syncs a validated tool manifest to the catalog using the
+// runtime installation credential and returns the catalog's sync counts.
+type ToolRegistrar interface {
+	RegisterTools(context.Context, string, *ToolManifest) (*ToolSyncResponse, error)
+}
+
+type runtimeToolRegistrar struct{ client *runtimeClient }
+
+func (r runtimeToolRegistrar) RegisterTools(ctx context.Context, token string, manifest *ToolManifest) (*ToolSyncResponse, error) {
+	return r.client.SyncToolsWithResponse(ctx, token, manifest)
+}
+
 type socketDecisionEvent struct {
 	SpanID              string   `json:"span_id"`
 	InvokedAt           string   `json:"invoked_at"`
@@ -160,10 +172,11 @@ type LocalPDP struct {
 
 	// creds is the legacy default session's credential store; each named
 	// session has its own in sessionCreds (id -> *credrelease.Store).
-	creds        *credrelease.Store
-	sessionCreds sync.Map
-	invoker      http.Handler
-	runner       http.Handler
+	creds         *credrelease.Store
+	sessionCreds  sync.Map
+	invoker       http.Handler
+	runner        http.Handler
+	toolRegistrar ToolRegistrar
 	// deprecated records the routes already warned about the default session.
 	deprecated            sync.Map
 	stopSweep             chan struct{}
@@ -179,6 +192,9 @@ type LocalPDP struct {
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, preflight: newPreflightService(), stopSweep: make(chan struct{})}
+	if cfg != nil && cfg.ControlPlaneURL() != "" {
+		l.toolRegistrar = runtimeToolRegistrar{client: &runtimeClient{baseURL: strings.TrimRight(cfg.ControlPlaneURL(), "/"), client: &http.Client{Timeout: 15 * time.Second}}}
+	}
 	// A named session's credentials go with it, however it ends.
 	l.Sessions.OnEnd(l.sessionEnded)
 	// A session recycled by max-age also emits a lifecycle event.
@@ -427,6 +443,10 @@ func (l *LocalPDP) SetConnectorInvoker(h http.Handler) { l.invoker = h }
 // served.
 func (l *LocalPDP) SetCommandRunner(h http.Handler) { l.runner = h }
 
+// SetToolRegistrar configures POST /v1/tools:register. Without a registrar,
+// the route remains fail closed and reports that tool registration is unavailable.
+func (l *LocalPDP) SetToolRegistrar(registrar ToolRegistrar) { l.toolRegistrar = registrar }
+
 // AuthorizeConnector decides a connector call with the local PDP and the
 // session subject, and returns the runtime identity it was decided under.
 // Before the identity resolves, every call denies policy_bundle_missing. The
@@ -644,6 +664,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
 		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		case r.URL.Path == "/v1/credentials:release" && r.Method == http.MethodPost && l.creds != nil:
+		case r.URL.Path == "/v1/tools:register" && r.Method == http.MethodPost:
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -693,6 +714,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.invoker.ServeHTTP(w, r)
 		case r.URL.Path == "/v1/commands:run":
 			l.runner.ServeHTTP(w, r)
+		case r.URL.Path == "/v1/tools:register":
+			l.handleToolRegistration(w, r)
 		case r.URL.Path == "/v1/credentials:release":
 			l.handleCredentialRelease(w, r)
 		case r.Method == http.MethodPut:
@@ -720,6 +743,50 @@ func (l *LocalPDP) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (l *LocalPDP) handleToolRegistration(w http.ResponseWriter, r *http.Request) {
+	if l.cfg == nil || l.cfg.Token() == "" {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_credentials_unavailable", "runtime credentials are unavailable")
+		return
+	}
+	if l.toolRegistrar == nil {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "tool_registration_unavailable", "tool registration is unavailable")
+		return
+	}
+	var manifest ToolManifest
+	if err := decodeSocketJSONLimit(w, r, &manifest, maxSocketPlanRequest); err != nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "invalid tool manifest JSON")
+		return
+	}
+	if manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4 {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "unsupported tool manifest schema")
+		return
+	}
+	if len(manifest.Tools) == 0 {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "tool manifest must contain at least one tool")
+		return
+	}
+	if err := validateToolManifest(&manifest); err != nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "invalid tool manifest: "+err.Error())
+		return
+	}
+	result, err := l.toolRegistrar.RegisterTools(r.Context(), l.cfg.Token(), &manifest)
+	if err != nil {
+		var syncErr *ToolSyncError
+		if errors.As(err, &syncErr) && syncErr.StatusCode == http.StatusBadRequest {
+			writeRuntimeError(w, http.StatusBadRequest, "tool_sync_error", syncErr.Error())
+			return
+		}
+		writeRuntimeError(w, http.StatusBadGateway, "tool_sync_error", err.Error())
+		return
+	}
+	if result == nil {
+		writeRuntimeError(w, http.StatusBadGateway, "tool_sync_error", "catalog returned no sync counts")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // handleSessionStart serves PUT /v1/session. A kei.session/v2 body creates a

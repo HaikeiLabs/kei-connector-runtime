@@ -457,6 +457,12 @@ authentication and model authorization still apply to requests made through
 the socket. The socket serves health, readiness, model profile, and
 chat-completion, authorize, and session routes; governed tool authorization
 (the PEP) over the socket replaces the legacy `authorize` CLI subprocess.
+Clients can register tool metadata with `POST /v1/tools:register` by sending
+the tool-manifest JSON body. The daemon validates it, syncs it to the catalog
+using its runtime credential, and returns the catalog's added, updated,
+removed, and unchanged counts. Registration requires the normal socket runtime
+authentication and does not grant policy access. The daemon does not create or
+modify a manifest file.
 
 The default socket is `/run/kei-proxy/runtime.sock` on Linux or
 `$TMPDIR/kei-proxy/runtime.sock` on macOS (falls back to `os.TempDir()`); set
