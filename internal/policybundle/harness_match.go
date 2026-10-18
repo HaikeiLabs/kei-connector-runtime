@@ -71,7 +71,7 @@ func (v *Verified) EvaluateV2PiShell(argv []string, agentID string, subject *Ses
 		if policy.Action == policyPermitAction && (!strings.HasPrefix(policy.Dst, "shell:") || policy.Dst == "shell:*") {
 			continue
 		}
-		if piShellSourceMatches(policy.Src, call, subject, groups, roles) {
+		if sourceMatches(policy.Src, call, subject, groups, roles) {
 			matching = append(matching, policy)
 		}
 	}
@@ -94,13 +94,16 @@ func (v *Verified) EvaluateV2PiShell(argv []string, agentID string, subject *Ses
 	return Decision{Outcome: "allow", PolicyID: winner.PolicyID, ReasonCode: "policy_permit"}
 }
 
-func piShellSourceMatches(pattern string, call harnessmatch.Call, subject *SessionSubject, groups, roles []string) bool {
-	if pattern == "harness:pi" || pattern == "harness:*" {
+func sourceMatches(pattern string, call harnessmatch.Call, subject *SessionSubject, groups, roles []string) bool {
+	if pattern == "harness:*" {
 		return true
 	}
 	if strings.HasPrefix(pattern, "harness:") {
-		return false
+		return strings.TrimPrefix(pattern, "harness:") == call.Kind
 	}
+	// Non-harness patterns route through srcMatch, which delegates agent: and
+	// org: matching to its own logic and routes everything else to
+	// pol.MatchPrincipal.
 	return srcMatch(pattern, Call{AgentID: call.AgentID, UserID: subject.UserID, Email: subject.Email}, groups, roles)
 }
 
@@ -136,7 +139,7 @@ func (v *Verified) EvaluateV2MCP(slug, tool, agentID, harnessKind string, subjec
 		if !renderable || !matched {
 			continue
 		}
-		if mcpSourceMatches(policy.Src, call, subject, groups, roles) {
+		if sourceMatches(policy.Src, call, subject, groups, roles) {
 			matching = append(matching, policy)
 		}
 	}
@@ -157,16 +160,6 @@ func (v *Verified) EvaluateV2MCP(slug, tool, agentID, harnessKind string, subjec
 		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}
 	}
 	return Decision{Outcome: "allow", PolicyID: winner.PolicyID, ReasonCode: "policy_permit"}
-}
-
-func mcpSourceMatches(pattern string, call harnessmatch.Call, subject *SessionSubject, groups, roles []string) bool {
-	if pattern == "harness:*" {
-		return true
-	}
-	if strings.HasPrefix(pattern, "harness:") {
-		return strings.TrimPrefix(pattern, "harness:") == call.Kind
-	}
-	return srcMatch(pattern, Call{AgentID: call.AgentID, UserID: subject.UserID, Email: subject.Email}, groups, roles)
 }
 
 func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID, reason string) {
