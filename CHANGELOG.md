@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- `collector` sends decision audit batches to the canonical
+  `/api/v1/runtime/audit:flush` route. Catalog skipped records count as
+  acknowledged; count mismatches fail the batch for retry (HAI-436).
+
 ### Removed: in-cluster relay credential modes (GW Phase 5, ADR-033)
 
 `ABAC_URL`, `ABAC_API_SECRET` and `OIDC_BRIDGE_SECRET` are no longer read; set
@@ -33,7 +39,9 @@ Behaviour changes:
 
 - `collector` requires `KEI_RUNTIME_TOKEN`. The non-runtime
   `POST /api/v1/audit/flush` + `X-KEI-API-Key` path is gone. Every flush goes to
-  `/api/v1/runtime/audit/flush` with the installation credential.
+  `/api/v1/runtime/audit:flush` with the installation credential. Decision
+  audit batches advance when the catalog's upserted and skipped counts add up
+  to the received count; skipped records are logged.
 - `authorize` no longer fetches OAuth tokens from the OIDC bridge relay
   (`OIDC_BRIDGE_URL` + `OIDC_BRIDGE_SECRET`). A registry service's credential
   comes only from its credential binding

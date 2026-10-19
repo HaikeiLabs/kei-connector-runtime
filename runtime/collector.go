@@ -39,7 +39,7 @@ type abacFlushClient struct {
 func NewABACFlushClientFromConfig(cfg CollectorConfig, timeout time.Duration) ABACFlushClient {
 	return &abacFlushClient{
 		baseURL: cfg.ControlPlaneURL(),
-		path:    "/api/v1/runtime/audit/flush",
+		path:    "/api/v1/runtime/audit:flush",
 		headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
 		client:  &http.Client{Timeout: timeout},
 	}
@@ -65,16 +65,31 @@ func (c *abacFlushClient) Flush(ctx context.Context, records []DecisionEvent) (i
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return 0, fmt.Errorf("flush returned status %d", resp.StatusCode)
 	}
 	var out struct {
-		Upserted int `json:"upserted"`
+		Upserted *int `json:"upserted"`
+		Received *int `json:"received"`
+		Skipped  *int `json:"skipped"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&out); err != nil {
 		return 0, fmt.Errorf("decode flush response: %w", err)
 	}
-	return out.Upserted, nil
+	if _, err := dec.Token(); err != io.EOF {
+		return 0, errors.New("decode flush response: trailing data")
+	}
+	if out.Upserted == nil || out.Received == nil || out.Skipped == nil {
+		return 0, errors.New("decode flush response: missing audit flush counts")
+	}
+	if *out.Upserted < 0 || *out.Skipped < 0 || *out.Received < 0 || *out.Upserted+*out.Skipped != *out.Received {
+		return 0, fmt.Errorf("flush counts mismatch: upserted=%d skipped=%d received=%d", *out.Upserted, *out.Skipped, *out.Received)
+	}
+	if *out.Skipped != 0 {
+		slog.Warn("audit collector skipped records acknowledged by catalog", "skipped", *out.Skipped)
+	}
+	return *out.Upserted, nil
 }
 
 type LifecycleFlushClient interface {

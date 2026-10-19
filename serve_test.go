@@ -240,7 +240,7 @@ func shortSocketTempDir(t *testing.T) string {
 func TestPiAuthorizeDecisionUsesDefaultSpoolAndShipsDigestOnly(t *testing.T) {
 	var shipped string
 	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runtime/audit/flush" {
+		if r.URL.Path != "/api/v1/runtime/audit:flush" {
 			t.Errorf("flush path = %q", r.URL.Path)
 		}
 		body, err := io.ReadAll(r.Body)
@@ -249,7 +249,7 @@ func TestPiAuthorizeDecisionUsesDefaultSpoolAndShipsDigestOnly(t *testing.T) {
 		}
 		shipped = string(body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"upserted":1}`)
+		_, _ = io.WriteString(w, `{"upserted":1,"received":1,"skipped":0}`)
 	}))
 	defer controlPlane.Close()
 
