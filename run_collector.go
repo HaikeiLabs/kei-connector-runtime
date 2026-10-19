@@ -16,9 +16,9 @@ import (
 func runCollector(args []string) int {
 	fs := flag.NewFlagSet("collector", flag.ContinueOnError)
 	jsonlPath := fs.String("jsonl", "", "audit JSONL file path (default $KEI_PROXY_AUDIT, else $KEI_RUNTIME_STATE_DIR/audit/harness-tool.jsonl)")
-	abacURL := fs.String("abac-url", "", "ABAC Engine URL (default $ABAC_URL)")
+	controlPlaneURL := fs.String("control-plane-url", "", "Kei control-plane URL (default $KEI_RUNTIME_CONTROL_PLANE_URL)")
 	batchSize := fs.Int("batch-size", 100, "records per flush batch")
-	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
+	timeout := fs.Int("timeout", 30, "control-plane request timeout in seconds")
 	poll := fs.Bool("poll", false, "poll for new records until terminated")
 	pollInterval := fs.Duration("poll-interval", time.Minute, "poll interval when --poll is enabled")
 
@@ -30,14 +30,15 @@ func runCollector(args []string) int {
 	if *jsonlPath == "" {
 		*jsonlPath = keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir)
 	}
-	if *abacURL != "" {
-		cfg.ABACURL = *abacURL
-		if cfg.IsRuntime() {
-			cfg.RuntimeControlPlaneURL = *abacURL
-		}
+	if *controlPlaneURL != "" {
+		cfg.RuntimeControlPlaneURL = *controlPlaneURL
 	}
 	if *jsonlPath == "" {
 		fmt.Fprintln(os.Stderr, "Error: --jsonl, KEI_PROXY_AUDIT, or KEI_RUNTIME_STATE_DIR is required")
+		return 1
+	}
+	if !cfg.IsRuntime() {
+		fmt.Fprintln(os.Stderr, "Error: invalid collector configuration: KEI_RUNTIME_TOKEN is required")
 		return 1
 	}
 	if err := cfg.Validate(); err != nil {

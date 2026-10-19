@@ -30,8 +30,8 @@ func TestServeDaemonOverUnixSocket(t *testing.T) {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 
-	// macOS limits socket paths to 104 bytes, which t.TempDir can exceed.
-	socketDir, err := os.MkdirTemp("/tmp", "h201-")
+	// Keep the socket path short enough for macOS's Unix socket limit.
+	socketDir, err := os.MkdirTemp(os.TempDir(), "h201-")
 	if err != nil {
 		t.Fatal(err)
 	}

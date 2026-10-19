@@ -38,14 +38,12 @@ func (c *identityClaimTestClient) SyncTools(context.Context, string, *ToolManife
 type testRuntimeConfig struct {
 	token           string
 	controlPlaneURL string
-	flushURL        string
 }
 
 func (c testRuntimeConfig) IsRuntime() bool         { return c.token != "" }
 func (c testRuntimeConfig) Validate() error         { return ValidateRuntimeTokenFormat(c.token) }
 func (c testRuntimeConfig) Token() string           { return c.token }
 func (c testRuntimeConfig) ControlPlaneURL() string { return c.controlPlaneURL }
-func (c testRuntimeConfig) FlushURL() string        { return c.flushURL }
 
 func TestIdentityLinkBeginWritesOnlyClaimJSONAndUsesRuntimeConfiguration(t *testing.T) {
 	const token = "kh_live_runtime_test_token_1234567890"

@@ -91,8 +91,8 @@ Rules:
   (HAI-219).
 - The runtime holds a resolved credential only for the duration of one call.
   It is never written to stdout, logs, audit, the spool, or a cache. The
-  runtime does not call the bridge on this path, so the existing 5-minute
-  token cache in `oidc_bridge.go` is not involved.
+  runtime never calls the bridge (its legacy secret relay was
+  removed in GW Phase 5) and has no token cache.
 
 ### CLI surface (layer 2)
 
@@ -209,7 +209,7 @@ Used by: `gmail`, `google_drive`, `linear`, `github` (per-user and shared
 account models).
 
 **Decision D2: the catalog proxies the token.** The runtime never calls the
-bridge and never holds `OIDC_BRIDGE_SECRET` (ADR-020).
+bridge and never holds the bridge credential (ADR-020).
 
 1. The catalog finishes the whole decision first: structure, agent binding,
    ABAC policy, then `setup.ValidateMetadata` over the
@@ -228,9 +228,9 @@ bridge and never holds `OIDC_BRIDGE_SECRET` (ADR-020).
      bridge. Agent ids and email-address subjects never fetch a token.
    - **shared:** `user_id = subject = connector:<connector_id>`.
    - **legacy oauth** (no account model): the connector's declared subject.
-4. The catalog calls the existing bridge relay server to server, with the
-   bridge secret (`OIDC_BRIDGE_SECRET`), which stays in the control plane:
-   `GET {OIDC_BRIDGE_URL}/oauth/credentials/{user_id}/{provider}?tenant_id=…&workspace_id=…&subject=…`.
+4. The catalog calls the existing bridge relay server to server, with its
+   configured bridge credential, which stays in the control plane:
+   `GET {bridge_url}/oauth/credentials/{user_id}/{provider}?tenant_id=…&workspace_id=…&subject=…`.
    The bridge checks the binding (403 on mismatch) and refreshes an expired
    token.
 5. **The catalog checks the bridge's answer too.** It rejects a relay
@@ -280,8 +280,8 @@ Requirements (layer 3 and layer 2 each test them):
 - **Bridge failures become catalog denies** (section 7): bridge 404 →
   `oauth_not_connected`; 409 → `oauth_reconnect_required`; 403, or an echoed
   binding that doesn't match → `oauth_binding_mismatch`; unreachable, 5xx,
-  401, a malformed relay response, or a catalog without `OIDC_BRIDGE_URL`/
-  `OIDC_BRIDGE_SECRET` → `oauth_bridge_unavailable`. None of them falls back
+  401, a malformed relay response, or a catalog without bridge configuration
+  → `oauth_bridge_unavailable`. None of them falls back
   to another credential.
 
 ADR-011 note: the OAuth access token moves bridge → catalog → runtime **in
@@ -932,9 +932,9 @@ no token. The runtime treats every decision other than `allow` as a deny and
 passes `reason_code` and `enrollment` through. The reason codes are in section
 7.
 
-**Catalog configuration:** `OIDC_BRIDGE_URL` and `OIDC_BRIDGE_SECRET` (the
-`kei` Helm chart must supply both). With either unset, every OAuth invoke
-denies `oauth_bridge_unavailable`.
+**Catalog configuration:** the `kei` deployment must supply the bridge URL
+and credential. With either unset, every OAuth invoke denies
+`oauth_bridge_unavailable`.
 
 **Known gap: `config` is not sent yet.** `abac.data_connectors` has no `config`
 column, so the descriptor never carries `Metadata.Config`. Connectors that

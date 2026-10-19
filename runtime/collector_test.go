@@ -615,15 +615,11 @@ type fakeCollectorConfig struct {
 	isRuntime    bool
 	token        string
 	controlPlane string
-	flushURL     string
-	flushSecret  string
 }
 
 func (f fakeCollectorConfig) IsRuntime() bool         { return f.isRuntime }
 func (f fakeCollectorConfig) Token() string           { return f.token }
 func (f fakeCollectorConfig) ControlPlaneURL() string { return f.controlPlane }
-func (f fakeCollectorConfig) FlushURL() string        { return f.flushURL }
-func (f fakeCollectorConfig) FlushSecret() string     { return f.flushSecret }
 
 // TestHarnessToolFlushSendsOnlyFourFields pins the payload boundary: the
 // client forwards exactly {tool, skill?, harness_kind, observed_at} and never

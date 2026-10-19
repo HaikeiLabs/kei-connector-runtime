@@ -31,8 +31,6 @@ func runConnector(args []string) int {
 		env := invoke.Env{
 			RuntimeToken:           cfg.RuntimeToken,
 			RuntimeControlPlaneURL: cfg.RuntimeControlPlaneURL,
-			ABACURL:                cfg.ABACURL,
-			ABACSecret:             cfg.ABACSecret,
 			ProviderUserID:         cfg.ProviderUserID,
 			Stdin:                  os.Stdin,
 			Store:                  connectorSecretStore(),

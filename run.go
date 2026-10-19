@@ -70,11 +70,6 @@ func Main(buildVersion string, args []string) int {
 		code = keiruntime.RunCredential(args[1:], configFromEnv())
 	} else if args[0] == "run" {
 		code = runProxyRun(args[1:])
-	} else if args[0] == "org" {
-		code = keiruntime.RunOrg(args[1:], os.Stdout, os.Stderr, configFromEnv())
-	} else if args[0] == "init" {
-		cfg := configFromEnv()
-		code = keiruntime.RunInit(args[1:], os.Stdout, os.Stderr, cfg.ABACURL, cfg.ABACSecret, cfg.IsProduction())
 	} else if args[0] == "identity" {
 		code = keiruntime.RunIdentity(args[1:], os.Stdout, os.Stderr, configFromEnv(), NewRuntimeClient)
 	} else if args[0] == "runtime" {
@@ -126,8 +121,8 @@ func runProxyRun(args []string) int {
 	}
 	auditProv := auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken)
 	return runcommand.Run(args, os.Stdout, os.Stderr, runcommand.Config{
-		DaemonSocket: daemonSocket,
-		ABACURL:      cfg.ABACURL, ABACSecret: cfg.ABACSecret, RuntimeToken: cfg.RuntimeToken,
+		DaemonSocket:    daemonSocket,
+		RuntimeToken:    cfg.RuntimeToken,
 		RuntimeStateDir: cfg.RuntimeStateDir, ProviderUserID: cfg.ProviderUserID,
 		ControlPlaneURL: cfg.RuntimeControlPlaneURL, SocketPath: socketPath,
 		AuditCrypto: auditProv,
@@ -194,13 +189,11 @@ Usage:
 Commands:
   authorize    authorize a tool call and serve its credential (stdout JSON, exit codes)
   connector    invoke a governed data connector through the control plane
-  collector    ship pending audit JSONL records to ABAC (idempotent, resumable)
+  collector    ship pending audit JSONL records to the control plane (idempotent, resumable)
   credential   manage credential sync (see: kei-proxy credential --help)
   hook         report-only harness tool-use hook (see: kei-proxy hook --help)
   run          run a child process with governed connector credentials
   model        model profile and invocation commands (see: kei-proxy model --help)
-  org          manage organization members (list, add, remove, update)
-  init         provision a member and/or agent via canonical ABAC initialization
   runtime      report and maintain a customer runtime installation heartbeat
   harness      discover tools from all installed harness kinds and sync metadata
   identity link        start a platform identity claim for the current runtime
@@ -211,7 +204,6 @@ Commands:
   help         show this help
 
 Environment:
-  ABAC_URL                  ABAC Engine URL (default http://localhost:8080)
   KEI_RUNTIME_CONTROL_PLANE_URL public Kei gateway URL for a customer-hosted runtime
   KEI_RUNTIME_TOKEN          installation credential from the customer secret manager
   KEI_CREDENTIAL_STORE_INSTALLATION_ID credential store to register for sync
@@ -242,8 +234,6 @@ Environment:
 Examples:
   kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets
   kei-proxy connector invoke --connector conn-1 --capability lead.read --action read --resource leads/42 --trace-id t-1
-  kei-proxy init --member --user U1234ABCD --org 9f2c...
-  kei-proxy init --agent --org 9f2c... --name researcher --tools search_wiki,search_web --scopes wiki:read
   kei-proxy runtime bootstrap
 	kei-proxy identity link --platform discord --platform-user-id 123456789
   kei-proxy identity status --platform-user-id 123456789 --tenant-id guild-id

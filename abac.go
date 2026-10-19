@@ -8,11 +8,7 @@ type (
 	AuthorizeOutput      = keiruntime.AuthorizeOutput
 	CredentialResponse   = keiruntime.CredentialResponse
 	CredentialDescriptor = keiruntime.CredentialDescriptor
-	OAuthTokenResponse   = keiruntime.OAuthTokenResponse
 )
 
 // Error sentinel aliases.
-var (
-	ErrEnrollmentRequired        = keiruntime.ErrEnrollmentRequired
-	errCredentialBindingNotFound = keiruntime.ErrCredentialBindingNotFound
-)
+var errCredentialBindingNotFound = keiruntime.ErrCredentialBindingNotFound

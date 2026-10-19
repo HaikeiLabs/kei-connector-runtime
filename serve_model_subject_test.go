@@ -65,8 +65,8 @@ func TestModelSubjectRequestShapePerSessionSource(t *testing.T) {
 	}
 }
 
-// modelSubjectFixture serves an openwebui installation whose catalog answers
-// subject resolution with resolve, recording each request it receives.
+// modelSubjectFixture serves an openwebui installation whose control plane
+// answers subject resolution with resolve, recording each request it receives.
 func modelSubjectFixture(t *testing.T, resolve func(w http.ResponseWriter, req keiruntime.SubjectResolveRequest)) (http.Handler, *[]keiruntime.SubjectResolveRequest, *int) {
 	t.Helper()
 	const runtimeToken = "kh_live_runtime_test_token_1234567890"
@@ -75,22 +75,6 @@ func modelSubjectFixture(t *testing.T, resolve func(w http.ResponseWriter, req k
 	workspace := "ws-fixture-0001"
 
 	var requests []keiruntime.SubjectResolveRequest
-	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/runtime/subject-attributes:resolve" {
-			t.Errorf("unexpected catalog request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		var req keiruntime.SubjectResolveRequest
-		if err := dec.Decode(&req); err != nil {
-			t.Errorf("decode subject resolve request: %v", err)
-		}
-		requests = append(requests, req)
-		resolve(w, req)
-	}))
-	t.Cleanup(catalog.Close)
 	var providerCalls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { providerCalls++ }))
 	t.Cleanup(provider.Close)
@@ -109,6 +93,15 @@ func modelSubjectFixture(t *testing.T, resolve func(w http.ResponseWriter, req k
 				"display_name": "Test model", "endpoint": provider.URL,
 				"default_model": "m1", "auth_type": "none", "status": "active",
 			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runtime/subject-attributes:resolve":
+			dec := json.NewDecoder(r.Body)
+			dec.DisallowUnknownFields()
+			var req keiruntime.SubjectResolveRequest
+			if err := dec.Decode(&req); err != nil {
+				t.Errorf("decode subject resolve request: %v", err)
+			}
+			requests = append(requests, req)
+			resolve(w, req)
 		default:
 			t.Errorf("unexpected control plane request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -124,7 +117,6 @@ func modelSubjectFixture(t *testing.T, resolve func(w http.ResponseWriter, req k
 	}
 	handler := newRuntimeHTTPHandler(Config{
 		RuntimeControlPlaneURL: controlPlane.URL,
-		ABACURL:                catalog.URL,
 		RuntimeToken:           runtimeToken,
 		RuntimeStateDir:        stateDir,
 	}, sessions)

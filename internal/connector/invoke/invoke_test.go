@@ -122,7 +122,6 @@ func TestParseConnectorInvokeArgsRuntimeRelayUsesControlPlaneURL(t *testing.T) {
 		"--capability", "lead.read",
 		"--action", "read",
 		"--resource", "leads/42",
-		"--abac-url", "http://override:9000",
 	}, testEnv())
 	if err != nil {
 		t.Fatalf("runtime parse: %v", err)
@@ -130,12 +129,24 @@ func TestParseConnectorInvokeArgsRuntimeRelayUsesControlPlaneURL(t *testing.T) {
 	if plan.req.HarnessToken != "kh_live_runtime_token_1234567890" {
 		t.Fatalf("harness_token = %q, want the runtime token", plan.req.HarnessToken)
 	}
-	// Runtime mode always uses the control-plane URL, not an --abac-url override.
-	if plan.abacURL != "https://control.example.test" {
-		t.Fatalf("runtime abac_url = %q, want the control-plane URL", plan.abacURL)
+	if plan.controlPlaneURL != "https://control.example.test" {
+		t.Fatalf("control-plane URL = %q, want KEI_RUNTIME_CONTROL_PLANE_URL", plan.controlPlaneURL)
 	}
-	if plan.abacSecret != "" {
-		t.Fatalf("runtime must never receive ABAC_API_SECRET, got %q", plan.abacSecret)
+}
+
+func TestParseConnectorInvokeArgsRejectsRemovedABACURLFlag(t *testing.T) {
+	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_token_1234567890")
+	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", "https://control.example.test")
+
+	_, err := parseConnectorInvokeArgs([]string{
+		"--connector", "conn-1",
+		"--capability", "lead.read",
+		"--action", "read",
+		"--resource", "leads/42",
+		"--abac" + "-url", "http://override:9000",
+	}, testEnv())
+	if err == nil {
+		t.Fatal("legacy collector URL flag must be rejected")
 	}
 }
 
@@ -161,7 +172,7 @@ func TestInvokeConnectorPropagatesRequestAndCredential(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "proxy-secret", 5*time.Second)
+	client := NewClient(server.URL, 5*time.Second)
 	resp, err := client.Invoke(context.Background(), Request{
 		HarnessToken:   "kh_live_harness_token_1234567890",
 		ConnectorID:    "conn-1",
@@ -177,8 +188,8 @@ func TestInvokeConnectorPropagatesRequestAndCredential(t *testing.T) {
 	if resp.Decision != "allow" {
 		t.Fatalf("decision = %q", resp.Decision)
 	}
-	if gotKey != "proxy-secret" {
-		t.Fatalf("X-KEI-API-Key = %q, want proxy-secret", gotKey)
+	if gotKey != "" {
+		t.Fatalf("X-KEI-API-Key = %q, want none", gotKey)
 	}
 }
 
@@ -197,7 +208,7 @@ func TestInvokeConnectorSetsAuthorizationBearer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "", 5*time.Second).WithBearerToken("kh_live_runtime_test_token_1234567890")
+	client := NewClient(server.URL, 5*time.Second).WithBearerToken("kh_live_runtime_test_token_1234567890")
 	resp, err := client.Invoke(context.Background(), Request{
 		HarnessToken: "kh_live_runtime_test_token_1234567890",
 		ConnectorID:  "conn-1",
@@ -228,7 +239,7 @@ func TestInvokeConnectorFailsClosedOnRejectedCredentials(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient(server.URL, "wrong-secret", 5*time.Second)
+			client := NewClient(server.URL, 5*time.Second)
 			resp, err := client.Invoke(context.Background(), Request{ConnectorID: "conn-1"})
 			if err == nil {
 				t.Fatalf("expected error on %d, got %+v", status, resp)
@@ -251,7 +262,7 @@ func TestInvokeConnectorFailsClosedOnServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "secret", 5*time.Second)
+	client := NewClient(server.URL, 5*time.Second)
 	resp, err := client.Invoke(context.Background(), Request{ConnectorID: "conn-1"})
 	if err == nil {
 		t.Fatalf("expected error on 500, got %+v", resp)
@@ -267,8 +278,6 @@ func testEnv() Env {
 	return Env{
 		RuntimeToken:           os.Getenv("KEI_RUNTIME_TOKEN"),
 		RuntimeControlPlaneURL: os.Getenv("KEI_RUNTIME_CONTROL_PLANE_URL"),
-		ABACURL:                envOr("ABAC_URL", "http://localhost:8080"),
-		ABACSecret:             strings.TrimSpace(os.Getenv("ABAC_API_SECRET")),
 	}
 }
 
