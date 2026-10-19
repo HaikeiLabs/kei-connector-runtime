@@ -110,10 +110,6 @@ func runAuthorize(args []string) int {
 	if identity.Status != "active" || identity.BindingStatus != "verified" {
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "installation_revoked", errors.New("runtime installation is inactive or unverified"))
 	}
-	var oidcBridge keiruntime.OIDCTokenProvider
-	if !cfg.IsRuntime() || os.Getenv("OIDC_BRIDGE_URL") != "" {
-		oidcBridge = keiruntime.NewOIDCBridgeClient(cfg.OIDCBridgeURL, cfg.OIDCBridgeSecret, time.Duration(*timeout)*time.Second)
-	}
 	var credentialBinding keiruntime.CredentialResolver
 	var secretStore keiruntime.SecretGetter
 	if cfg.IsRuntime() {
@@ -167,7 +163,7 @@ func runAuthorize(args []string) int {
 	// Identity is only for credentials: resolve the subject lazily, only when
 	// the tool or a reached policy needs it.
 	if (*user != "" || subjectProviderID != "") && keiruntime.AuthorizeNeedsSubject(activeBundle, reg, *tool, *action, *resource, *agentID) {
-		control := keiruntime.NewPolicyControlClient(cfg.SubjectResolutionURL(), cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
+		control := keiruntime.NewPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
 		req := keiruntime.SubjectResolveRequest{}
 		if *user != "" {
 			req.UserID = *user
@@ -197,7 +193,6 @@ func runAuthorize(args []string) int {
 		Harness:           cfg.RuntimeToken,
 		CredentialBinding: credentialBinding,
 		SecretStore:       secretStore,
-		OIDCBridge:        oidcBridge,
 		AuditPath:         cfg.AuditPath,
 		AuditMaxBytes:     cfg.AuditMaxBytes,
 		Registry:          reg,

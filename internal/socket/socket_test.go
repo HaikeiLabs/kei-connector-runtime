@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-// shortTempDir returns a directory under /tmp: macOS limits socket paths to
-// 104 bytes, which t.TempDir can exceed.
+// shortTempDir returns a temporary directory; macOS limits socket paths to
+// 104 bytes, so tests set TMPDIR to a short temporary root.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "h201-")
+	dir, err := os.MkdirTemp(os.TempDir(), "h-")
 	if err != nil {
 		t.Fatal(err)
 	}

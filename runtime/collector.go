@@ -34,36 +34,15 @@ type abacFlushClient struct {
 	client  *http.Client
 }
 
-func NewABACFlushClient(baseURL string, timeout time.Duration) ABACFlushClient {
-	return &abacFlushClient{
-		baseURL: baseURL,
-		path:    "/api/v1/audit/flush",
-		client:  &http.Client{Timeout: timeout},
-	}
-}
-
+// NewABACFlushClientFromConfig flushes decision audit to the runtime control
+// plane, authenticated with the installation token.
 func NewABACFlushClientFromConfig(cfg CollectorConfig, timeout time.Duration) ABACFlushClient {
-	if cfg.IsRuntime() {
-		base := cfg.ControlPlaneURL()
-		if base == "" {
-			base = cfg.FlushURL()
-		}
-		return &abacFlushClient{
-			baseURL: base,
-			path:    "/api/v1/runtime/audit/flush",
-			headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
-			client:  &http.Client{Timeout: timeout},
-		}
-	}
-	client := &abacFlushClient{
-		baseURL: cfg.FlushURL(),
-		path:    "/api/v1/audit/flush",
+	return &abacFlushClient{
+		baseURL: cfg.ControlPlaneURL(),
+		path:    "/api/v1/runtime/audit/flush",
+		headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
 		client:  &http.Client{Timeout: timeout},
 	}
-	if cfg.FlushSecret() != "" {
-		client.headers = map[string]string{"X-KEI-API-Key": cfg.FlushSecret()}
-	}
-	return client
 }
 
 func (c *abacFlushClient) Flush(ctx context.Context, records []DecisionEvent) (int, error) {
@@ -298,12 +277,8 @@ func NewLifecycleFlushClientFromConfig(cfg CollectorConfig, timeout time.Duratio
 	if cfg.Token() == "" {
 		return nil
 	}
-	base := cfg.ControlPlaneURL()
-	if base == "" {
-		base = cfg.FlushURL()
-	}
 	return &lifecycleFlushClient{
-		baseURL: base,
+		baseURL: cfg.ControlPlaneURL(),
 		path:    "/api/v1/runtime/audit/lifecycle:flush",
 		headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
 		client:  &http.Client{Timeout: timeout},
@@ -424,12 +399,8 @@ func NewHarnessToolFlushClientFromConfig(cfg CollectorConfig, timeout time.Durat
 	if cfg.Token() == "" {
 		return nil
 	}
-	base := cfg.ControlPlaneURL()
-	if base == "" {
-		base = cfg.FlushURL()
-	}
 	return &harnessToolFlushClient{
-		baseURL: base,
+		baseURL: cfg.ControlPlaneURL(),
 		path:    "/api/v1/runtime/harness-tool-events:batchCreate",
 		headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
 		client:  &http.Client{Timeout: timeout},

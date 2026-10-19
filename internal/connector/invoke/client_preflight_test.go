@@ -12,11 +12,11 @@ import (
 )
 
 func TestDaemonClientCarriesPreflightHandleToInvokePEP(t *testing.T) {
-	socketDir, err := os.MkdirTemp("/tmp", "kp-")
+	socketDir, err := os.MkdirTemp(os.TempDir(), "p-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(socketDir)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 	socketPath := filepath.Join(socketDir, "runtime.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {

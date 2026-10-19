@@ -39,26 +39,17 @@ func runModelInvoke(args []string) int {
 		invokeReq.RequestID = uuid.New().String()
 	}
 
-	identity, err := resolveOrgAgentFromHarness(cfg.RuntimeToken)
+	// The installation's default agent assignment picks the profile; the
+	// control plane scopes it to the runtime token's workspace.
+	client := NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	profile, err := client.GetRuntimeAssignedModelProfile(ctx)
 	if err != nil {
-		sendError("failed to resolve organization: " + err.Error())
+		sendError("failed to resolve model profile: " + err.Error())
 		return 1
 	}
-	if identity.ModelProfileID == "" {
-		sendError("no model configured for your organization. Contact your admin.")
-		return 2
-	}
-	slog.Info("model_profile_selected", "org_id", identity.OrgID, "agent_id", identity.AgentID, "profile_id", identity.ModelProfileID, "source", "harness_identity")
-
-	profile, err := getModelProfile(identity.OrgID, identity.ModelProfileID)
-	if err != nil {
-		sendError(err.Error())
-		return 1
-	}
-	if profile == nil {
-		sendError("no model configured for your organization. Contact your admin.")
-		return 2
-	}
+	slog.Info("model_profile_selected", "org_id", profile.OrgID, "agent_id", profile.AgentID, "profile_id", profile.ProfileID, "source", "runtime_assignment")
 
 	if profile.Status != "active" {
 		sendError("the configured model is currently unavailable. Contact your admin.")
@@ -72,39 +63,6 @@ func runModelInvoke(args []string) int {
 	}
 
 	return 0
-}
-
-func resolveOrgAgentFromHarness(harnessKey string) (*keiruntime.HarnessIdentity, error) {
-	cfg := configFromEnv()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return keiruntime.ResolveHarnessIdentity(ctx, cfg.ABACURL, cfg.ABACSecret, harnessKey)
-}
-
-func getModelProfile(orgID, profileID string) (*ModelProfile, error) {
-	cfg := configFromEnv()
-
-	if cfg.IsRuntime() {
-		return getModelProfileFromControlPlane(cfg, orgID, profileID)
-	}
-
-	return nil, fmt.Errorf("runtime model profile access requires KEI_RUNTIME_TOKEN")
-}
-
-func getModelProfileFromControlPlane(cfg Config, orgID, profileID string) (*ModelProfile, error) {
-	client := NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	profile, err := client.GetRuntimeModelProfile(ctx, profileID)
-	if err != nil {
-		return nil, fmt.Errorf("control plane unavailable: %v", err)
-	}
-	if profile == nil {
-		return nil, nil
-	}
-
-	return profile, nil
 }
 
 func sendError(message string) {

@@ -134,12 +134,8 @@ func NewHarnessAuditFlushClientFromConfig(cfg CollectorConfig, timeout time.Dura
 	if cfg.Token() == "" {
 		return nil
 	}
-	base := cfg.ControlPlaneURL()
-	if base == "" {
-		base = cfg.FlushURL()
-	}
 	return &harnessAuditFlushClient{
-		baseURL: base,
+		baseURL: cfg.ControlPlaneURL(),
 		path:    "/api/v1/runtime/audit:flush",
 		headers: map[string]string{"Authorization": "Bearer " + cfg.Token()},
 		client:  &http.Client{Timeout: timeout},

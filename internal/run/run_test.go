@@ -153,7 +153,8 @@ func TestRunInjectsChildOnlyMasksAndAuditsWithoutCredential(t *testing.T) {
 func TestRunFailsClosedAndPrintsConnectURLOnlyToStderr(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	called := false
-	code := runCommand([]string{"--", "/bin/sh", "-c", "touch /tmp/kei-proxy-run-should-not-execute"}, &stdout, &stderr, Config{}, []string{"API_TOKEN=kei://connectors/connector-1/api_token"}, testRunResolver{link: "https://console.example/connect/connector-1", err: errors.New("missing")}, func(string, []string, []string) int { called = true; return 0 })
+	marker := filepath.Join(t.TempDir(), "should-not-execute")
+	code := runCommand([]string{"--", "/bin/sh", "-c", "touch " + marker}, &stdout, &stderr, Config{}, []string{"API_TOKEN=kei://connectors/connector-1/api_token"}, testRunResolver{link: "https://console.example/connect/connector-1", err: errors.New("missing")}, func(string, []string, []string) int { called = true; return 0 })
 	if code == 0 || called {
 		t.Fatalf("missing credential did not fail closed: exit=%d called=%v", code, called)
 	}

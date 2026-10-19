@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -70,9 +69,12 @@ func TestSocketSubjectSourceReturnsEmptyOnDaemonUnreachable(t *testing.T) {
 // testSocketPath returns a short Unix socket path for testing.
 func testSocketPath(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join("/tmp", fmt.Sprintf("kei-session-test-%d.sock", os.Getpid()))
-	t.Cleanup(func() { os.Remove(path) })
-	return path
+	dir, err := os.MkdirTemp(os.TempDir(), "s-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
 }
 
 // launchSessionSocket starts an HTTP server on a Unix socket at the given path.

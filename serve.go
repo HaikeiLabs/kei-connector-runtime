@@ -804,7 +804,7 @@ func (h *runtimeHTTPHandler) authorizeModel(ctx context.Context, profile *ModelP
 	}
 	var attrs *policybundle.Subject
 	if req, ok := modelSubjectRequest(invokingSubject, h.cfg.ProviderUserID, os.Getenv("KEI_PROXY_PLATFORM_TENANT_ID")); ok {
-		client := keiruntime.NewPolicyControlClient(h.cfg.SubjectResolutionURL(), h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
+		client := keiruntime.NewPolicyControlClient(h.cfg.RuntimeControlPlaneURL, h.cfg.RuntimeToken, 10*time.Second, !h.cfg.IsProduction())
 		resolved, e := client.ResolveSubject(ctx, req)
 		if errors.Is(e, ErrPolicyInstallationRevoked) {
 			_ = store.Revoke(time.Now().UTC())
