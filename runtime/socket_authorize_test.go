@@ -14,9 +14,12 @@ import (
 	"time"
 
 	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // fakeKeychain implements keiruntime.SessionKeychain for testing.
@@ -999,5 +1002,330 @@ func TestSocketAuthorizeDeniesBeforeIdentityResolves(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK || out.Decision != "deny" || out.ReasonCode != "policy_bundle_missing" || out.DenySource != "runtime_state" || out.BundleState != "cold" {
 		t.Fatalf("status %d response %+v", rec.Code, out)
+	}
+}
+
+// TestAuthorizeSubjectIsSessionUser verifies that every authorize decision
+// uses the session (signed-in) user as the subject, never the agent_id from
+// the request. HAI-603 invariant.
+func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
+	now := time.Now().UTC()
+	raw, err := os.ReadFile(filepath.Join("..", "internal", "policybundle", "testdata", "catalog-v2-bundle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle map[string]any
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	bundle["issued_at"] = now.Format(time.RFC3339Nano)
+	bundle["not_after"] = now.Add(12 * time.Hour).Format(time.RFC3339Nano)
+	audience := bundle["audience"].(map[string]any)
+	audience["installation_id"], audience["org_id"], audience["workspace_id"] = "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001"
+	identities := bundle["identities"].([]any)
+	identity := identities[0].(map[string]any)
+	identity["source"], identity["external_id"] = "discord", "ext-alice"
+	identity["user_id"] = "user-alice"
+	set := bundle["policy_set"].(map[string]any)
+	set["org_id"], set["workspace_id"] = "org-fixture-0001", "ws-fixture-0001"
+	raw, err = json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	activateBundle(t, dir, raw)
+
+	var auditEvent json.RawMessage
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
+	}, func(event json.RawMessage) { auditEvent = append(json.RawMessage(nil), event...) })
+	l.SetIdentity(&keiruntime.Identity{
+		ID: "inst-fixture-0001", OrgID: "org-fixture-0001",
+		WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "trusted-default",
+	})
+	h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+
+	// Start a session as user-alice.
+	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`)
+	if putRec.Code != http.StatusNoContent {
+		t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
+	}
+
+	// Send an authorize request with a DIFFERENT agent_id. The subject
+	// must still resolve to the session user, not the request's agent_id.
+	body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"attacker-agent"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+
+	var response struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the audit event: InvokingSubject must be the session user,
+	// never the attacker-supplied agent_id.
+	var audit struct {
+		InvokingSubject string `json:"invoking_subject"`
+		AgentID         string `json:"agent_id"`
+	}
+	if err := json.Unmarshal(auditEvent, &audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.InvokingSubject != "user-alice" {
+		t.Fatalf("InvokingSubject=%q, want %q (session user, not request agent_id)", audit.InvokingSubject, "user-alice")
+	}
+	if audit.AgentID != "attacker-agent" {
+		t.Fatalf("AgentID=%q, want %q (request agent_id passed through for policy matching)", audit.AgentID, "attacker-agent")
+	}
+}
+
+// subjectTestAgent is the one installation agent every HAI-603 path decides
+// for. The two sessions below differ only in their signed-in user.
+const subjectTestAgent = "agent-fixture-0001"
+
+// subjectSessionIdentities are the two bundle identities: user-alice is in
+// group members (permitted tool:x), user-bob is not.
+func subjectSessionIdentities() []any {
+	return []any{
+		map[string]any{"source": "discord", "external_id": "ext-alice", "user_id": "user-alice", "status": "linked", "groups": []string{"members"}},
+		map[string]any{"source": "discord", "external_id": "ext-bob", "user_id": "user-bob", "status": "linked", "groups": []string{}},
+	}
+}
+
+// subjectV2Bundle registers one harness-executed tool (permitted to group
+// members) and one MCP tool (permitted to group members) for the one agent.
+func subjectV2Bundle(t *testing.T) []byte {
+	t.Helper()
+	now := time.Now().UTC()
+	scope := map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": subjectTestAgent}
+	raw, err := json.Marshal(map[string]any{
+		"schema": "kei.policy-bundle/v2", "bundle_id": "bundle-v2-subject", "bundle_version": 43, "policy_revision": 8, "issuer": policybundle.Issuer,
+		"audience":  map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"},
+		"issued_at": now.Format(time.RFC3339Nano), "not_after": now.Add(12 * time.Hour).Format(time.RFC3339Nano),
+		"refresh": map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300}, "subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 60},
+		"policy_set": map[string]any{
+			"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2",
+			"evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
+			"tools": []any{map[string]any{
+				"name": "discord.web_search", "source": "discord", "operation_class": "read",
+				"route": map[string]any{"harness_executor": map[string]any{"executor": "discord", "registration": "web_search"}},
+			}},
+			"checks": []any{},
+			"tool_policies": []any{map[string]any{
+				"policy_id": "p-harness-members", "name": "members web search", "effect": "permit", "priority": 10,
+				"scope": scope, "selector": map[string]any{"source_principal": "group:members", "source": "discord", "tool": "discord.web_search"},
+			}},
+			"harness_match_semantics": "kei.harness-match/v1",
+			"harness_policies": []any{map[string]any{
+				"policy_id": "p-mcp-members", "name": "members slack", "src_pattern": "group:members", "dst_pattern": "mcp:slack.list_channels", "action": "permit", "priority": 10, "scope": scope,
+			}},
+		},
+		"agent_connector_bindings": []any{},
+		"identities":               subjectSessionIdentities(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// subjectV1ConnectorBundle registers one connector capability, permitted to
+// group members for the one agent. ConnectorGrant's legacy connector decision
+// is evaluated by the v1 policy walk.
+func subjectV1ConnectorBundle(t *testing.T) []byte {
+	t.Helper()
+	now := time.Now().UTC()
+	raw, err := json.Marshal(map[string]any{
+		"schema": "kei.policy-bundle/v1", "bundle_id": "bundle-v1-subject", "bundle_version": 44, "policy_revision": 9, "issuer": "kei-policy-catalog",
+		"audience":  map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"},
+		"issued_at": now.Format(time.RFC3339), "not_after": now.Add(12 * time.Hour).Format(time.RFC3339),
+		"refresh": map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300}, "subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 0},
+		"policy_set": map[string]any{
+			"schema": "kei.policy-set/v1", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v1",
+			"evaluation": map[string]any{"order": "array_order_first_match", "default": "deny"},
+			"groups":     []any{},
+			"tools": []any{map[string]any{
+				"name": "demo.read", "service": "demo", "action": "tool:demo.read", "connector_id": "conn-fixture-0001", "capability": "repository.read",
+			}},
+			"connectors": []any{map[string]any{
+				"id": "conn-fixture-0001", "provider": "demo", "capabilities": []any{map[string]any{"name": "repository.read", "mutating": false}},
+			}},
+			"agents": []any{map[string]any{"id": subjectTestAgent, "is_default": true}},
+			"policies": []any{map[string]any{
+				"id": "p-conn-members", "name": "members read", "src_pattern": "group:members", "dst_pattern": "capability:repository.read",
+				"action": "permit", "priority": 50, "enabled": true, "approval_required": false,
+				"scope": map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": subjectTestAgent},
+			}},
+		},
+		"agent_connector_bindings": []any{map[string]any{"agent_id": subjectTestAgent, "connector_id": "conn-fixture-0001", "capabilities": []string{"repository.read"}}},
+		"identities":               subjectSessionIdentities(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// subjectPathDecision is one authorize path's answer for one session.
+type subjectPathDecision struct {
+	allow   bool
+	subject string
+}
+
+// TestAuthorizePathsDecideForSessionUserNotAgent is the HAI-603 regression
+// table: one agent, two named sessions. user-alice is permitted by a group
+// policy, user-bob is not. Every path must permit alice and deny bob for the
+// same agent and tool, which only holds while the subject is the session user.
+func TestAuthorizePathsDecideForSessionUserNotAgent(t *testing.T) {
+	policybundle.SetV2SchemaValidator(subjectV2SchemaValidator(t))
+	t.Cleanup(func() { policybundle.SetV2SchemaValidator(nil) })
+
+	paths := []struct {
+		name   string
+		bundle func(*testing.T) []byte
+		decide func(*testing.T, *keiruntime.LocalPDP, http.Handler, string) subjectPathDecision
+	}{
+		{"authorize v2 harness tool", subjectV2Bundle, decideViaAuthorizeHarnessTool},
+		{"mcp route tools/call", subjectV2Bundle, decideViaMCPTool},
+		{"connector grant", subjectV1ConnectorBundle, decideViaConnectorGrant},
+	}
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			l, h := subjectRuntime(t, path.bundle(t))
+			alice := startSubjectSession(t, h, "ext-alice")
+			bob := startSubjectSession(t, h, "ext-bob")
+
+			gotAlice := path.decide(t, l, h, alice)
+			gotBob := path.decide(t, l, h, bob)
+			if !gotAlice.allow {
+				t.Fatalf("user-alice (group members) denied on %s", path.name)
+			}
+			if gotBob.allow {
+				t.Fatalf("user-bob (no group) allowed on %s: the decision used the agent, not the session user", path.name)
+			}
+			if gotAlice.subject != "" && gotAlice.subject != "user-alice" {
+				t.Fatalf("alice decision subject = %q", gotAlice.subject)
+			}
+			if gotBob.subject != "" && gotBob.subject != "user-bob" {
+				t.Fatalf("bob decision subject = %q", gotBob.subject)
+			}
+		})
+	}
+}
+
+func decideViaAuthorizeHarnessTool(t *testing.T, _ *keiruntime.LocalPDP, h http.Handler, sessionID string) subjectPathDecision {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"discord.web_search","framework":"discord"}`))
+	session.SetHeader(req, sessionID)
+	h.ServeHTTP(rec, req)
+	var response struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authorize status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	return subjectPathDecision{allow: response.Decision == "permit"}
+}
+
+func decideViaMCPTool(t *testing.T, l *keiruntime.LocalPDP, _ http.Handler, sessionID string) subjectPathDecision {
+	t.Helper()
+	d, err := l.AuthorizeMCPTool(context.Background(), sessionID, "slack", "list_channels", subjectTestAgent, "claude_code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return subjectPathDecision{allow: d.Allow}
+}
+
+func decideViaConnectorGrant(t *testing.T, l *keiruntime.LocalPDP, _ http.Handler, sessionID string) subjectPathDecision {
+	t.Helper()
+	grant, err := l.ConnectorGrant(context.Background(), invoke.DaemonCall{Session: sessionID, ConnectorID: "conn-fixture-0001", Capability: "repository.read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return subjectPathDecision{allow: grant.Allow, subject: grant.Subject}
+}
+
+// subjectRuntime builds a LocalPDP whose one trusted agent is subjectTestAgent
+// and activates bundle, then returns the handler the paths are served through.
+func subjectRuntime(t *testing.T, bundle []byte) (*keiruntime.LocalPDP, http.Handler) {
+	t.Helper()
+	dir := t.TempDir()
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
+	}, nil)
+	l.SetIdentity(&keiruntime.Identity{
+		ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: subjectTestAgent,
+	})
+	store, err := policybundle.OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	return l, l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+}
+
+func startSubjectSession(t *testing.T, h http.Handler, externalID string) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"`+externalID+`"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("start session %s: status=%d body=%s", externalID, rec.Code, rec.Body.String())
+	}
+	var response struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.SessionID == "" {
+		t.Fatalf("start session %s: no session id", externalID)
+	}
+	return response.SessionID
+}
+
+// subjectV2SchemaValidator loads the closed v2 schemas so the fixture bundles
+// above are validated exactly as production bundles are.
+func subjectV2SchemaValidator(t *testing.T) func([]byte) error {
+	t.Helper()
+	load := func(name string) any {
+		b, err := os.ReadFile(filepath.Join("..", "docs", "contracts", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc any
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.AssertFormat()
+	if err := compiler.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v2.schema.json", load("policy-set-v2.schema.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := compiler.AddResource("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json", load("policy-bundle-v2.schema.json")); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(raw []byte) error {
+		var doc any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return err
+		}
+		return schema.Validate(doc)
 	}
 }
