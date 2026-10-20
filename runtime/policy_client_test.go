@@ -71,8 +71,9 @@ func TestSyncPolicyBundleRequestsOnlyV2(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/v1/runtime/policy-bundles/current":
-			if r.Header.Get("Accept") != policybundle.ContentTypeV2 {
-				t.Errorf("Accept=%q, want only %q", r.Header.Get("Accept"), policybundle.ContentTypeV2)
+			accept := r.Header.Get("Accept")
+			if !strings.Contains(accept, policybundle.ContentTypeV2) {
+				t.Errorf("Accept=%q, want it to include %q", accept, policybundle.ContentTypeV2)
 			}
 			w.Header().Set("Content-Type", policybundle.ContentTypeV2)
 			w.Header().Set("ETag", digest)

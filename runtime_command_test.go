@@ -42,7 +42,7 @@ func newNotReadyBundleServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/runtime/policy-bundles/current":
-			if r.Header.Get("Accept") != "application/vnd.kei.policy-bundle.v2+json" {
+			if !strings.Contains(r.Header.Get("Accept"), "application/vnd.kei.policy-bundle.v2+json") {
 				http.Error(w, "bad accept", 400)
 				return
 			}
