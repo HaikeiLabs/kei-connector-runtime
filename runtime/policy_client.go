@@ -23,8 +23,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
-// Kei serves only kei.policy-bundle/v2 (TSK T89); v1 is never requested.
-const policyBundleAccept = policybundle.ContentTypeV2
+const policyBundleAccept = policybundle.ContentTypeV2 + ", " + policybundle.ContentTypeV3
 
 var (
 	ErrPolicyInstallationRevoked = errors.New("runtime installation is revoked or inactive")
@@ -420,34 +419,53 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		return reject(errors.New("policy bundle response is missing ETag or version"))
 	}
 	mediaType, mediaParams, mediaErr := mime.ParseMediaType(contentType)
-	if mediaErr != nil || (mediaType != policybundle.ContentType && mediaType != policybundle.ContentTypeV2) || len(mediaParams) != 0 {
+	if mediaErr != nil || (mediaType != policybundle.ContentType && mediaType != policybundle.ContentTypeV2 && mediaType != policybundle.ContentTypeV3) || len(mediaParams) != 0 {
 		return reject(errors.New("policy bundle response has an invalid content type"))
 	}
 	bodyDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
 	if bundleETag != `"`+bodyDigest+`"` {
 		return reject(errors.New("catalog ETag does not match policy bundle digest"))
 	}
-	candidate, err := policybundle.Validate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersionFor(identity.ID, identity.OrgID, *identity.WorkspaceID), now)
-	if err != nil {
-		_ = store.RecordRejectedCandidate(now, err)
-		return fmt.Errorf("policy bundle candidate rejected: %w", err)
-	}
-	if candidate.Digest != bodyDigest {
-		return reject(errors.New("validated policy bundle digest differs from response digest"))
-	}
-	expectedContentType := policybundle.ContentType
-	if candidate.Payload.Schema == "kei.policy-bundle/v2" {
-		expectedContentType = policybundle.ContentTypeV2
-	}
-	if mediaType != expectedContentType {
-		return reject(errors.New("policy bundle content type does not match its schema"))
-	}
-	if headerVersion != candidate.Payload.BundleVersion {
-		return reject(errors.New("catalog bundle version header does not match policy bundle"))
-	}
-	if _, err := store.Activate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); err != nil {
-		_ = store.RefreshFailed(time.Now().UTC())
-		return fmt.Errorf("activate validated policy bundle: %w", err)
+
+	// Route to v3 or v1/v2 validation and activation.
+	isV3 := mediaType == policybundle.ContentTypeV3
+	if isV3 {
+		candidate, err := policybundle.ValidateV3(body, identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersionFor(identity.ID, identity.OrgID, *identity.WorkspaceID), now)
+		if err != nil {
+			_ = store.RecordRejectedCandidate(now, err)
+			return fmt.Errorf("policy bundle candidate rejected: %w", err)
+		}
+		// Envelope-level digest already verified above; skip per-payload double-check.
+		if headerVersion != candidate.Version {
+			return reject(errors.New("catalog bundle version header does not match v3 policy bundle"))
+		}
+		if err := store.ActivateV3(body, identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); err != nil {
+			_ = store.RefreshFailed(time.Now().UTC())
+			return fmt.Errorf("activate validated v3 policy bundle: %w", err)
+		}
+	} else {
+		candidate, err := policybundle.Validate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersionFor(identity.ID, identity.OrgID, *identity.WorkspaceID), now)
+		if err != nil {
+			_ = store.RecordRejectedCandidate(now, err)
+			return fmt.Errorf("policy bundle candidate rejected: %w", err)
+		}
+		if candidate.Digest != bodyDigest {
+			return reject(errors.New("validated policy bundle digest differs from response digest"))
+		}
+		expectedContentType := policybundle.ContentType
+		if candidate.Payload.Schema == "kei.policy-bundle/v2" {
+			expectedContentType = policybundle.ContentTypeV2
+		}
+		if mediaType != expectedContentType {
+			return reject(errors.New("policy bundle content type does not match its schema"))
+		}
+		if headerVersion != candidate.Payload.BundleVersion {
+			return reject(errors.New("catalog bundle version header does not match policy bundle"))
+		}
+		if _, err := store.Activate(body, identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); err != nil {
+			_ = store.RefreshFailed(time.Now().UTC())
+			return fmt.Errorf("activate validated policy bundle: %w", err)
+		}
 	}
 	return nil
 }
