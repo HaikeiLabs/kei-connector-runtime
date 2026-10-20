@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/manifest"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 

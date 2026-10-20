@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 func TestV2DriveListFilesRoutesTrustedPlanToReadOnlyGoogleProvider(t *testing.T) {

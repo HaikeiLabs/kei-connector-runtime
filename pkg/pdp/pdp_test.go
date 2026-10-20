@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 var testNow = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)

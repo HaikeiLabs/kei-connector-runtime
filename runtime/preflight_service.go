@@ -7,8 +7,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 var ErrBundlePlanUnavailable = errors.New("validated bundle operation plan unavailable")

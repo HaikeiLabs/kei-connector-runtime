@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/manifest"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // ManifestSubmitter sends an observed manifest the route could not verify to

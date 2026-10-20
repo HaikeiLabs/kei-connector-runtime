@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // HAI-378 (ADR-034 amendment 2026-10-11), runtime step: the runtime accepts

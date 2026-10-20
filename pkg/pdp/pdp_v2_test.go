@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 func v2SnapshotBundle(t *testing.T, now time.Time, version int64, identities []map[string]any) []byte {

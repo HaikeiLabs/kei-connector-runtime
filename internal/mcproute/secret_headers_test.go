@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // HAI-581 item 3 (ADR-036 §3.3, §4.8, contract "mcp.credential_fields exact

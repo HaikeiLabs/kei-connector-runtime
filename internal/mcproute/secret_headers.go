@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // deniedCredentialHeaders are header names a credential_fields entry may not

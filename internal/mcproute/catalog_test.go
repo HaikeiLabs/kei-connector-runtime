@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/manifest"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // fakeCatalog is a bundle view with fixed descriptors and bindings.

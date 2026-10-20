@@ -15,9 +15,9 @@ import (
 
 	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -656,7 +656,7 @@ func bundleWithPolicy(t *testing.T, ids []policybundle.Identity, policies string
 
 func TestPiShellAuthorizeUsesTrustedDefaultAgentNotRequestAgentID(t *testing.T) {
 	now := time.Now().UTC()
-	raw, err := os.ReadFile(filepath.Join("..", "internal", "policybundle", "testdata", "catalog-v2-bundle.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "pkg", "policybundle", "testdata", "catalog-v2-bundle.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1010,7 +1010,7 @@ func TestSocketAuthorizeDeniesBeforeIdentityResolves(t *testing.T) {
 // the request. HAI-603 invariant.
 func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
 	now := time.Now().UTC()
-	raw, err := os.ReadFile(filepath.Join("..", "internal", "policybundle", "testdata", "catalog-v2-bundle.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "pkg", "policybundle", "testdata", "catalog-v2-bundle.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/harnessresync"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // RunPolicySync fetches the installation's bundle once over HTTPS with the

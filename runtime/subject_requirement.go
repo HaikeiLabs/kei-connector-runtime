@@ -1,6 +1,6 @@
 package runtime
 
-import "github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+import "github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 
 // AuthorizeNeedsSubject reports whether a tool authorization must resolve the
 // caller's subject before evaluating the bundle. Identity is only for

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 type permissionEvent struct {

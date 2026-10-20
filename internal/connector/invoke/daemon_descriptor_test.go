@@ -18,7 +18,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	runtimecredentials "github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // HAI-378 (ADR-034 amendment 2026-10-11): the serve daemon runs opaque_ref
