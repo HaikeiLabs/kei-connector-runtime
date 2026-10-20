@@ -12,6 +12,8 @@ func TestHintCoversEveryKnownDenyCode(t *testing.T) {
 		"agent_not_assigned",
 		"credential_unavailable",
 		"subject_missing",
+		"access_grant_expired",
+		"no_grant_matched",
 	}
 	for _, code := range known {
 		if h := Hint(code); h == "" {

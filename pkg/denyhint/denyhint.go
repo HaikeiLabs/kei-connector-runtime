@@ -13,6 +13,8 @@ var hints = map[string]string{
 	"agent_not_assigned":           "Assign an agent to this runtime installation on the console Agents page so the runtime identity has a default agent.",
 	"credential_unavailable":       "Connect the provider on the console Connectors page (or deliver the credential) so the runtime can resolve the connector credential.",
 	"subject_missing":              "Link the invoking user to this installation on the console Users page so a subject can be resolved.",
+	"access_grant_expired":         "The access grant for this call has ended. Ask an admin for a new grant on the console Access grants page.",
+	"no_grant_matched":             "No access grant covers this call. Ask an admin for a grant, or add a policy for this source and target.",
 }
 
 // Hint returns the next-step hint for a deny reason_code, or "" when the code

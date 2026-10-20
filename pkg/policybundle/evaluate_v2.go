@@ -182,8 +182,10 @@ func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *Sess
 	}
 	request := map[string]string{"tool": registered.Name, "source": registered.Source}
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
-	groups = append(groups, subject.Groups...)
-	return evaluateV2Check(set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	decision := evaluateV2Check(set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	// A rule that matched decided the call. Where no rule matched, a live
+	// access grant may still open it (ADR-038 §2).
+	return v.v2GrantOrRule(decision, v2ToolTarget(registered.Name), subject, groups, now)
 }
 
 // EvaluateV2Plan locally AND-authorizes a complete exact operation plan for a
@@ -219,7 +221,6 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 	}
 	covered := make(map[string]bool, len(tool.RequiredCapabilities))
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
-	groups = append(groups, subject.Groups...)
 	for _, op := range ops {
 		if op.ConnectorID != connectorID || op.Capability == "" || op.Action == "" {
 			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan contains a malformed operation"}
@@ -239,6 +240,9 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 			request["resource_parent"] = op.ResourceParent
 		}
 		decision := evaluateV2Check(set.Checks, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+		// A rule that matched decided the operation. Where no rule matched, a
+		// live access grant may still open the tool (ADR-038 §2).
+		decision = v.v2GrantOrRule(decision, v2ToolTarget(tool.Name), subject, groups, now)
 		if decision.Outcome != "allow" {
 			return decision
 		}

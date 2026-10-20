@@ -39,7 +39,7 @@ func (e *Evaluator) AuthorizePiShell(ctx context.Context, sessionID, command, ag
 	}
 	subject := &policybundle.SessionSubject{
 		UserID: current.UserID, Email: current.Email, Source: current.Source,
-		ExternalID: current.ExternalID, Groups: current.Groups, Status: string(current.Status),
+		ExternalID: current.ExternalID, Status: string(current.Status),
 	}
 	decision := v.EvaluateV2PiShell(argv, agentID, subject, e.now().UTC())
 	return Decision{
