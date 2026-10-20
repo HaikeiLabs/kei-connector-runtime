@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added: live access grants in the v2 policy bundle (HAI-617)
+
+A v2 policy bundle may carry a top-level `access_grants` array: the
+workspace's live JIT access grants (ADR-038 §2). Each entry names the
+principal the grant is for, the typed target it opens and when it ends.
+
+The runtime decides a governed call as before: a rule that matches decides
+it, and a matching deny always wins. Where no rule covers the call, a live
+access grant opens it; a grant that has ended denies with
+`access_grant_expired`, and a bundle whose grants cover nothing denies with
+`no_grant_matched`. The groups a decision matches on are the ones the
+verified bundle holds for that user, never the ones a session claims.
+
+The v2 contract schema accepts the field from this release on. The catalog
+projects the grants (kei-policy-catalog#363) and the shared policy package
+decides them (kei-connector-contracts#38).
+
 ### Fixed
 
 - `collector` sends decision audit batches to the canonical

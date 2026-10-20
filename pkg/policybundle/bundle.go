@@ -65,6 +65,18 @@ type Harness struct {
 	Kind    string `json:"kind"`
 }
 
+// AccessGrant is one live access grant in a v2 bundle (ADR-038 §2, HAI-615):
+// a JIT grant that opens one typed target for one principal until it ends.
+// The principal is "<kind>:<id>" ("user:<id>" or "agent:<id>") and the target
+// is a typed target ("tool:<name>"), the strings the shared policy package
+// matches. A grant's reason, its granter and its approver stay in the
+// catalog: only what a decision needs travels in a bundle.
+type AccessGrant struct {
+	Principal  string    `json:"principal"`
+	Target     string    `json:"target"`
+	ExpireTime time.Time `json:"expire_time"`
+}
+
 // Payload is the signed-envelope body of a policy bundle.
 type Payload struct {
 	Schema         string    `json:"schema"`
@@ -94,6 +106,10 @@ type Payload struct {
 	// assigned to the installation (HAI-459). In v2 it is the model-call
 	// permission; see EvaluateV2Model.
 	AgentModelProfiles []AgentModelProfile `json:"agent_model_profiles,omitempty"`
+	// AccessGrants is the v2-only projection of the workspace's live access
+	// grants (ADR-038 §2, HAI-615). A grant opens one typed target for one
+	// principal until it ends. It never overrides a deny.
+	AccessGrants []AccessGrant `json:"access_grants,omitempty"`
 }
 
 // AgentModelProfile is one agent's effective model profile in a v2 bundle

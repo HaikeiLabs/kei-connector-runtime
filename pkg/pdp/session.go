@@ -27,6 +27,10 @@ const (
 // Subject is the acting user of a worker session, from machine login plus
 // kei or harness login. Enrollment is the private link returned only on a
 // subject_unlinked denial. Token holds the CLI login token for cli sessions.
+//
+// Groups is what the session recorded, never what a decision uses: the
+// groups a decision matches on are the ones the verified bundle holds for
+// that user (B-20).
 type Subject struct {
 	UserID     string
 	Email      string

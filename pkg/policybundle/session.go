@@ -20,13 +20,14 @@ const (
 	SubjectCrossWorkspace = "cross_workspace"
 )
 
-// SessionSubject is the acting user of the current worker session.
+// SessionSubject is the acting user of the current worker session. It
+// carries no groups: the groups a decision uses are the ones the verified
+// bundle holds for that user (B-20), never the ones a session claims.
 type SessionSubject struct {
 	UserID     string
 	Email      string
 	Source     string
 	ExternalID string
-	Groups     []string
 	Status     string
 }
 
