@@ -1,6 +1,8 @@
 package policybundle
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,9 +40,11 @@ type diskState struct {
 	LastSuccess    time.Time       `json:"last_success,omitempty"`
 	State          State           `json:"state"`
 	Bundle         json.RawMessage `json:"-"`
+	V3Bundle       json.RawMessage `json:"-"`
+	V3Active       bool            `json:"v3_active,omitempty"`
 }
 type Store struct {
-	dir, statePath, bundlePath string
+	dir, statePath, bundlePath, v3BundlePath string
 	// mu orders this process's goroutines around the state file lock: flock
 	// excludes other processes but is not synchronization in the Go memory
 	// model, and the daemon checks the bundle from concurrent requests. It is
@@ -73,7 +77,7 @@ func OpenStore(dir string) (*Store, error) {
 	if err := os.Chmod(pdir, 0700); err != nil {
 		return nil, err
 	}
-	s := &Store{dir: pdir, statePath: filepath.Join(pdir, "state.json"), bundlePath: filepath.Join(pdir, "bundle.json"), state: diskState{State: Cold}}
+	s := &Store{dir: pdir, statePath: filepath.Join(pdir, "state.json"), bundlePath: filepath.Join(pdir, "bundle.json"), v3BundlePath: filepath.Join(pdir, "bundle_v3.json"), state: diskState{State: Cold}}
 	if err := s.withLock(func() error {
 		if s.state.State == Invalid {
 			return s.persist()
@@ -158,6 +162,13 @@ func (s *Store) reload() error {
 	if s.state.State != Cold && s.state.State != Revoked && (len(s.state.Bundle) == 0 || s.state.Digest == "") {
 		s.state.State = Invalid
 	}
+	// Load v3 bundle separately; not having one is fine for v1/v2 stores.
+	v3b, err := readSecureBytes(s.v3BundlePath)
+	if err == nil {
+		s.state.V3Bundle = v3b
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read persisted v3 policy bundle: %w", err)
+	}
 	return nil
 }
 
@@ -206,6 +217,91 @@ func (s *Store) Activate(bundle []byte, installationID, orgID, workspaceID strin
 		return nil
 	})
 	return verified, err
+}
+
+// ActivateV3 validates and persists a v3 four-payload bundle per ADR-039.
+// If the policy payload is corrupt and there is no previously good policy the
+// method returns an error (fail-closed). If a previous good policy exists it
+// is kept and the method succeeds. Non-fatal payloads (connectors, harness-meta,
+// model-info) that are corrupt are silently kept at their previous good values.
+func (s *Store) ActivateV3(bundle []byte, installationID, orgID, workspaceID string, now time.Time) error {
+	return s.withLock(func() error {
+		highest := s.state.Version
+		newInstallation := s.heldByOtherAudience(Audience{InstallationID: installationID, OrgID: orgID, WorkspaceID: workspaceID})
+		if newInstallation {
+			highest = 0
+		}
+
+		result, err := ValidateV3(bundle, installationID, orgID, workspaceID, highest, now)
+		if err != nil {
+			// Envelope-level failure (bad JSON, expired, audience mismatch, etc.)
+			s.state.LastCheck = now
+			s.state.ReasonCode = healthReasonForError(err)
+			if len(s.state.V3Bundle) == 0 {
+				s.state.State = Invalid
+				if errors.Is(err, ErrBundleUnsupported) {
+					s.state.State = Unsupported
+				}
+			}
+			_ = s.persist()
+			return err
+		}
+
+		// If policy payload is bad, decide fail-closed vs keep-last-good.
+		if result.PolicyError != "" {
+			if len(s.state.V3Bundle) == 0 {
+				// No previous good policy — fail closed.
+				s.state.LastCheck = now
+				s.state.ReasonCode = "policy_payload_corrupt"
+				s.state.State = Invalid
+				_ = s.persist()
+				return fmt.Errorf("v3 policy payload corrupt: %s", result.PolicyError)
+			}
+			// Previous good policy exists — keep it, silently drop this bundle's
+			// policy payload but still update metadata from the envelope.
+			s.state.LastCheck = now
+			s.state.LastSuccess = now
+			s.state.ReasonCode = ""
+			s.state.State = Active
+			return nil
+		}
+
+		// Policy is good — persist the bundle and update state.
+		if newInstallation {
+			if err := s.archive(now); err != nil {
+				return fmt.Errorf("archive previous installation policy state: %w", err)
+			}
+			s.state = diskState{State: Cold}
+		}
+
+		// Read envelope fields for state metadata.
+		var env v3FourPayloadBundle
+		if err := json.Unmarshal(bundle, &env); err != nil {
+			return fmt.Errorf("re-decode v3 envelope for state: %w", err)
+		}
+
+		s.state.Version = env.Version
+		s.state.PolicyRevision = env.Revision
+		s.state.Audience = Audience{InstallationID: env.Audience.InstallationID, OrgID: env.Audience.OrgID, WorkspaceID: env.Audience.WorkspaceID}
+		// Compute digest over the whole bundle for HealthReport compatibility.
+		digest := sha256Hex(bundle)
+		s.state.Digest = digest
+		s.state.AcceptedAt = now.UTC()
+		s.state.ExpiresAt = env.NotAfter.UTC()
+		s.state.ReasonCode = ""
+		s.state.V3Bundle = append(json.RawMessage(nil), bundle...)
+		s.state.V3Active = true
+		s.state.LastCheck = now
+		s.state.LastSuccess = now
+		s.state.State = Active
+		return s.persist()
+	})
+}
+
+// sha256Hex returns the hex-encoded SHA-256 digest of data.
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }
 
 // archive moves the previous installation's persisted state and bundle into
@@ -416,6 +512,15 @@ func (s *Store) persist() error {
 		}
 	} else if s.state.State == Revoked || s.state.State == Invalid || s.state.State == Unsupported {
 		if err := os.Remove(s.bundlePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if len(s.state.V3Bundle) > 0 {
+		if err := writeAtomicBytes(s.v3BundlePath, s.state.V3Bundle); err != nil {
+			return err
+		}
+	} else if s.state.State == Revoked || s.state.State == Invalid || s.state.State == Unsupported {
+		if err := os.Remove(s.v3BundlePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
