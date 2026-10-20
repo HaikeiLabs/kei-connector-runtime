@@ -31,7 +31,8 @@ type PolicyRefresher struct {
 	timeout time.Duration
 	whoami  IdentityFunc
 	sync    SyncBundleFunc
-	// OnIdentity runs once, when whoami first succeeds.
+	// OnIdentity runs when identity is first resolved (from whoami or
+	// seeded from the persisted bundle state at startup).
 	OnIdentity func(*Identity)
 	// AfterSync runs after every sync attempt with its result.
 	AfterSync func(error)
@@ -104,22 +105,30 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 		}()
 	}
 
-	var identity *Identity
+	// Seed identity from the persisted bundle state so the evaluator is
+	// available even when the control plane is unreachable at startup.
+	// whoami becomes a REFRESH rather than a gate (HAI-700).
+	identity := seedIdentityFromStore(store, time.Now().UTC())
+	if identity != nil && r.OnIdentity != nil {
+		r.OnIdentity(identity)
+	}
+
 	for {
-		if identity == nil {
-			id, err := r.whoami()
-			switch {
-			case err == nil && id != nil:
-				identity = id
-				if r.OnIdentity != nil {
-					r.OnIdentity(identity)
-				}
-			case r.CheckRevocation != nil && r.CheckRevocation(err):
-				r.RevokeState()
-				r.notify(ErrInstallationRevoked)
-			case ctx.Err() == nil:
-				slog.Warn("policy refresher identity unavailable; runtime stays deny-only until it resolves", "error", err)
+		// Always try whoami as a refresh, but tolerate failure when we
+		// already have a fallback identity seeded from the persisted state.
+		refreshed, err := r.whoami()
+		switch {
+		case err == nil && refreshed != nil:
+			identity = refreshed
+			if r.OnIdentity != nil {
+				r.OnIdentity(identity)
 			}
+		case r.CheckRevocation != nil && r.CheckRevocation(err):
+			r.RevokeState()
+			r.notify(ErrInstallationRevoked)
+			identity = nil
+		case ctx.Err() == nil && identity == nil:
+			slog.Warn("policy refresher identity unavailable; runtime stays deny-only until it resolves", "error", err)
 		}
 		if identity != nil {
 			beforeState := store.State()
@@ -143,6 +152,36 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 			return
 		case <-r.After(r.Jitter(PollInterval(store, identity))):
 		}
+	}
+}
+
+// seedIdentityFromStore tries to build an Identity from the persisted policy
+// state file. It returns nil when no audience is available (cold start,
+// revoked store, or corrupt state), which means the loop falls through to
+// the normal whoami-as-gate path.
+//
+// now is the reference time for status checks (expiry, staleness). Tests
+// should pass a synthetic time to verify expired-bundle behaviour.
+func seedIdentityFromStore(store *policybundle.Store, now time.Time) *Identity {
+	status, err := store.Status(now)
+	if err != nil {
+		return nil
+	}
+	if status.Audience == nil || status.Audience.InstallationID == "" || status.Audience.OrgID == "" || status.Audience.WorkspaceID == "" {
+		return nil
+	}
+	// Do not seed from a store that has been explicitly revoked — the
+	// loop must first re-resolve identity via whoami before allowing
+	// any policy decisions.
+	if status.State == policybundle.Revoked {
+		return nil
+	}
+	return &Identity{
+		ID:          status.Audience.InstallationID,
+		OrgID:       status.Audience.OrgID,
+		WorkspaceID: &status.Audience.WorkspaceID,
+		// AgentID is unknown without whoami; it is not needed for
+		// evaluator construction or for policy decisions.
 	}
 }
 
