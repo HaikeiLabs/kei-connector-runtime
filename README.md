@@ -472,7 +472,12 @@ the tool-manifest JSON body. The daemon validates it, syncs it to the catalog
 using its runtime credential, and returns the catalog's added, updated,
 removed, and unchanged counts. Registration requires the normal socket runtime
 authentication and does not grant policy access. The daemon does not create or
-modify a manifest file.
+modify a manifest file. With `KEI_CREDENTIAL_RELEASE=identity`, the socket
+also serves `POST /v1/credentials:release`: after an allow decision, the
+daemon re-runs the same decision and, only on allow, returns the session-held
+connector credential value with its expiry; a deny returns a typed
+`reason_code` and no credential. The value is held in session memory, flushed
+when the session ends, and is never logged or printed.
 
 The default socket is `/run/kei-proxy/runtime.sock` on Linux or
 `$TMPDIR/kei-proxy/runtime.sock` on macOS (falls back to `os.TempDir()`); set
