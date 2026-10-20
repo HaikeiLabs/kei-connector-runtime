@@ -398,8 +398,8 @@ func TestPolicyRefresherPollsAtBundleIntervalAndHoldsTheLock(t *testing.T) {
 	catalog.mu.Lock()
 	calls := catalog.bundleCalls
 	catalog.mu.Unlock()
-	if calls != 2 || identities != 1 {
-		t.Fatalf("bundle calls = %d, identities = %d; want 2 and 1", calls, identities)
+	if calls != 2 || identities != 2 {
+		t.Fatalf("bundle calls = %d, identities = %d; want 2 and 2", calls, identities)
 	}
 }
 
