@@ -101,7 +101,7 @@ func TestServeDaemonOverUnixSocket(t *testing.T) {
 	}}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
-	for path, want := range map[string]int{"/readyz": http.StatusOK, "/v1/models": http.StatusUnauthorized} {
+	for path, want := range map[string]int{"/readyz": http.StatusOK, "/v1/model-config": http.StatusUnauthorized} {
 		resp, err := client.Get("http://localhost" + path)
 		if err != nil {
 			t.Fatalf("GET %s over Unix socket: %v", path, err)

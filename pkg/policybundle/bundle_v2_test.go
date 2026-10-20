@@ -166,10 +166,6 @@ func TestV2StoreCheckAfterStalenessWindow(t *testing.T) {
 	if err != nil || fresh == nil || state != Active {
 		t.Fatalf("fresh check verified=%v state=%s err=%v", fresh != nil, state, err)
 	}
-	model := fresh.EvaluateAction("model:invoke", "model:profile", "agent-1", nil)
-	if model.Outcome != "deny" || model.ReasonCode != "agent_not_assigned" {
-		t.Fatalf("model action from aged v2 object = %+v", model)
-	}
 	// HAI-452: the subject snapshot remains fresh after the old
 	// max_cache_seconds window. Store.Check returns Active, not Stale.
 	verified, state, err := store.Check(v2Installation, v2Org, v2Workspace, now.Add(30*time.Second))
@@ -231,25 +227,6 @@ func TestSubjectSnapshotFreshWithAbsentMaxCacheSeconds(t *testing.T) {
 	}
 	if _, ok := v.LookupIdentity("discord", "ext-alice", now.Add(61*time.Second)); !ok {
 		t.Fatal("LookupIdentity should succeed after 61s with absent max_cache_seconds")
-	}
-}
-
-func TestEvaluateActionNoStaleDenialAfterSixtyOneSeconds(t *testing.T) {
-	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	doc := v2BundleDoc(now)
-	doc["subject_resolution"] = map[string]any{"mode": "bundle", "max_cache_seconds": 30}
-	raw := mustJSON(t, doc)
-	var payload Payload
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		t.Fatal(err)
-	}
-	v := &Verified{Payload: payload, PayloadBytes: raw, Digest: "sha256:test"}
-	// HAI-452: SubjectSnapshotFresh ignores max_cache_seconds entirely
-	// and returns true for any valid bundle. EvaluateAction never returns
-	// subject_snapshot_stale — the snapshot is trusted.
-	d := v.EvaluateAction("model:invoke", "model:profile", "agent-1", nil)
-	if d.ReasonCode == "subject_snapshot_stale" {
-		t.Fatalf("EvaluateAction returned stale denial for trusted snapshot: %+v", d)
 	}
 }
 

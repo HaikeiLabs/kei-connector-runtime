@@ -99,13 +99,13 @@ func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /readyz status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-	resp, err = client.Get("http://localhost/v1/models")
+	resp, err = client.Get("http://localhost/v1/model-config")
 	if err != nil {
-		t.Fatalf("unauthenticated GET /v1/models over Unix socket: %v", err)
+		t.Fatalf("unauthenticated GET /v1/model-config over Unix socket: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated GET /v1/models status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+		t.Fatalf("unauthenticated GET /v1/model-config status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 
 	authorizeReq, err := http.NewRequest(http.MethodPost, "http://localhost/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"pi.read","resource":"/tmp/file.txt"}`))
@@ -659,7 +659,7 @@ func TestRuntimeHTTPHandlerRejectsInvalidToken(t *testing.T) {
 	}
 	handler := newRuntimeHTTPHandler(config, nil)
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
+	request := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
 	request.Header.Set("Authorization", "Bearer wrong-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -680,122 +680,7 @@ func TestRuntimeHTTPHandlerRequiresBearerToken(t *testing.T) {
 	handler := newRuntimeHTTPHandler(config, nil)
 
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
-
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
-	}
-}
-
-func TestRuntimeHTTPHandlerListsAssignedModel(t *testing.T) {
-	config := Config{
-		RuntimeControlPlaneURL: "https://control-plane.test",
-		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
-	}
-	handler := &runtimeHTTPHandler{
-		cfg: config,
-		profiles: fakeRuntimeProfiles{profile: &ModelProfile{
-			ProfileID:   "profile-1",
-			DisplayName: "Workspace model",
-			Status:      "active",
-		}},
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	request.Header.Set("Authorization", "Bearer "+config.RuntimeToken)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	body := response.Body.String()
-	if !strings.Contains(body, `"id":"profile-1"`) || !strings.Contains(body, `"name":"Workspace model"`) {
-		t.Fatalf("body = %s", body)
-	}
-}
-
-func TestRuntimeHTTPHandlerDoesNotFallBackToOrganizationDefaultModel(t *testing.T) {
-	config := Config{
-		RuntimeControlPlaneURL: "https://control-plane.test",
-		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
-	}
-	handler := &runtimeHTTPHandler{
-		cfg: config,
-		profiles: fakeRuntimeProfiles{defaultProfile: &ModelProfile{
-			ProfileID:   "org-default-profile",
-			DisplayName: "Organization default",
-			Status:      "active",
-		}, assignedErr: errors.New("runtime has no active profile assigned to its default agent")},
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	request.Header.Set("Authorization", "Bearer "+config.RuntimeToken)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	body := response.Body.String()
-	if response.Code != http.StatusBadGateway || strings.Contains(body, "org-default-profile") {
-		t.Fatalf("status = %d, body = %s", response.Code, body)
-	}
-}
-
-func TestRuntimeHTTPHandlerRejectsModelOutsideAssignedProfile(t *testing.T) {
-	handler := &runtimeHTTPHandler{
-		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{ProfileID: "assigned-profile", Status: "active"}},
-	}
-	if _, err := handler.resolveProfile(context.Background(), "other-profile"); err == nil || !strings.Contains(err.Error(), "not assigned") {
-		t.Fatalf("resolveProfile error = %v, want assignment authorization error", err)
-	}
-}
-
-func stringPtr(value string) *string { return &value }
-
-func TestRuntimeHTTPHandlerInvokingSubjectAbsent(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-
-	var providerCalls int
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		providerCalls++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"completion-1"}`)
-	}))
-	defer provider.Close()
-
-	handler := &runtimeHTTPHandler{
-		cfg: Config{
-			RuntimeControlPlaneURL: "https://control-plane.test",
-			RuntimeToken:           runtimeToken,
-		},
-		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "m1", Status: "active"}},
-		client:   &http.Client{Timeout: time.Second},
-	}
-
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
-	request.Header.Set("Authorization", "Bearer "+runtimeToken)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusForbidden || providerCalls != 0 {
-		t.Fatalf("cold runtime must deny locally before provider dispatch: status=%d calls=%d body=%s", response.Code, providerCalls, response.Body.String())
-	}
-}
-
-func TestRuntimeHTTPHandlerInvokingSubjectWithoutTokenStill401(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-
-	handler := &runtimeHTTPHandler{
-		cfg: Config{
-			RuntimeControlPlaneURL: "https://control-plane.test",
-			RuntimeToken:           runtimeToken,
-		},
-		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", DefaultModel: "m1", Status: "active"}},
-		client:   &http.Client{Timeout: time.Second},
-	}
-
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/model-config", nil))
 
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
@@ -827,262 +712,194 @@ func (f fakeRuntimeProfiles) GetRuntimeAssignedModelProfile(context.Context) (*M
 	}
 	return f.profile, nil
 }
+func TestHandleModelConfig(t *testing.T) {
+	cfg := Config{
+		RuntimeToken:           "kh_live_12345678901234567890",
+		RuntimeControlPlaneURL: "http://127.0.0.1:1",
+	}
 
-func TestRuntimeHTTPHandlerInvokesResolvedProfile(t *testing.T) {
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
-			t.Fatalf("provider request = %s %s", r.Method, r.URL.Path)
+	t.Run("runtime_not_configured", func(t *testing.T) {
+		h := &runtimeHTTPHandler{
+			cfg:      Config{},
+			profiles: fakeRuntimeProfiles{},
+			client:   &http.Client{Timeout: time.Second},
 		}
-		body, _ := io.ReadAll(r.Body)
-		if string(body) != `{"model":"workspace-default"}` {
-			t.Fatalf("provider body = %s", body)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
+		req.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"completion-1"}`)
-	}))
-	defer provider.Close()
+	})
 
-	config := Config{
-		RuntimeControlPlaneURL: "https://control-plane.test",
-		RuntimeToken:           "kh_live_runtime_test_token_1234567890",
-	}
-	handler := &runtimeHTTPHandler{
-		cfg:      config,
-		profiles: fakeRuntimeProfiles{profile: &ModelProfile{ProfileID: "profile-1", Endpoint: provider.URL, DefaultModel: "workspace-default", Status: "active"}},
-		client:   &http.Client{Timeout: time.Second},
-	}
-
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"profile-1"}`))
-	request.Header.Set("Authorization", "Bearer "+config.RuntimeToken)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("cold local policy must deny before provider dispatch: status=%d body=%s", response.Code, response.Body.String())
-	}
-}
-
-func TestRuntimeHTTPHandlerAuthorizesAssignedProfileBeforeProviderDispatch(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-	const profileID = "00000000-0000-0000-0000-000000000031"
-	const agentID = "00000000-0000-0000-0000-000000000041"
-	const subject = "user:runtime-invoker"
-	t.Setenv("KEI_PROXY_AGENT_ID", agentID)
-
-	var providerCalls int
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		providerCalls++
-		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
-			t.Errorf("provider request = %s %s", r.Method, r.URL.Path)
+	t.Run("unauthorized", func(t *testing.T) {
+		h := &runtimeHTTPHandler{
+			cfg:      cfg,
+			profiles: fakeRuntimeProfiles{},
+			client:   &http.Client{Timeout: time.Second},
 		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode provider request: %v", err)
-		} else if body["model"] != "assigned-upstream-model" {
-			t.Errorf("provider model = %v, want assigned-upstream-model", body["model"])
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"completion-1"}`)
-	}))
-	defer provider.Close()
+	})
 
-	var profileCalls, authorizeCalls int
-	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/whoami":
-			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "install-1", OrgID: "org-1", WorkspaceID: stringPtr("workspace-1"), Platform: "discord", Status: "active", BindingStatus: "verified"})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned":
-			profileCalls++
-			if r.Header.Get("Authorization") != "Bearer "+runtimeToken {
-				t.Errorf("profile request bearer = %q, want configured runtime token", r.Header.Get("Authorization"))
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"profile_id": profileID, "org_id": "00000000-0000-0000-0000-000000000011", "agent_id": agentID,
-				"display_name": "Assigned model", "endpoint": provider.URL, "default_model": "assigned-upstream-model",
-				"auth_type": "none", "status": "active",
-			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/authorize":
-			authorizeCalls++
-			var request struct {
-				HarnessToken    string   `json:"harness_token"`
-				Action          string   `json:"action"`
-				Resource        string   `json:"resource"`
-				Resources       []string `json:"resources"`
-				AgentID         string   `json:"agent_id"`
-				UserID          string   `json:"user_id"`
-				InvokingSubject string   `json:"invoking_subject"`
-				Framework       string   `json:"framework"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("decode authorization request: %v", err)
-			}
-			if request.HarnessToken != runtimeToken {
-				t.Errorf("authorization harness_token = %q, want configured runtime token", request.HarnessToken)
-			}
-			if request.Action != "model.invoke" || request.Resource != "model:"+profileID {
-				t.Errorf("authorization action/resource = %q/%q", request.Action, request.Resource)
-			}
-			if request.Resources == nil || len(request.Resources) != 1 || request.Resources[0] != "model:"+profileID {
-				t.Errorf("authorization resources = %#v", request.Resources)
-			}
-			if request.AgentID != agentID || request.UserID != subject || request.InvokingSubject != "" {
-				t.Errorf("authorization identity claims agent=%q user=%q invoking=%q", request.AgentID, request.UserID, request.InvokingSubject)
-			}
-			if request.Framework != "openai-http" {
-				t.Errorf("authorization framework = %q, want openai-http", request.Framework)
-			}
-			_ = json.NewEncoder(w).Encode(AuthorizeResponse{Decision: "allow"})
-		default:
-			t.Errorf("unexpected control-plane request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
+	t.Run("no_profile", func(t *testing.T) {
+		h := &runtimeHTTPHandler{
+			cfg:      cfg,
+			profiles: fakeRuntimeProfiles{assignedErr: errors.New("no profile assigned")},
+			client:   &http.Client{Timeout: time.Second},
 		}
-	}))
-	defer controlPlane.Close()
-
-	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken}, nil)
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+profileID+`"}`))
-	request.Header.Set("Authorization", "Bearer "+runtimeToken)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("missing local policy bundle should deny: status=%d body=%s", response.Code, response.Body.String())
-	}
-	if profileCalls != 1 || authorizeCalls != 0 || providerCalls != 0 {
-		t.Fatalf("calls profile=%d authorize=%d provider=%d; local policy must avoid catalog decision", profileCalls, authorizeCalls, providerCalls)
-	}
-}
-
-func TestRuntimeHTTPHandlerDeniesBeforeProviderDispatch(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-	const profileID = "00000000-0000-0000-0000-000000000032"
-	var providerCalls int
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		providerCalls++
-	}))
-	defer provider.Close()
-	var authorizeCalls int
-	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/whoami" {
-			_ = json.NewEncoder(w).Encode(RuntimeIdentity{ID: "install-1", OrgID: "org-1", WorkspaceID: stringPtr("workspace-1"), Platform: "discord", Status: "active", BindingStatus: "verified"})
-			return
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
+		req.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned" {
-			if r.Header.Get("Authorization") != "Bearer "+runtimeToken {
-				t.Errorf("profile request bearer = %q, want configured runtime token", r.Header.Get("Authorization"))
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"profile_id": profileID, "org_id": "00000000-0000-0000-0000-000000000011", "agent_id": "00000000-0000-0000-0000-000000000041",
-				"display_name": "Assigned model", "endpoint": provider.URL, "default_model": "upstream-model", "auth_type": "none", "status": "active",
-			})
-			return
+		var resp struct {
+			Status string `json:"status"`
 		}
-		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/authorize" {
-			authorizeCalls++
-			var request struct {
-				HarnessToken    string   `json:"harness_token"`
-				Action          string   `json:"action"`
-				Resource        string   `json:"resource"`
-				Resources       []string `json:"resources"`
-				AgentID         string   `json:"agent_id"`
-				UserID          string   `json:"user_id"`
-				InvokingSubject string   `json:"invoking_subject"`
-				Framework       string   `json:"framework"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("decode authorization request: %v", err)
-			}
-			if request.HarnessToken != runtimeToken {
-				t.Errorf("authorization harness_token = %q, want configured runtime token", request.HarnessToken)
-			}
-			_ = json.NewEncoder(w).Encode(AuthorizeResponse{Decision: "deny", Reason: "policy denied"})
-			return
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
 		}
-		t.Errorf("unexpected control-plane request %s %s", r.Method, r.URL.Path)
-		http.NotFound(w, r)
-	}))
-	defer controlPlane.Close()
-
-	handler := newRuntimeHTTPHandler(Config{RuntimeControlPlaneURL: controlPlane.URL, RuntimeToken: runtimeToken}, nil)
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+profileID+`"}`))
-	request.Header.Set("Authorization", "Bearer "+runtimeToken)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"model_invocation_denied"`) {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if authorizeCalls != 0 || providerCalls != 0 {
-		t.Fatalf("calls authorize=%d provider=%d, want no catalog decision and no provider calls", authorizeCalls, providerCalls)
-	}
-}
-
-func TestRuntimeHTTPHandlerIgnoresInvokingSubjectHeader(t *testing.T) {
-	const runtimeToken = "kh_live_runtime_test_token_1234567890"
-	stateDir := t.TempDir()
-	now := time.Now().UTC()
-	mustActivateTestBundle(t, stateDir, now)
-	workspace := "ws-fixture-0001"
-
-	var subjectUserID string
-	resolveSubject := func(w http.ResponseWriter, r *http.Request) {
-		var req keiruntime.SubjectResolveRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("decode subject resolve request: %v", err)
+		if resp.Status != "no_profile" {
+			t.Fatalf("status = %q, want %q", resp.Status, "no_profile")
 		}
-		subjectUserID = req.UserID
-		_ = json.NewEncoder(w).Encode(policybundle.Subject{
-			Status: "linked_approved", UserID: req.UserID,
-			EffectiveGroups: []string{"members"}, OrgRoles: []string{"member"}, MaxAgeSeconds: 60,
-		})
-	}
-	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/whoami":
-			_ = json.NewEncoder(w).Encode(RuntimeIdentity{
-				ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace,
-				Platform: "discord", Status: "active", BindingStatus: "verified",
-			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runtime/subject-attributes:resolve":
-			resolveSubject(w, r)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime/model-profiles/assigned":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"profile_id":   "00000000-0000-0000-0000-000000000011",
-				"org_id":       "00000000-0000-0000-0000-000000000012",
-				"agent_id":     "00000000-0000-0000-0000-000000000013",
-				"display_name": "Test model", "endpoint": "http://127.0.0.1:1",
-				"default_model": "m1", "auth_type": "none", "status": "active",
-			})
-		default:
-			t.Errorf("unexpected control plane request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
+	})
+
+	t.Run("profile_revoked", func(t *testing.T) {
+		h := &runtimeHTTPHandler{
+			cfg: cfg,
+			profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
+				ProfileID:    "p1",
+				DefaultModel: "gpt-4",
+				Endpoint:     "https://api.openai.com",
+				Status:       "revoked",
+			}},
+			client: &http.Client{Timeout: time.Second},
 		}
-	}))
-	defer controlPlane.Close()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
+		req.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "profile_revoked" {
+			t.Fatalf("status = %q, want %q", resp.Status, "profile_revoked")
+		}
+	})
 
-	sessions := pdp.NewSessions()
-	if err := sessions.Start(pdp.Subject{UserID: "session-user-42", Status: pdp.StatusLinked}); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("success_no_credential", func(t *testing.T) {
+		h := &runtimeHTTPHandler{
+			cfg: cfg,
+			profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
+				ProfileID:    "p1",
+				DefaultModel: "gpt-4",
+				Endpoint:     "https://api.openai.com",
+				Status:       "active",
+				AuthType:     "none",
+			}},
+			client: &http.Client{Timeout: time.Second},
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
+		req.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp struct {
+			Model      string `json:"model"`
+			Endpoint   string `json:"endpoint"`
+			Credential string `json:"credential"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Model != "gpt-4" {
+			t.Fatalf("model = %q, want %q", resp.Model, "gpt-4")
+		}
+		if resp.Endpoint != "https://api.openai.com" {
+			t.Fatalf("endpoint = %q, want %q", resp.Endpoint, "https://api.openai.com")
+		}
+		if resp.Credential != "" {
+			t.Fatalf("credential = %q, want empty string", resp.Credential)
+		}
+	})
 
-	handler := newRuntimeHTTPHandler(Config{
-		RuntimeControlPlaneURL: controlPlane.URL,
-		RuntimeToken:           runtimeToken,
-		RuntimeStateDir:        stateDir,
-	}, sessions)
+	t.Run("success_credential_from_secret", func(t *testing.T) {
+		h := &runtimeHTTPHandler{
+			cfg: cfg,
+			profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
+				ProfileID:     "p1",
+				DefaultModel:  "gpt-4",
+				Endpoint:      "https://api.openai.com",
+				Status:        "active",
+				AuthType:      "api_key",
+				SecretRef:     "",
+				SecretBackend: "",
+			}},
+			client: &http.Client{Timeout: time.Second},
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
+		req.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp struct {
+			Model      string `json:"model"`
+			Endpoint   string `json:"endpoint"`
+			Credential string `json:"credential"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Model != "gpt-4" {
+			t.Fatalf("model = %q, want %q", resp.Model, "gpt-4")
+		}
+		if resp.Endpoint != "https://api.openai.com" {
+			t.Fatalf("endpoint = %q, want %q", resp.Endpoint, "https://api.openai.com")
+		}
+		if resp.Credential != "" {
+			t.Fatalf("credential = %q, want empty string (no SecretRef)", resp.Credential)
+		}
+	})
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"00000000-0000-0000-0000-000000000011"}`))
-	request.Header.Set("Authorization", "Bearer "+runtimeToken)
-	request.Header.Set("X-Kei-Invoking-Subject", "victim")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (model:invoke not in test bundle), body = %s", response.Code, response.Body.String())
-	}
-	if subjectUserID != "session-user-42" {
-		t.Fatalf("subject resolve UserID = %q, want session-user-42 (X-Kei-Invoking-Subject header victim was ignored)", subjectUserID)
-	}
+	t.Run("credential_unavailable", func(t *testing.T) {
+		h := &runtimeHTTPHandler{
+			cfg: cfg,
+			profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
+				ProfileID:     "p1",
+				DefaultModel:  "gpt-4",
+				Endpoint:      "https://api.openai.com",
+				Status:        "active",
+				AuthType:      "api_key",
+				SecretRef:     "nonexistent",
+				SecretBackend: "file",
+			}},
+			client: &http.Client{Timeout: time.Second},
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config", nil)
+		req.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+		}
+	})
 }
 
 func TestMCPRoute_DeniedWithoutPolicyBundle(t *testing.T) {

@@ -93,11 +93,13 @@ This daemon-socket model brings three benefits:
 
 ### API surface
 
-The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/models`,
-`POST /v1/chat/completions`, `POST /v1/authorize`,
-`POST /v1/credentials:release`, and `PUT/DELETE/GET /v1/session`.
-Governed tool authorization — the PEP — uses the local PDP on the socket
-(PRs #78, #79, #80 merged). `POST /v1/authorize`
+The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
+`POST /v1/authorize`, `POST /v1/credentials:release`, and
+`PUT/DELETE/GET /v1/session`. `GET /v1/model-config` returns the runtime's
+assigned model profile — model, endpoint, and credential — as a config source;
+inference **never** goes through kei-proxy, and the harness calls the provider
+directly. Governed tool authorization — the PEP — uses the local PDP on the
+socket (PRs #78, #79, #80 merged). `POST /v1/authorize`
 is the only route that does not require a bearer token on the Unix socket;
 mode `0600` limits access to processes running as the proxy's OS user.
 Unauthenticated responses never include enrollment claim URLs. This exception
@@ -130,10 +132,10 @@ its own connector credentials, and nothing it holds is visible to another.
   `session_id` is opaque and unguessable (`ks_` + 32 random bytes,
   base64url), held in daemon memory only.
 - **Use:** send `X-Kei-Session: <session_id>` on `POST /v1/authorize`,
-  `/v1/credentials:release`, `/v1/connectors:invoke`, `/v1/commands:run`,
-  `/v1/chat/completions` and `GET`/`DELETE /v1/session`. A decision uses
-  only that session's subject and credentials. A header, not a body field,
-  so one mechanism works on every route (the bodies reject unknown fields).
+  `/v1/credentials:release`, `/v1/connectors:invoke`, `/v1/commands:run`, and
+  `GET`/`DELETE /v1/session`. A decision uses only that session's subject and
+  credentials. A header, not a body field, so one mechanism works on every
+  route (the bodies reject unknown fields).
 - **Fail closed:** an id that was never created, has ended or expired denies
   `session_not_found`: a `deny` decision on `/v1/authorize`, a deny on
   `connectors:invoke` and `commands:run`, `404` on `GET`/`DELETE`.

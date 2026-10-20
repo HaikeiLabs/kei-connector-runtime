@@ -124,36 +124,6 @@ func (v *Verified) EvaluateConnector(call Call, subject *Subject) Decision {
 	return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector capability is not registered in the policy bundle"}
 }
 
-// EvaluateAction evaluates a runtime-owned non-tool operation (for example the
-// registered model gateway route) against explicit action/resource candidates.
-// The caller cannot select arbitrary actions through this API.
-func (v *Verified) EvaluateAction(action, resource, agentID string, subject *Subject) Decision {
-	if action != "model:invoke" {
-		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "internal action is not registered"}
-	}
-	set, err := v.decodePolicySet()
-	if err != nil {
-		return invalidDecision()
-	}
-	if agentID == "" {
-		agentID = defaultAgent(set)
-	}
-	if agentID != "" {
-		assigned := false
-		for _, a := range set.Agents {
-			if a.ID == agentID {
-				assigned = true
-				break
-			}
-		}
-		if !assigned {
-			return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "agent is not assigned to this installation"}
-		}
-	}
-	call := Call{Action: action, Resource: resource, AgentID: agentID}
-	return v.evaluatePolicies(set, call, subject, tool{})
-}
-
 func (v *Verified) decodePolicySet() (policySet, error) {
 	var set policySet
 	if err := json.Unmarshal(v.Payload.PolicySet, &set); err != nil {
