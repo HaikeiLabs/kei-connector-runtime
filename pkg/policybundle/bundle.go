@@ -1,3 +1,6 @@
+// Package policybundle defines the wire types and validation for Kei policy
+// bundles. It is public so kei-cli can decode and inspect a bundle with the
+// same types and the same checks the runtime enforces.
 package policybundle
 
 import (
@@ -15,13 +18,20 @@ import (
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// ContentType is the media type for a v1 policy bundle: the legacy model the
+// catalog still folds its v2 policy set into, and the one the runtime still
+// accepts. Kept for callers that check the v1 constant.
 const ContentType = "application/vnd.kei.policy-bundle.v1+json"
+
+// ContentTypeV2 is the media type for the current v2 policy bundle.
 const ContentTypeV2 = "application/vnd.kei.policy-bundle.v2+json"
+
+// Issuer is the expected issuer claim in every valid bundle.
 const Issuer = "kei-policy-catalog"
 
 // MaxIssuedAtClockSkew is how far a bundle's issued_at may be ahead of the
 // runtime clock. The catalog stamps issued_at with its own clock, which can
-// lead a runtime host by a few hundred milliseconds; v1 and v2 share it.
+// lead a runtime host by a few hundred milliseconds.
 const MaxIssuedAtClockSkew = 5 * time.Minute
 
 var (
@@ -30,6 +40,7 @@ var (
 	ErrSubjectSnapshotStale = errors.New("policy bundle subject snapshot is stale")
 )
 
+// Audience identifies the installation a bundle is scoped to.
 type Audience struct {
 	InstallationID string `json:"installation_id"`
 	OrgID          string `json:"org_id"`
@@ -54,6 +65,7 @@ type Harness struct {
 	Kind    string `json:"kind"`
 }
 
+// Payload is the signed-envelope body of a policy bundle.
 type Payload struct {
 	Schema         string    `json:"schema"`
 	BundleID       string    `json:"bundle_id"`
@@ -102,6 +114,8 @@ type InstallationSubject struct {
 	Groups []string `json:"groups"`
 }
 
+// Verified wraps a successfully validated bundle together with its raw bytes
+// and digest.
 type Verified struct {
 	Payload      Payload
 	PayloadBytes []byte

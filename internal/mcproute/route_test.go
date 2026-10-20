@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/manifest"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // UpstreamConfig describes one test connector the way these tests did before

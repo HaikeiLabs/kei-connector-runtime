@@ -20,10 +20,10 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/collector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 

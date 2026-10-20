@@ -12,7 +12,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 

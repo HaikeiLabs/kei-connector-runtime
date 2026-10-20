@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // ADR-036 §4.2: a connector with transport "sse" speaks the deprecated

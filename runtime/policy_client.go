@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // Kei serves only kei.policy-bundle/v2 (TSK T89); v1 is never requested.

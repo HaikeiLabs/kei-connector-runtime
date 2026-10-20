@@ -4,7 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 

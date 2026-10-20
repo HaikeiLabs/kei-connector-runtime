@@ -9,7 +9,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // AuditRecord is the route's view of one tools/list or tools/call decision

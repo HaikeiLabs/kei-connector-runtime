@@ -36,8 +36,8 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 const (

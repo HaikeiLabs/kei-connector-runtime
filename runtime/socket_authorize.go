@@ -15,10 +15,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 const (

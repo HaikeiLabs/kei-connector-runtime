@@ -39,7 +39,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/skillsrepo"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/tito"
 	runtimecredentials "github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 const (

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // rpcError is a decoded JSON-RPC error with the ADR-036 §4.5 error.data.

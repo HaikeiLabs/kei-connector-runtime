@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 type DispatchRoute interface{ isDispatchRoute() }

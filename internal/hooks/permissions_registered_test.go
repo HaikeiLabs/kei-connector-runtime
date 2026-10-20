@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 const registeredTestInput = `{"tool_name":"Bash","tool_input":{"command":"git status"},"native_decision":"ask"}`

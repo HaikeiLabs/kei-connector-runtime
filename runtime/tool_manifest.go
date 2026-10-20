@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // Supported catalog manifest schemas. V4 connector entries carry a closed declarative plan.

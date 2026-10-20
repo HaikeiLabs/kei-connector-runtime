@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 func TestHookReportGoldenFixtures(t *testing.T) {

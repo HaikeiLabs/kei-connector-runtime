@@ -10,8 +10,8 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 type preparedOperation struct {

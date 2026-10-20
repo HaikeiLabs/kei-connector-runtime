@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 func currentPolicyBundleHealth(cfg Config, identity *RuntimeIdentity) *policybundlehealth.Health {

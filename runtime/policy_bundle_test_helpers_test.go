@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
+
+func init() { policybundle.SetSchemaValidator(func([]byte) error { return nil }) }
 
 func unsignedExampleBundle(t *testing.T, now time.Time) []byte {
 	t.Helper()

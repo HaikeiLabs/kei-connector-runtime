@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 const lazySubjectToken = "kh_live_runtime_test_token_1234567890"

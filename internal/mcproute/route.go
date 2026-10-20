@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	"github.com/google/uuid"
 )
 

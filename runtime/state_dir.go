@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // ErrStateDirOwned means another kei-proxy process already owns the state

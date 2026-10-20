@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/input"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // maxDaemonResponseBytes bounds the daemon's answer; a result is at most

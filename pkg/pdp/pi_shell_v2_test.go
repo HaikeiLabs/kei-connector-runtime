@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 func piShellPolicy(id, src, dst, action string, priority int, agentScope any) map[string]any {

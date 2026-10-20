@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 

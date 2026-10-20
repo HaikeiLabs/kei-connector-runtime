@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 

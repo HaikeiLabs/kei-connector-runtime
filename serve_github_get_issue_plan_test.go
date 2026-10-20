@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 func TestGitHubGetIssuePlanPermitsOnlyExactRepositoryAndIssue(t *testing.T) {

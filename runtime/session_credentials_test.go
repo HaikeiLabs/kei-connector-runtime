@@ -13,7 +13,7 @@ import (
 
 	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 

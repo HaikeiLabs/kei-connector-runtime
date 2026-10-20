@@ -26,12 +26,12 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 

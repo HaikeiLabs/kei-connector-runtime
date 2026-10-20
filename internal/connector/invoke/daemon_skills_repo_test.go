@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/policybundle"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // HAI-431 through the serve daemon (POST /v1/connectors:invoke): the daemon
