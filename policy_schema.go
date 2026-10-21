@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 
+	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -14,6 +15,7 @@ var policySchemas embed.FS
 func init() {
 	policybundle.SetSchemaValidator(validatePolicyBundleSchema)
 	policybundle.SetV2SchemaValidator(validatePolicyBundleV2Schema)
+	bundle.SetPlanValidator(policybundle.ValidateV2Plan)
 }
 
 func validatePolicyBundleSchema(raw []byte) error {

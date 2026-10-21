@@ -1,20 +1,21 @@
 package policybundle
 
 import (
+	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
 	"strings"
 	"time"
 )
 
 // DecisionPermit is the ADR-028 permit decision word, for callers that report
 // a decision in that vocabulary.
-const DecisionPermit = policyPermitAction
+const DecisionPermit = bundle.DecisionPermit
 
 // Session subject statuses (ADR-026 G0, kei#681). The subject is established
 // for a worker session by machine login plus kei or harness login and is held
 // only in kei-proxy memory; it is never read from a per-call request.
 const (
-	SubjectLinked         = "linked"
-	SubjectUnlinked       = "unlinked"
+	SubjectLinked         = bundle.SubjectLinked
+	SubjectUnlinked       = bundle.SubjectUnlinked
 	SubjectPending        = "pending"
 	SubjectRevoked        = "revoked"
 	SubjectCrossWorkspace = "cross_workspace"
@@ -23,21 +24,13 @@ const (
 // SessionSubject is the acting user of the current worker session. It
 // carries no groups: the groups a decision uses are the ones the verified
 // bundle holds for that user (B-20), never the ones a session claims.
-type SessionSubject struct {
-	UserID     string
-	Email      string
-	Source     string
-	ExternalID string
-	Status     string
-}
+type SessionSubject = bundle.SessionSubject
 
 // Memberships answers which groups, org roles and workspace grant the bundle
 // holds for a user. G0 puts memberships and grants in the bundle, but the
 // kei.policy-bundle/v1 schema has no field for them yet, so a v1 bundle
 // yields no Memberships and every membership-dependent source fails closed.
-type Memberships interface {
-	Lookup(userID string) (groups, roles []string, granted, known bool)
-}
+type Memberships = bundle.Memberships
 
 // BundleMemberships returns the memberships carried by the bundle, or nil
 // when the bundle does not carry them (mode=online or no identities).
@@ -101,15 +94,7 @@ func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, grant
 // LookupLinkedUser resolves a CLI session's user_id against bundle identities.
 // Remote sessions must use the exact source/external_id key instead.
 func (v *Verified) LookupLinkedUser(userID string, now time.Time) (Identity, bool) {
-	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || !v.SubjectSnapshotFresh(now) || userID == "" {
-		return Identity{}, false
-	}
-	for _, id := range v.Payload.Identities {
-		if id.UserID == userID && id.Status == SubjectLinked && (id.ExpireTime.IsZero() || now.Before(id.ExpireTime)) {
-			return id, true
-		}
-	}
-	return Identity{}, false
+	return v.toBundle().LookupLinkedUser(userID, now)
 }
 
 func statusReasonCode(status string) string {
@@ -131,31 +116,14 @@ func statusReasonCode(status string) string {
 // itself has been issued (IssuedAt ≤ now, allowing MaxIssuedAtClockSkew so a
 // bundle Validate accepted is usable at once).
 func (v *Verified) SubjectSnapshotFresh(now time.Time) bool {
-	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || v.Payload.Identities == nil {
-		return false
-	}
-	return !v.Payload.IssuedAt.After(now.Add(MaxIssuedAtClockSkew))
+	return v.toBundle().SubjectSnapshotFresh(now)
 }
 
 // LookupIdentity resolves an external session key against the verified
 // bundle's ADR-034 identities table. Duplicate matches and expired entries are
 // rejected rather than allowing array order to select an identity.
 func (v *Verified) LookupIdentity(source, externalID string, now time.Time) (Identity, bool) {
-	if v == nil || v.Payload.SubjectResolution.Mode != "bundle" || source == "" || externalID == "" || (v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(now)) {
-		return Identity{}, false
-	}
-	var found Identity
-	matched := false
-	for _, id := range v.Payload.Identities {
-		if id.Source != source || id.ExternalID != externalID {
-			continue
-		}
-		if matched || (!id.ExpireTime.IsZero() && !now.Before(id.ExpireTime)) {
-			return Identity{}, false
-		}
-		found, matched = id, true
-	}
-	return found, matched
+	return v.toBundle().LookupIdentity(source, externalID, now)
 }
 
 // EvaluateSession decides a call with the in-memory session subject and no

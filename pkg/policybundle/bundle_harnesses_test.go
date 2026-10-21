@@ -283,9 +283,18 @@ func contractPropertyNames(t *testing.T) map[string]bool {
 // included; the empty name (json:"-") is excluded.
 func payloadJSONFieldNames() map[string]bool {
 	t := reflect.TypeOf(Payload{})
-	m := make(map[string]bool, t.NumField())
-	for i := range t.NumField() {
-		tag := t.Field(i).Tag.Get("json")
+	m := make(map[string]bool)
+	for _, f := range reflect.VisibleFields(t) {
+		if !f.IsExported() {
+			continue
+		}
+		// VisibleFields lists the anonymous embedded field itself (Index=[0])
+		// and every promoted field (Index=[0,…]). Skip the direct anonymous
+		// field — its json fields are promoted and listed separately.
+		if len(f.Index) == 1 && f.Anonymous {
+			continue
+		}
+		tag := f.Tag.Get("json")
 		name, _, _ := strings.Cut(tag, ",")
 		if name == "" || name == "-" {
 			continue

@@ -2,6 +2,7 @@ package policybundle
 
 import (
 	"encoding/json"
+	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
 	"sort"
 	"time"
 )
@@ -22,59 +23,21 @@ type Operation struct {
 	ResourceParentType string
 }
 
-type V2ResourceType struct {
-	Type       string `json:"type"`
-	ParentType string `json:"parent_type,omitempty"`
-}
+// V2ResourceType is an alias for the shared contracts type.
+type V2ResourceType = bundle.V2ResourceType
 
-type V2Tool struct {
-	Name           string `json:"name"`
-	Source         string `json:"source"`
-	OperationClass string `json:"operation_class"`
-	Route          struct {
-		ConnectorBinding *struct {
-			ConnectorID string `json:"connector_id"`
-		} `json:"connector_binding,omitempty"`
-		HarnessExecutor *json.RawMessage `json:"harness_executor,omitempty"`
-	} `json:"route"`
-	RequiredCapabilities []string         `json:"required_capabilities,omitempty"`
-	ResourceTypes        []V2ResourceType `json:"resource_types,omitempty"`
-	Plan                 json.RawMessage  `json:"plan,omitempty"`
-}
+// V2Tool is an alias for the shared contracts type.
+type V2Tool = bundle.V2Tool
 
 // V2HarnessTool reports whether name resolves to an explicitly registered
 // harness_executor route in a verified v2 bundle.
 func (v *Verified) V2HarnessTool(name string, now time.Time) bool {
-	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
-		return false
-	}
-	var set v2PolicySet
-	if strictJSON(v.Payload.PolicySet, &set) != nil {
-		return false
-	}
-	for _, tool := range set.Tools {
-		if tool.Name == name {
-			return tool.Route.HarnessExecutor != nil && tool.Route.ConnectorBinding == nil
-		}
-	}
-	return false
+	return v.toBundle().V2HarnessTool(name, now)
 }
 
 // V2ConnectorTool resolves one trusted connector tool from the parsed v2 set.
 func (v *Verified) V2ConnectorTool(name string, now time.Time) (V2Tool, bool) {
-	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
-		return V2Tool{}, false
-	}
-	var set v2PolicySet
-	if strictJSON(v.Payload.PolicySet, &set) != nil {
-		return V2Tool{}, false
-	}
-	for _, tool := range set.Tools {
-		if tool.Name == name && tool.Route.ConnectorBinding != nil && len(tool.Plan) > 0 && ValidateV2Plan(tool) == nil {
-			return tool, true
-		}
-	}
-	return V2Tool{}, false
+	return v.toBundle().V2ConnectorTool(name, now)
 }
 
 type v2Check struct {
