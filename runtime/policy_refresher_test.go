@@ -2,10 +2,13 @@ package runtime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +26,57 @@ func TestStartPolicyRefresherNoopWhenNotRuntime(t *testing.T) {
 		nil, nil, nil, nil,
 	)
 	stop() // must not block
+}
+
+func TestPolicyBootstrapEventSuccessFailureAndRedaction(t *testing.T) {
+	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	success := keiruntime.PolicyBootstrapEvent(nil, 42, "sha256:abc", "dev", "run-1", now)
+	if success.EventType != "policy_bundle_bootstrap" || success.Outcome != keiruntime.HeartbeatOK || success.Attrs["bundle_version"] != "42" || success.Attrs["bundle_digest"] != "sha256:abc" {
+		t.Fatalf("success event = %+v", success)
+	}
+	secretError := errors.New("provider body contains private-token-123")
+	failure := keiruntime.PolicyBootstrapEvent(secretError, 0, "", "dev", "run-1", now)
+	encoded, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure.Outcome != keiruntime.HeartbeatCatalogError || failure.Attrs["reason_code"] != "policy_sync_failed" || strings.Contains(string(encoded), "private-token-123") || strings.Contains(string(encoded), secretError.Error()) {
+		t.Fatalf("failure event was unsafe or incomplete: %s", encoded)
+	}
+}
+
+func TestPolicyBootstrapCallbackRunsExactlyOnce(t *testing.T) {
+	secret := errors.New("provider payload and bearer secret must not be audited")
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "failure", err: secret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			whoami := func() (*keiruntime.Identity, error) {
+				return &keiruntime.Identity{ID: "id", OrgID: "org", WorkspaceID: strPtr("ws")}, nil
+			}
+			syncFn := func(*keiruntime.Identity) error { return tc.err }
+			stop := keiruntime.StartPolicyRefresher(ctx, fakePolicyConfig{isRuntime: true, policyState: t.TempDir()}, whoami, syncFn, nil, nil, nil, nil,
+				keiruntime.WithBootstrapResult(func(err error) {
+					calls.Add(1)
+					if err != tc.err {
+						t.Errorf("callback error = %v, want %v", err, tc.err)
+					}
+					cancel()
+				}),
+			)
+			stop()
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("bootstrap callback calls = %d, want exactly one", got)
+			}
+		})
+	}
 }
 
 func TestStartPolicyRefresherStopCancels(t *testing.T) {

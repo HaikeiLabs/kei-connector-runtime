@@ -36,6 +36,9 @@ type PolicyRefresher struct {
 	OnIdentity func(*Identity)
 	// AfterSync runs after every sync attempt with its result.
 	AfterSync func(error)
+	// OnBootstrap runs once with the result of the first policy sync attempt.
+	OnBootstrap   func(error)
+	bootstrapDone bool
 	// After is the timer factory for poll intervals. Exported for testing.
 	After func(time.Duration) <-chan time.Time
 	// Jitter is the jitter function applied to each poll interval. Exported for testing.
@@ -133,6 +136,12 @@ func (r *PolicyRefresher) Run(ctx context.Context) {
 		if identity != nil {
 			beforeState := store.State()
 			err := r.sync(identity)
+			if !r.bootstrapDone {
+				r.bootstrapDone = true
+				if r.OnBootstrap != nil {
+					r.OnBootstrap(err)
+				}
+			}
 			afterState := store.State()
 			if err != nil && ctx.Err() == nil {
 				r.logSyncFailure(err, beforeState, afterState)
@@ -292,6 +301,11 @@ func StartPolicyRefresher(
 // RefresherOption configures a PolicyRefresher started by
 // StartPolicyRefresher.
 type RefresherOption func(*PolicyRefresher)
+
+// WithBootstrapResult registers a callback for the first policy sync result.
+func WithBootstrapResult(callback func(error)) RefresherOption {
+	return func(p *PolicyRefresher) { p.OnBootstrap = callback }
+}
 
 // WithHarnessResync runs r beside the refresher (nil is a no-op).
 func WithHarnessResync(r *harnessresync.Resyncer) RefresherOption {

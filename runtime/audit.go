@@ -64,6 +64,25 @@ func EmitDecision(path string, maxBytes int64, e DecisionEvent) {
 	}
 }
 
+// PolicyBootstrapEvent builds the allowlisted bootstrap audit record. Sync errors
+// are deliberately reduced to a stable reason code; error text may contain
+// provider response details and must never enter lifecycle audit.
+func PolicyBootstrapEvent(syncErr error, version int64, digest, runtimeVersion, runID string, observedAt time.Time) LifecycleEvent {
+	outcome := HeartbeatOK
+	attrs := map[string]string{}
+	if syncErr != nil {
+		outcome = HeartbeatCatalogError
+		attrs["reason_code"] = "policy_sync_failed"
+	} else {
+		attrs["bundle_version"] = fmt.Sprintf("%d", version)
+		attrs["bundle_digest"] = digest
+	}
+	return LifecycleEvent{
+		EventType: "policy_bundle_bootstrap", Outcome: outcome, ObservedAt: observedAt,
+		RuntimeVersion: runtimeVersion, RunID: runID, Seq: 1, Attrs: attrs,
+	}
+}
+
 func AppendLifecycleEvent(path string, maxBytes int64, e LifecycleEvent) error {
 	if path == "" {
 		return nil
