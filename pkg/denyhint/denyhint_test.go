@@ -14,6 +14,8 @@ func TestHintCoversEveryKnownDenyCode(t *testing.T) {
 		"subject_missing",
 		"access_grant_expired",
 		"no_grant_matched",
+		"subject_unlinked",
+		"preflight_required",
 	}
 	for _, code := range known {
 		if h := Hint(code); h == "" {
@@ -29,6 +31,26 @@ func TestHintToolNotRegisteredNamesTheFullFix(t *testing.T) {
 	const want = "Register the harness tools: kei harness sync --harness custom --manifest tools.json"
 	if got := Hint("tool_not_registered"); got != want {
 		t.Errorf("Hint(%q) = %q, want %q", "tool_not_registered", got, want)
+	}
+}
+
+// TestHintSubjectUnlinkedNamesTheFullFix pins the exact hint for
+// subject_unlinked: it must tell the developer to link the user's identity
+// through the enrollment link or console.
+func TestHintSubjectUnlinkedNamesTheFullFix(t *testing.T) {
+	const want = "Link this identity to the installation: open the enrollment link when the response carries one, or link the user on the console Users page."
+	if got := Hint("subject_unlinked"); got != want {
+		t.Errorf("Hint(%q) = %q, want %q", "subject_unlinked", got, want)
+	}
+}
+
+// TestHintPreflightRequiredNamesTheFullFix pins the exact hint for
+// preflight_required: it must tell the developer to register the tool and
+// wait for the bundle refresh.
+func TestHintPreflightRequiredNamesTheFullFix(t *testing.T) {
+	const want = "Register the tool so the active policy bundle lists it (POST /v1/tools:register on the runtime socket, or kei harness sync --harness custom --manifest tools.json), then wait for the next bundle refresh."
+	if got := Hint("preflight_required"); got != want {
+		t.Errorf("Hint(%q) = %q, want %q", "preflight_required", got, want)
 	}
 }
 
