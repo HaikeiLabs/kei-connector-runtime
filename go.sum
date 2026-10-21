@@ -38,6 +38,8 @@ github.com/HaikeiLabs/kei-connector-contracts v0.10.3-0.20261020045208-b1ac73741
 github.com/HaikeiLabs/kei-connector-contracts v0.10.3-0.20261020045208-b1ac73741ed4/go.mod h1:Y3GI1O5wqRFogqDGPiXcE20wQyEHX8rTGXw2U2VCKQw=
 github.com/HaikeiLabs/kei-connector-contracts v0.10.3-0.20261020132842-bd4701639ebd h1:MdBmDrX5SwAz5X/2dUsFWqB6vXffLSAaipXTecUhDP0=
 github.com/HaikeiLabs/kei-connector-contracts v0.10.3-0.20261020132842-bd4701639ebd/go.mod h1:Y3GI1O5wqRFogqDGPiXcE20wQyEHX8rTGXw2U2VCKQw=
+github.com/HaikeiLabs/kei-connector-contracts v0.10.4 h1:ZJKqMbzHfyAC5Yl8cf/sWYYwBQOuqCQ8CY7HzSrB1vk=
+github.com/HaikeiLabs/kei-connector-contracts v0.10.4/go.mod h1:Y3GI1O5wqRFogqDGPiXcE20wQyEHX8rTGXw2U2VCKQw=
 github.com/aws/aws-sdk-go-v2 v1.45.1 h1:iIoG3NaLhV6UZpPXyPXlDj2I9oS8tV/nMcMnITCC6Ks=
 github.com/aws/aws-sdk-go-v2 v1.45.1/go.mod h1:bttEH6JqnUL8LepvDVfdrds/fZ5bCIxzpe3abyUrhDU=
 github.com/aws/aws-sdk-go-v2/config v1.33.1 h1:bq9jze1hQ5YTCLoVxNnbp0T7rglrlOE7N9YsHqjGkEw=

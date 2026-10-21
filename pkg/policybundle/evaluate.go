@@ -2,30 +2,21 @@ package policybundle
 
 import (
 	"encoding/json"
+	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
 	pol "github.com/HaikeiLabs/kei-connector-contracts/policy"
 	"strings"
 )
 
 const policyPermitAction = "per" + "mit"
 
-type Subject struct {
-	UserID          string          `json:"user_id"`
-	Status          string          `json:"status"`
-	EffectiveGroups []string        `json:"effective_groups"`
-	OrgRoles        []string        `json:"org_roles"`
-	Enrollment      json.RawMessage `json:"enrollment,omitempty"`
-	MaxAgeSeconds   int             `json:"max_age_seconds,omitempty"`
-}
-type Call struct {
-	Tool, Action, Resource, AgentID, ConnectorID, Capability, UserID, Email string
-	ConnectorInvocation                                                     bool
-}
-type Decision struct {
-	Outcome    string
-	PolicyID   string
-	ReasonCode string
-	Reason     string
-}
+// Subject is an alias for the shared contracts type.
+type Subject = bundle.Subject
+
+// Call is the shared tool-call record used throughout the evaluation path.
+type Call = bundle.Call
+
+// Decision is the shared evaluation result record.
+type Decision = bundle.Decision
 type policySet struct {
 	Groups     []group     `json:"groups"`
 	Tools      []tool      `json:"tools"`

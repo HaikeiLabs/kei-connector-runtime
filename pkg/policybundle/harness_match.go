@@ -2,8 +2,6 @@ package policybundle
 
 import (
 	"encoding/json"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
@@ -33,133 +31,17 @@ const (
 	HarnessReasonEvaluateViaPDP   = harnessmatch.ReasonEvaluateViaPDP
 )
 
-// EvaluateHarness applies kei.harness-match/v1 to a harness tool call. It
-// decodes the bundle's policy set and delegates to harnessmatch.Evaluate.
 // EvaluateV2PiShell applies ordered v2 harness policies to a Pi shell call
 // using the authenticated session subject and the verified membership snapshot.
 func (v *Verified) EvaluateV2PiShell(argv []string, agentID string, subject *SessionSubject, now time.Time) Decision {
-	if agentID == "" {
-		return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "the trusted default agent is unavailable"}
-	}
-	if decision, denied := v.v2SubjectDenial(subject, now); denied {
-		return decision
-	}
-	members := BundleMembershipsAt(v, now)
-	if members == nil {
-		return Decision{Outcome: "deny", ReasonCode: "subject_pending", Reason: "the verified membership snapshot is unavailable"}
-	}
-	groups, roles, granted, known := members.Lookup(subject.UserID)
-	if !known || !granted {
-		return Decision{Outcome: "deny", ReasonCode: "subject_pending", Reason: "the verified membership snapshot does not grant the session subject"}
-	}
-	var set v2PolicySet
-	if err := strictJSON(v.Payload.PolicySet, &set); err != nil || set.HarnessMatchSemantics != "kei.harness-match/v1" {
-		return invalidDecision()
-	}
-	call := harnessmatch.Call{Kind: "pi", AgentID: agentID, Argv: argv}
-	matching := make([]v2HarnessPolicy, 0, len(set.HarnessPolicies))
-	for _, policy := range set.HarnessPolicies {
-		if !v2ScopeMatches(policy.Scope, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID) {
-			continue
-		}
-		matched, renderable := harnessmatch.MatchDst(policy.Dst, call)
-		if !renderable || !matched {
-			continue
-		}
-		// Shell calls can only be permitted by a literal shell: argv prefix.
-		// A registered tool grant (including tool:pi.bash) is never a shell grant.
-		if policy.Action == policyPermitAction && (!strings.HasPrefix(policy.Dst, "shell:") || policy.Dst == "shell:*") {
-			continue
-		}
-		if sourceMatches(policy.Src, call, subject, groups, roles) {
-			matching = append(matching, policy)
-		}
-	}
-	if len(matching) == 0 {
-		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no shell policy matched"}
-	}
-	sort.Slice(matching, func(i, j int) bool {
-		if matching[i].Priority != matching[j].Priority {
-			return matching[i].Priority > matching[j].Priority
-		}
-		if matching[i].Action != matching[j].Action {
-			return matching[i].Action == "deny"
-		}
-		return matching[i].PolicyID < matching[j].PolicyID
-	})
-	winner := matching[0]
-	if winner.Action == "deny" {
-		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}
-	}
-	return Decision{Outcome: "allow", PolicyID: winner.PolicyID, ReasonCode: "policy_permit"}
-}
-
-func sourceMatches(pattern string, call harnessmatch.Call, subject *SessionSubject, groups, roles []string) bool {
-	if pattern == "harness:*" {
-		return true
-	}
-	if strings.HasPrefix(pattern, "harness:") {
-		return strings.TrimPrefix(pattern, "harness:") == call.Kind
-	}
-	// Non-harness patterns route through srcMatch, which delegates agent: and
-	// org: matching to its own logic and routes everything else to
-	// pol.MatchPrincipal.
-	return srcMatch(pattern, Call{AgentID: call.AgentID, UserID: subject.UserID, Email: subject.Email}, groups, roles)
+	return v.toBundle().EvaluateV2PiShell(argv, agentID, subject, now)
 }
 
 // EvaluateV2MCP applies ordered v2 harness policies to an MCP tool call
 // using the authenticated session subject, the verified membership snapshot,
 // and the calling harness kind (ADR-036 §4.6).
 func (v *Verified) EvaluateV2MCP(slug, tool, agentID, harnessKind string, subject *SessionSubject, now time.Time) Decision {
-	if agentID == "" {
-		return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "the trusted default agent is unavailable"}
-	}
-	if decision, denied := v.v2SubjectDenial(subject, now); denied {
-		return decision
-	}
-	members := BundleMembershipsAt(v, now)
-	if members == nil {
-		return Decision{Outcome: "deny", ReasonCode: "subject_pending", Reason: "the verified membership snapshot is unavailable"}
-	}
-	groups, roles, granted, known := members.Lookup(subject.UserID)
-	if !known || !granted {
-		return Decision{Outcome: "deny", ReasonCode: "subject_pending", Reason: "the verified membership snapshot does not grant the session subject"}
-	}
-	var set v2PolicySet
-	if err := strictJSON(v.Payload.PolicySet, &set); err != nil || set.HarnessMatchSemantics != "kei.harness-match/v1" {
-		return invalidDecision()
-	}
-	call := harnessmatch.Call{Kind: harnessKind, AgentID: agentID, MCPServer: slug, MCPTool: tool}
-	matching := make([]v2HarnessPolicy, 0, len(set.HarnessPolicies))
-	for _, policy := range set.HarnessPolicies {
-		if !v2ScopeMatches(policy.Scope, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID) {
-			continue
-		}
-		matched, renderable := harnessmatch.MatchDst(policy.Dst, call)
-		if !renderable || !matched {
-			continue
-		}
-		if sourceMatches(policy.Src, call, subject, groups, roles) {
-			matching = append(matching, policy)
-		}
-	}
-	if len(matching) == 0 {
-		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no MCP policy matched"}
-	}
-	sort.Slice(matching, func(i, j int) bool {
-		if matching[i].Priority != matching[j].Priority {
-			return matching[i].Priority > matching[j].Priority
-		}
-		if matching[i].Action != matching[j].Action {
-			return matching[i].Action == "deny"
-		}
-		return matching[i].PolicyID < matching[j].PolicyID
-	})
-	winner := matching[0]
-	if winner.Action == "deny" {
-		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}
-	}
-	return Decision{Outcome: "allow", PolicyID: winner.PolicyID, ReasonCode: "policy_permit"}
+	return v.toBundle().EvaluateV2MCP(slug, tool, agentID, harnessKind, subject, now)
 }
 
 func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID, reason string) {
