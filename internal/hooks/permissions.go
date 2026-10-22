@@ -110,6 +110,11 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 	if !validNativeDecision(phase, decision) {
 		decision = "unknown"
 	}
+	if kind == "codex" && phase == "pre" && decision == "unknown" && cfg.CodexDecisionSource != nil {
+		if native := cfg.CodexDecisionSource(context.Background(), in); validNativeDecision(phase, native) {
+			decision = native
+		}
+	}
 	tool, argv0 := reportedTool(in.ToolName, in.ToolInput)
 	skill := activeSkillFor(kind, in.SessionID, in.ToolName, in.ToolInput, cfg.RuntimeStateDir)
 	registered := harnessRegisteredFor(cfg.RuntimeStateDir, *harnessID, kind)
