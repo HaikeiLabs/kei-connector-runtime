@@ -103,7 +103,7 @@ func (c *controlPlaneModelProfileClient) getRuntimeModelProfile(ctx context.Cont
 		DefaultModel                  string     `json:"default_model"`
 		AuthType                      string     `json:"auth_type"`
 		Status                        string     `json:"status"`
-		CredentialStoreInstallationID uuid.UUID  `json:"credential_store_installation_id"`
+		CredentialStoreInstallationID *uuid.UUID `json:"credential_store_installation_id,omitempty"`
 		SecretBackend                 string     `json:"secret_backend"`
 		SecretRef                     string     `json:"secret_ref,omitempty"`
 	}
@@ -112,16 +112,18 @@ func (c *controlPlaneModelProfileClient) getRuntimeModelProfile(ctx context.Cont
 	}
 
 	result := &ModelProfile{
-		ProfileID:                   profile.ID.String(),
-		OrgID:                       profile.OrgID.String(),
-		DisplayName:                 profile.DisplayName,
-		Endpoint:                    profile.Endpoint,
-		DefaultModel:                profile.DefaultModel,
-		AuthType:                    profile.AuthType,
-		Status:                      profile.Status,
-		SecretRef:                   profile.SecretRef,
-		SecretBackend:               profile.SecretBackend,
-		CredentialStoreInstallation: profile.CredentialStoreInstallationID.String(),
+		ProfileID:     profile.ID.String(),
+		OrgID:         profile.OrgID.String(),
+		DisplayName:   profile.DisplayName,
+		Endpoint:      profile.Endpoint,
+		DefaultModel:  profile.DefaultModel,
+		AuthType:      profile.AuthType,
+		Status:        profile.Status,
+		SecretRef:     profile.SecretRef,
+		SecretBackend: profile.SecretBackend,
+	}
+	if profile.CredentialStoreInstallationID != nil {
+		result.CredentialStoreInstallation = profile.CredentialStoreInstallationID.String()
 	}
 	if profile.AgentID != nil {
 		result.AgentID = profile.AgentID.String()

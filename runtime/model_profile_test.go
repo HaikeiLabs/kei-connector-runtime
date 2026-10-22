@@ -36,6 +36,9 @@ func TestControlPlaneModelProfileClient_GetRuntimeDefaultModelProfile(t *testing
 	if profile == nil || profile.DefaultModel != "test-model" {
 		t.Fatalf("unexpected profile: %+v", profile)
 	}
+	if profile.CredentialStoreInstallation != "" || profile.SecretBackend != "" || profile.SecretRef != "" {
+		t.Fatalf("keyless profile without store returned credential-store metadata: %+v", profile)
+	}
 }
 
 func TestControlPlaneModelProfileClient_GetRuntimeAssignedModelProfile(t *testing.T) {
