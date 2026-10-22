@@ -162,6 +162,20 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 			},
 			local.AfterSync,
 			keiruntime.WithClaimedStateDir(),
+			keiruntime.WithBootstrapResult(func(syncErr error) {
+				var bundleVersion int64
+				var bundleDigest string
+				if syncErr == nil {
+					if store, err := policybundle.OpenStore(cfg.RuntimeStateDir); err == nil {
+						if status, err := store.Status(time.Now().UTC()); err == nil {
+							bundleVersion, bundleDigest = status.BundleVersion, status.BundleDigest
+						}
+					}
+				}
+				runID, _ := keiruntime.HeartbeatRunID(os.Getenv)
+				event := keiruntime.PolicyBootstrapEvent(syncErr, bundleVersion, bundleDigest, version, runID, time.Now().UTC())
+				_ = keiruntime.AppendLifecycleEvent(cfg.PolicyAuditPath(), cfg.PolicyAuditMaxBytes(), event)
+			}),
 			keiruntime.WithHarnessResync(keiruntime.NewHarnessResync(cfg, os.Getenv)),
 		)
 	})
