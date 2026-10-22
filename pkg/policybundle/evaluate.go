@@ -75,6 +75,20 @@ func (v *Verified) Evaluate(call Call, subject *Subject) Decision {
 	return v.evaluateRegistered(call, subject, set, *reg)
 }
 
+// ToolService returns the credential service declared for a tool in this verified bundle.
+func (v *Verified) ToolService(name string) string {
+	set, err := v.decodePolicySet()
+	if err != nil {
+		return ""
+	}
+	for _, t := range set.Tools {
+		if t.Name == name {
+			return t.Service
+		}
+	}
+	return ""
+}
+
 // SubjectRequired reports whether deciding call needs online subject
 // attributes. Identity is only for credentials: it does when the tool is bound
 // to a connector capability, or when the catalog-ordered policy walk reaches a
@@ -94,7 +108,7 @@ func (v *Verified) SubjectRequired(call Call) bool {
 	return v.Evaluate(call, nil).ReasonCode == "subject_resolution_unavailable"
 }
 
-// EvaluateConnector resolves a connector call through the tool registry's exact
+// EvaluateConnector resolves a connector call through the bundle's exact
 // connector/capability binding; it never trusts the caller's free-form action to
 // choose a policy target.
 func (v *Verified) EvaluateConnector(call Call, subject *Subject) Decision {

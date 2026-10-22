@@ -28,7 +28,6 @@ func TestAuthorizeColdRuntimeDeniesWithoutCatalogDecision(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", t.TempDir())
-	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	var code int
 	stdout := captureStdout(func() { code = runAuthorize([]string{"--tool", "web_search", "--action", "tool:web_search"}) })
 	if code != 1 {

@@ -104,7 +104,6 @@ func runLazySubjectAuthorize(t *testing.T, cp *lazySubjectControlPlane, stateDir
 	t.Setenv("KEI_RUNTIME_TOKEN", lazySubjectToken)
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", cp.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
-	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	var code int
 	stdout := captureStdout(func() { code = runAuthorize(args) })
 	var out AuthorizeOutput

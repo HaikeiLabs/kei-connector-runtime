@@ -60,7 +60,7 @@ Behaviour changes:
   audit batches advance when the catalog's upserted and skipped counts add up
   to the received count; skipped records are logged.
 - `authorize` no longer fetches OAuth tokens from the OIDC bridge relay
-  (`OIDC_BRIDGE_URL` + `OIDC_BRIDGE_SECRET`). A registry service's credential
+  (`OIDC_BRIDGE_URL` + `OIDC_BRIDGE_SECRET`). A tool service's credential
   comes only from its credential binding
   (`/api/v1/runtime/credential-bindings/...`). For OAuth connectors, use
   `kei-proxy connector invoke`: the catalog fetches the token per call

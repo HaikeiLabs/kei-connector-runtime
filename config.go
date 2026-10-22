@@ -21,7 +21,6 @@ type Config struct {
 	CredentialSyncPrivateKey      string
 	CredentialStoreInstallationID string
 	ProviderUserID                string
-	RegistryPath                  string
 	AuditPath                     string
 	AuditMaxBytes                 int64
 	Env                           string
@@ -120,7 +119,6 @@ func configFromEnv() Config {
 		CredentialSyncPrivateKey:      os.Getenv("KEI_CREDENTIAL_SYNC_PRIVATE_KEY"),
 		CredentialStoreInstallationID: os.Getenv("KEI_CREDENTIAL_STORE_INSTALLATION_ID"),
 		ProviderUserID:                os.Getenv("KEI_PROXY_PROVIDER_USER"),
-		RegistryPath:                  envOr("KEI_PROXY_REGISTRY", "/data/config/tools.yaml"),
 		AuditPath:                     os.Getenv("KEI_PROXY_AUDIT"),
 		AuditMaxBytes:                 auditMaxBytesFromEnv(),
 		Env:                           os.Getenv("ENV"),
