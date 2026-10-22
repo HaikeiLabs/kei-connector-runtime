@@ -44,6 +44,16 @@ func TestHintSubjectUnlinkedNamesTheFullFix(t *testing.T) {
 	}
 }
 
+// TestHintNoMatchingPolicyNamesTheFullFix pins the exact hint for
+// no_matching_policy: it must suggest the current kei policy create syntax
+// (not the deprecated kei policies create with --src-pattern/--dst-pattern).
+func TestHintNoMatchingPolicyNamesTheFullFix(t *testing.T) {
+	const want = "Add a policy for this target: kei policy create --group <group> --allow <target> --workspace <workspace>"
+	if got := Hint("no_matching_policy"); got != want {
+		t.Errorf("Hint(%q) = %q, want %q", "no_matching_policy", got, want)
+	}
+}
+
 // TestHintPreflightRequiredNamesTheFullFix pins the exact hint for
 // preflight_required: it must tell the developer to register the tool and
 // wait for the bundle refresh.
