@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ type ToolInput struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 	SessionID      string          `json:"session_id"`
 	ToolUseID      string          `json:"tool_use_id"`
+	CWD            string          `json:"cwd"`
 	EventName      string          `json:"hook_event_name"`
 	Phase          string          `json:"phase"`
 	NativeDecision string          `json:"native_decision"`
@@ -30,6 +32,10 @@ type Config struct {
 	AppendAudit     func([]byte) error
 	AuditCrypto     *auditcrypto.Provider
 	SubjectSource   session.SubjectSource
+	// CodexDecisionSource queries the native Codex rule evaluator for a
+	// pre-tool event. It is optional so report-hook unit tests and other
+	// harnesses never depend on a locally installed Codex binary.
+	CodexDecisionSource func(context.Context, ToolInput) string
 }
 
 // sesionLevelEvent reports whether eventName is a harness event that carries

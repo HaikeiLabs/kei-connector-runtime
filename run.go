@@ -98,10 +98,11 @@ func runHook(args []string) int {
 	cfg := configFromEnv()
 	auditProv := auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken)
 	return hooks.Run(args, os.Stdin, os.Stdout, os.Stderr, hooks.Config{
-		RuntimeStateDir: cfg.RuntimeStateDir,
-		AuditCrypto:     auditProv,
-		AppendAudit:     hooks.SpoolAppender(cfg.AuditPath, cfg.RuntimeStateDir, cfg.AuditMaxBytes),
-		SubjectSource:   session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken),
+		RuntimeStateDir:     cfg.RuntimeStateDir,
+		AuditCrypto:         auditProv,
+		AppendAudit:         hooks.SpoolAppender(cfg.AuditPath, cfg.RuntimeStateDir, cfg.AuditMaxBytes),
+		SubjectSource:       session.NewSocketSubjectSource(runtimeSocketPathFromEnv(), cfg.RuntimeToken),
+		CodexDecisionSource: hooks.CodexNativeDecision,
 	})
 }
 
