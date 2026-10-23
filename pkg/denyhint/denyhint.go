@@ -8,7 +8,7 @@ package denyhint
 // offering a generic or wrong command.
 var hints = map[string]string{
 	"agent_not_bound_to_connector": "Bind the agent to the connector on the console Connectors page (kei-cli has no bind command).",
-	"no_matching_policy":           "Add a policy for this source and target: kei policies create --name <name> --src-pattern <src> --dst-pattern <dst> --effect permit",
+	"no_matching_policy":           "Add a policy for this target: kei policy create --group <group> --allow <target> --workspace <workspace>",
 	"tool_not_registered":          "Register the harness tools: kei harness sync --harness custom --manifest tools.json",
 	"agent_not_assigned":           "Assign an agent to this runtime installation on the console Agents page so the runtime identity has a default agent.",
 	"credential_unavailable":       "Connect the provider on the console Connectors page (or deliver the credential) so the runtime can resolve the connector credential.",
