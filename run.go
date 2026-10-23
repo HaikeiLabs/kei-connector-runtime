@@ -210,7 +210,6 @@ Environment:
   KEI_CREDENTIAL_STORE_INSTALLATION_ID credential store to register for sync
   KEI_CREDENTIAL_SYNC_KEY_ID sync recipient key identifier
   KEI_CREDENTIAL_SYNC_PRIVATE_KEY base64 X25519 private key for sync
-  KEI_PROXY_REGISTRY        tool->service registry path (default /data/config/tools.yaml)
   KEI_PROXY_AUDIT           audit JSONL file path (authorize appends, collector ships; when
                             unset, hooks append to and the collector ships
                             $KEI_RUNTIME_STATE_DIR/audit/harness-tool.jsonl)

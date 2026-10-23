@@ -45,7 +45,6 @@ func TestAuthorizeAllowsCLIInstallationWithoutPlatformTenantID(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
-	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	t.Setenv("KEI_PROXY_PLATFORM_TENANT_ID", "")
 	var code int
 	stdout := captureStdout(func() { code = runAuthorize([]string{"--tool", "web_search", "--user", "user-member-0001"}) })
@@ -92,7 +91,6 @@ func TestAuthorizeResolvesSubjectAtControlPlane(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", controlPlane.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
-	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	var code int
 	stdout := captureStdout(func() {
 		code = runAuthorize([]string{"--tool", "web_search", "--provider-user", "discord-member-0001"})
@@ -107,7 +105,6 @@ func TestAuthorizeResolvesSubjectAtControlPlane(t *testing.T) {
 
 func TestRunAuthorizeAcceptsInvokingSubjectFlag(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
-	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	stderr := captureStderr(func() {
 		if code := runAuthorize([]string{"--tool", "web_search", "--invoking-subject", "victim"}); code != 1 {
 			t.Fatalf("exit = %d, want startup failure", code)
@@ -152,7 +149,6 @@ func TestAuthorizeUsesPersistedBundleAndOnlineSubjectForUserDefault(t *testing.T
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", control.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", stateDir)
-	t.Setenv("KEI_PROXY_REGISTRY", "tools.yaml")
 	var code int
 	stdout := captureStdout(func() {
 		code = runAuthorize([]string{"--tool", "web_search", "--provider-user", "discord-member-0001"})

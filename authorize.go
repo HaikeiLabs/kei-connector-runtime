@@ -41,7 +41,6 @@ func runAuthorize(args []string) int {
 	tool := fs.String("tool", "", "tool being invoked (e.g. github.create_pr)")
 	action := fs.String("action", "", "action to authorize (e.g. github:write)")
 	resource := fs.String("resource", "", "resource/data being accessed")
-	registryPath := fs.String("registry", "", "tool->service registry path (default $KEI_PROXY_REGISTRY)")
 	timeout := fs.Int("timeout", 30, "ABAC request timeout in seconds")
 	auditPath := fs.String("audit", envOr("KEI_PROXY_AUDIT", ""), "audit JSONL file path (default $KEI_PROXY_AUDIT)")
 
@@ -73,9 +72,6 @@ func runAuthorize(args []string) int {
 	if cfg.ProviderUserID == "" {
 		cfg.ProviderUserID = *user
 	}
-	if *registryPath != "" {
-		cfg.RegistryPath = *registryPath
-	}
 	if *auditPath != "" {
 		cfg.AuditPath = *auditPath
 	}
@@ -86,12 +82,6 @@ func runAuthorize(args []string) int {
 	}
 	if cfg.RuntimeToken == "" {
 		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required")
-		return 1
-	}
-
-	reg, err := keiruntime.LoadRegistry(cfg.RegistryPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
 
@@ -162,7 +152,7 @@ func runAuthorize(args []string) int {
 	var subject *policybundle.Subject
 	// Identity is only for credentials: resolve the subject lazily, only when
 	// the tool or a reached policy needs it.
-	if (*user != "" || subjectProviderID != "") && keiruntime.AuthorizeNeedsSubject(activeBundle, reg, *tool, *action, *resource, *agentID) {
+	if (*user != "" || subjectProviderID != "") && keiruntime.AuthorizeNeedsSubject(activeBundle, *tool, *action, *resource, *agentID) {
 		control := keiruntime.NewPolicyControlClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, time.Duration(*timeout)*time.Second, !cfg.IsProduction())
 		req := keiruntime.SubjectResolveRequest{}
 		if *user != "" {
@@ -195,7 +185,6 @@ func runAuthorize(args []string) int {
 		SecretStore:       secretStore,
 		AuditPath:         cfg.AuditPath,
 		AuditMaxBytes:     cfg.AuditMaxBytes,
-		Registry:          reg,
 		SpanID:            *spanID,
 		InvokingSubject:   invokingSubject,
 		ParentSpan:        *parentSpan,
@@ -238,6 +227,3 @@ func writeJSON(w interface{ Write([]byte) (int, error) }, v any) error {
 func splitCSV(s string) []string {
 	return keiruntime.SplitCSV(s)
 }
-
-// Ensure *Registry satisfies keiruntime.ToolRegistry.
-var _ keiruntime.ToolRegistry = (*keiruntime.Registry)(nil)

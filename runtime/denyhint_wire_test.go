@@ -18,7 +18,6 @@ func TestAuthorizeOutputCarriesHintOnDeny(t *testing.T) {
 	out, err := AuthorizeTool(AuthorizeParams{
 		Ctx:          context.Background(),
 		PolicyBundle: bundle,
-		Registry:     &Registry{Tools: map[string]string{}},
 		Tool:         "totally_unknown_tool_xyz",
 		Action:       "tool:totally_unknown_tool_xyz",
 	})

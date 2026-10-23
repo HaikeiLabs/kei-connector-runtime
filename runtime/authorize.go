@@ -69,11 +69,6 @@ type CredentialDescriptor struct {
 	Metadata            map[string]any `json:"metadata,omitempty"`
 }
 
-// ToolRegistry is the subset of Registry needed for authorization.
-type ToolRegistry interface {
-	Service(tool string) string
-}
-
 // CredentialResolver resolves credential bindings from the control plane.
 type CredentialResolver interface {
 	Resolve(ctx context.Context, runtimeToken, userID, service string) (*CredentialDescriptor, error)
@@ -106,7 +101,6 @@ type AuthorizeParams struct {
 	WorkspaceID       string
 	AuditPath         string
 	AuditMaxBytes     int64
-	Registry          ToolRegistry
 	CredentialBinding CredentialResolver
 	SecretStore       SecretGetter
 	PolicyBundle      *policybundle.Verified
@@ -116,7 +110,10 @@ type AuthorizeParams struct {
 
 // AuthorizeTool is the core authorization logic.
 func AuthorizeTool(p AuthorizeParams) (AuthorizeOutput, error) {
-	service := p.Registry.Service(p.Tool)
+	service := ""
+	if p.PolicyBundle != nil {
+		service = p.PolicyBundle.ToolService(p.Tool)
+	}
 
 	resource := p.Resource
 	if service != "" && !strings.HasPrefix(resource, service+":") {
@@ -131,8 +128,8 @@ func AuthorizeTool(p AuthorizeParams) (AuthorizeOutput, error) {
 			subjectID = p.PolicySubject.UserID
 		}
 		call := policybundle.Call{Tool: p.Tool, Action: p.Action, Resource: resource, AgentID: p.AgentID, UserID: subjectID}
-		if p.PolicySubject == nil && !AuthorizeNeedsSubject(p.PolicyBundle, p.Registry, p.Tool, p.Action, p.Resource, p.AgentID) {
-			// No credential, connector or subject-scoped policy: decide
+		if p.PolicySubject == nil && !AuthorizeNeedsSubject(p.PolicyBundle, p.Tool, p.Action, p.Resource, p.AgentID) {
+			// No connector or subject-scoped policy: decide
 			// without a subject rather than denying for its absence.
 			call.UserID = ""
 		}
