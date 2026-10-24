@@ -716,3 +716,5 @@ the Pedro audit-spool migration it also accepts the earlier Agentware JSONL
 shape, converts it to the canonical catalog record, and hashes any stored tool
 arguments before upload. Both record shapes can therefore share the runtime's
 single resumable spool without sending raw arguments to the control plane.
+
+Licensed under the Apache License 2.0, see LICENSE.

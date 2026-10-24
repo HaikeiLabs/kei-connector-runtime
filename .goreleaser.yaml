@@ -44,6 +44,8 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "arm64" }}arm64
       {{- end }}
+    files:
+      - LICENSE
 
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
