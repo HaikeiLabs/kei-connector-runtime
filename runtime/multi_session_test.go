@@ -391,7 +391,7 @@ func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("%d events", len(events))
 	}
-	if events[0]["session_id"] != alice || events[0]["invoking_subject"] != "u-alice" {
+	if events[0]["session_id"] != alice || events[0]["invoking_subject"] != "user:u-alice" {
 		t.Errorf("named-session event = %v", events[0])
 	}
 	if _, ok := events[1]["session_id"]; ok {

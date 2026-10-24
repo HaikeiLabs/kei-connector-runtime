@@ -2,6 +2,7 @@ package invoke
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ type executionRecord struct {
 	SpanID           string    `json:"span_id"`
 	InvokedAt        time.Time `json:"invoked_at"`
 	InvokingSubject  string    `json:"invoking_subject"`
+	OnBehalfOf       string    `json:"on_behalf_of,omitempty"`
 	ParentSpan       *string   `json:"parent_span,omitempty"`
 	DelegationDepth  int       `json:"delegation_depth"`
 	AgentID          string    `json:"agent_id"`
@@ -49,6 +51,13 @@ type executionRecord struct {
 
 // emitAudit writes the call's execution record through env.Audit. Audit is
 // fail-open (ADR-010): a write failure never changes the outcome.
+func typedInvokingSubject(subject string) string {
+	if subject == "" || strings.Contains(subject, ":") {
+		return subject
+	}
+	return "user:" + subject
+}
+
 func (env Env) emitAudit(plan connectorInvokePlan, exec *execution, out output, elapsed time.Duration) {
 	if env.Audit == nil {
 		return
@@ -61,7 +70,7 @@ func (env Env) emitAudit(plan connectorInvokePlan, exec *execution, out output, 
 	}
 	rec := executionRecord{
 		SpanID: uuid.NewString(), InvokedAt: time.Now().UTC(), ParentSpan: &parent,
-		InvokingSubject: req.InvokingSubject, AgentID: req.AgentID, Framework: req.Framework,
+		InvokingSubject: typedInvokingSubject(req.InvokingSubject), OnBehalfOf: req.OnBehalfOf, AgentID: req.AgentID, Framework: req.Framework,
 		ResourcesTouched: []string{req.Resource}, Decision: out.Decision, PolicyReason: &reason,
 		ConnectorID: req.ConnectorID, Capability: req.Capability,
 		ReasonCode: out.ReasonCode, DurationMS: elapsed.Milliseconds(),
@@ -82,7 +91,7 @@ func (env Env) emitAudit(plan connectorInvokePlan, exec *execution, out output, 
 		}
 		if inv := exec.invocation; inv != nil {
 			org, ws := inv.TenantID, inv.WorkspaceID
-			rec.OrgID, rec.WorkspaceID, rec.AgentID, rec.InvokingSubject = &org, &ws, inv.AgentID, inv.Subject
+			rec.OrgID, rec.WorkspaceID, rec.AgentID, rec.InvokingSubject = &org, &ws, inv.AgentID, typedInvokingSubject(inv.Subject)
 		}
 	}
 	rec.ToolName = "connector:" + rec.Provider + ":" + req.Capability

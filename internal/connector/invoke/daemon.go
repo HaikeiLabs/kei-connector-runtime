@@ -20,6 +20,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
@@ -144,6 +145,15 @@ type daemonRequest struct {
 	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
 	AgentID         string          `json:"agent_id,omitempty"`
 	Framework       string          `json:"framework,omitempty"`
+	OnBehalfOf      string          `json:"on_behalf_of,omitempty"`
+}
+
+func validOnBehalfOf(value string) bool {
+	if value == "" {
+		return true
+	}
+	kind, identifier, ok := strings.Cut(value, ":")
+	return ok && strings.TrimSpace(kind) == kind && kind != "" && strings.TrimSpace(identifier) == identifier && identifier != ""
 }
 
 // daemonResponse is the route's answer: the same object `connector invoke`
@@ -165,7 +175,7 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			decodeErr = errors.New("trailing JSON")
 		}
 	}
-	if readErr != nil || decodeErr != nil || req.Schema != daemonRequestSchema {
+	if readErr != nil || decodeErr != nil || req.Schema != daemonRequestSchema || !validOnBehalfOf(req.OnBehalfOf) {
 		writeDaemonError(w, http.StatusBadRequest, "invalid_request", "request must be a "+daemonRequestSchema+" object with no unknown fields")
 		return
 	}
@@ -209,7 +219,7 @@ func (d *Daemon) invoke(ctx context.Context, sessionID string, dr daemonRequest)
 	started := time.Now()
 	plan := connectorInvokePlan{req: Request{
 		AgentID: dr.AgentID, ConnectorID: dr.ConnectorID, Capability: dr.Capability, Action: dr.Action,
-		Resource: dr.Resource, TraceID: dr.TraceID, IdempotencyKey: dr.IdempotencyKey, Framework: dr.Framework,
+		Resource: dr.Resource, TraceID: dr.TraceID, IdempotencyKey: dr.IdempotencyKey, Framework: dr.Framework, OnBehalfOf: dr.OnBehalfOf,
 	}, session: sessionID}
 	out := output{TraceID: dr.TraceID, ConnectorID: dr.ConnectorID, Capability: dr.Capability}
 	var exec *execution

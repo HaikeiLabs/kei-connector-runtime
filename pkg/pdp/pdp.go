@@ -241,6 +241,16 @@ func (e *Evaluator) EvaluateHarness(ctx context.Context, call HarnessCall) (Harn
 // subject held by a live named session. It never accepts a caller-supplied
 // subject and does not execute the harness tool.
 func (e *Evaluator) AuthorizeV2HarnessTool(ctx context.Context, req Request) (Decision, error) {
+	return e.authorizeV2HarnessTool(ctx, req, "", "", "")
+}
+
+// AuthorizeV2HarnessToolForTarget evaluates a harness-executed tool against
+// its exact connector release target in the same decision.
+func (e *Evaluator) AuthorizeV2HarnessToolForTarget(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
+	return e.authorizeV2HarnessTool(ctx, req, connectorID, capability, resource)
+}
+
+func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
@@ -258,7 +268,7 @@ func (e *Evaluator) AuthorizeV2HarnessTool(ctx context.Context, req Request) (De
 	if current, ok := e.sessions.Get(req.Session); ok {
 		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
 	}
-	d := v.EvaluateV2HarnessTool(req.Tool, req.AgentID, subject, e.now().UTC())
+	d := v.EvaluateV2HarnessToolForTarget(req.Tool, req.AgentID, connectorID, capability, resource, subject, e.now().UTC())
 	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
 }
 

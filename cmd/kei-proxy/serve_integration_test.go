@@ -59,6 +59,7 @@ func TestServeDaemonOverUnixSocket(t *testing.T) {
 		"KEI_RUNTIME_CONTROL_PLANE_URL=http://127.0.0.1:1",
 		"KEI_RUNTIME_SOCKET_PATH="+socketPath,
 		"KEI_PROXY_LISTEN_ADDR=127.0.0.1:0",
+		"KEI_PROXY_MCP_LISTEN_ADDR=127.0.0.1:0",
 		"KEI_PROXY_AUDIT="+auditPath,
 		// serve claims its state directory; never share the host's.
 		"KEI_RUNTIME_STATE_DIR="+t.TempDir(),

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -102,6 +104,116 @@ func v2HarnessAuthorizationBundle(t *testing.T, now time.Time) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func v2SharedCredentialReleaseBundle(t *testing.T, now time.Time, target string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(v2HarnessAuthorizationBundle(t, now), &doc); err != nil {
+		t.Fatal(err)
+	}
+	set := doc["policy_set"].(map[string]any)
+	set["connectors"] = []any{map[string]any{
+		"id": "conn-fixture-0001", "provider": "github", "credential_source": "oauth", "account_model": "shared",
+		"capabilities": []any{map[string]any{"name": "repository.read", "mutating": false}},
+	}}
+	set["tool_policies"] = []any{map[string]any{
+		"policy_id": "release-policy", "name": "release", "effect": "permit", "priority": 10,
+		"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": "agent-fixture-0001"},
+		"selector": map[string]any{"source_principal": "user:user-alice", "source": "discord", "tool": "github.read_repo", "connector_id": "conn-fixture-0001", "capability": "repository.read", "resource_id": target},
+	}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	defer policybundle.SetV2SchemaValidator(nil)
+	const target = "repos/owner/name"
+	for _, tc := range []struct {
+		name, tool, connector, capability, resource string
+		want                                        string
+	}{
+		{"allowed shared credential", "github.read_repo", "conn-fixture-0001", "repository.read", target, "allow"},
+		{"mismatched tool", "github.write_repo", "conn-fixture-0001", "repository.read", target, "deny"},
+		{"mismatched connector", "github.read_repo", "conn-other", "repository.read", target, "deny"},
+		{"mismatched capability", "github.read_repo", "conn-fixture-0001", "repository.write", target, "deny"},
+		{"mismatched resource", "github.read_repo", "conn-fixture-0001", "repository.read", "repos/other/name", "deny"},
+		{"missing credential", "github.read_repo", "conn-fixture-0001", "repository.read", target, "deny"},
+		{"credential audience mismatch", "github.read_repo", "conn-fixture-0001", "repository.read", target, "deny"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			dir := t.TempDir()
+			storeBundle, err := policybundle.OpenStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := storeBundle.Activate(v2SharedCredentialReleaseBundle(t, now, target), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+				t.Fatal(err)
+			}
+			credentialMissing := tc.name == "missing credential"
+			credentialMismatch := tc.name == "credential audience mismatch"
+			bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == credrelease.ResolvePath {
+					_ = json.NewEncoder(w).Encode(map[string]any{"credentials": []any{}})
+					return
+				}
+				var body struct {
+					Resource string `json:"resource"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if credentialMissing {
+					_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": tc.connector, "resource": body.Resource, "account_model": "shared", "failure": map[string]any{"reason": "NOT_CONNECTED"}})
+					return
+				}
+				connectorID := tc.connector
+				if credentialMismatch {
+					connectorID = "conn-other"
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": connectorID, "resource": body.Resource, "account_model": "shared", "credential": map[string]any{"access_token": "shared-token", "token_type": "Bearer", "expire_time": "2026-10-17T20:00:00Z"}})
+			}))
+			defer bridge.Close()
+			l := NewLocalPDP(testPolicyConfig{policyStateDir: dir, token: "runtime-token"}, nil)
+			defer l.Close()
+			l.SetIdentity(&Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"})
+			l.SetCredentialStore(credrelease.NewStore(credrelease.NewClient(bridge.URL, "runtime-token", time.Second)))
+			h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+			// Create a linked subject directly; the verified bundle corroborates it.
+			sessionID, err := l.Sessions.Create(pdp.Subject{UserID: "user-alice", Status: pdp.StatusLinked, Source: "discord", ExternalID: "discord-user-1", Token: "subject-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := credrelease.NewStore(credrelease.NewClient(bridge.URL, "runtime-token", time.Second))
+			if err := store.Load(context.Background(), "user-alice", "subject-token"); err != nil {
+				t.Fatal(err)
+			}
+			l.sessionCreds.Store(sessionID, store)
+			body := fmt.Sprintf(`{"schema":"kei.credential-release-request/v1","tool":%q,"agent_id":"agent-fixture-0001","connector":{"connector_id":%q,"capability":%q},"resource":%q,"on_behalf_of":"user:trigger"}`, tc.tool, tc.connector, tc.capability, tc.resource)
+			req, err := http.NewRequest(http.MethodPost, "/v1/credentials:release", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			session.SetHeader(req, sessionID)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			var got struct {
+				Decision   string `json:"decision"`
+				Credential *struct {
+					AccessToken string `json:"access_token"`
+				} `json:"credential"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode %s: %v", rec.Body, err)
+			}
+			if got.Decision != tc.want || (tc.want == "deny" && got.Credential != nil) || (tc.want == "allow" && (got.Credential == nil || got.Credential.AccessToken != "shared-token")) {
+				t.Fatalf("decision=%q credential=%+v body=%s", got.Decision, got.Credential, rec.Body)
+			}
+		})
+	}
 }
 
 func TestSocketAuthorizeV2HarnessToolRequiresNamedSessionAndUsesToolPolicies(t *testing.T) {

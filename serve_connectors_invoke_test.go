@@ -305,7 +305,7 @@ func TestDaemonConnectorInvokeRunsWithSessionCredential(t *testing.T) {
 		}
 	}
 	spool := readSpool(t, rig.cfg.AuditPath)
-	if !strings.Contains(spool, `"invoking_subject":"u-canary"`) || !strings.Contains(spool, `"decision":"allow"`) {
+	if !strings.Contains(spool, `"invoking_subject":"user:u-canary"`) || !strings.Contains(spool, `"decision":"allow"`) {
 		t.Fatalf("audit spool lacks the execution record: %s", spool)
 	}
 }
