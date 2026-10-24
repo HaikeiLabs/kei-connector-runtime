@@ -13,6 +13,12 @@ func TestLoadToolManifestSyncMode(t *testing.T) {
 		name, raw string
 		wantErr   bool
 	}{
+		{"v1 contracts definition", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search","description":"Search examples","permission":"web_search","category":"search"}]}`, false},
+		{"v1 unknown permission and category are accepted", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search","description":"Search examples","permission":"future_permission","category":"future_category"}]}`, false},
+		{"v1 missing required schema", `{"schema":"kei.tool-manifest/v1","tools":[{"name":"example.search","description":"Search examples"}]}`, true},
+		{"v1 missing required name", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","description":"Search examples"}]}`, true},
+		{"v1 missing required description", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search"}]}`, true},
+		{"v1 invalid parameter shape", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search","description":"Search examples","parameters":[{}]}]}`, true},
 		{"v4 merge", validV4, false},
 		{"v4 omitted replace default", `{"schema":"kei.tool-manifest/v4","tools":[{"name":"codex.shell","service":"codex","source":"codex","operation_class":"write","route":{"harness_executor":{"executor":"codex","registration":"codex.shell"}}}]}`, false},
 		{"v4 unsupported value", strings.Replace(validV4, `"merge"`, `"replace"`, 1), true},

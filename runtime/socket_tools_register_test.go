@@ -70,6 +70,35 @@ func TestSocketToolsRegisterValidManifest(t *testing.T) {
 	}
 }
 
+func TestSocketToolsRegisterContractsV1AndLegacyVersions(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{"contracts v1 valid", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"test.tool","description":"A test tool"}]}`, http.StatusOK},
+		{"v1 missing schema", `{"schema":"kei.tool-manifest/v1","tools":[{"name":"test.tool","description":"A test tool"}]}`, http.StatusBadRequest},
+		{"v1 missing name", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","description":"A test tool"}]}`, http.StatusBadRequest},
+		{"v1 missing description", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"test.tool"}]}`, http.StatusBadRequest},
+		{"v2 remains accepted", `{"schema":"kei.tool-manifest/v2","tools":[{"name":"test.tool","source":"test","required_capabilities":["test.read"],"resource_types":[{"type":"item"}],"operation_class":"read"}]}`, http.StatusOK},
+		{"v3 remains accepted", `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`, http.StatusOK},
+		{"v4 remains accepted", `{"schema":"kei.tool-manifest/v4","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			registrar := &fakeToolRegistrar{response: &keiruntime.ToolSyncResponse{}}
+			l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: "test-token", RuntimeControlPlaneURL: "https://kei.example"}, nil)
+			l.SetToolRegistrar(registrar)
+			handler := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(r *http.Request) bool { return true })
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(tc.body)))
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestSocketToolsRegisterCatalog400(t *testing.T) {
 	registrar := &fakeToolRegistrar{
 		err: &keiruntime.ToolSyncError{StatusCode: http.StatusBadRequest, Message: "invalid tool definition: tools[0]: name is required"},

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added: contracts v1 tool definitions at registration (HAI-849)
+
+`POST /v1/tools:register` and the manifest loader accept contracts
+`kei.tool-definition/v1` definitions in a `kei.tool-manifest/v1` envelope,
+while continuing to accept manifest v2, v3, and v4. Agentware's compatibility
+table should use kei-proxy **v0.3.5+** as the minimum version for v1.
+
 ### Added: live access grants in the v2 policy bundle (HAI-617)
 
 A v2 policy bundle may carry a top-level `access_grants` array: the
