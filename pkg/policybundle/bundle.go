@@ -23,7 +23,10 @@ import (
 	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
 )
 
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var (
+	idPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,47}$`)
+)
 
 // ContentType is the media type for a v1 policy bundle: the legacy model the
 // catalog still folds its v2 policy set into, and the one the runtime still
@@ -85,12 +88,13 @@ type Payload struct {
 
 // ServicePrincipalIdentity is a principal identity projected for one bound agent.
 type ServicePrincipalIdentity struct {
-	SubjectType        string    `json:"subject_type"`
-	ServicePrincipalID string    `json:"service_principal_id"`
-	AgentID            string    `json:"agent_id"`
-	Groups             []string  `json:"groups"`
-	SubjectToken       string    `json:"subject_token"`
-	ExpireTime         time.Time `json:"expire_time"`
+	SubjectType          string    `json:"subject_type"`
+	ServicePrincipalID   string    `json:"service_principal_id"`
+	ServicePrincipalName string    `json:"service_principal_name,omitempty"`
+	AgentID              string    `json:"agent_id"`
+	Groups               []string  `json:"groups"`
+	SubjectToken         string    `json:"subject_token"`
+	ExpireTime           time.Time `json:"expire_time"`
 }
 
 // AgentModelProfile is one agent's effective model profile in a v2 bundle
@@ -311,6 +315,9 @@ func extractServicePrincipalIdentities(raw []byte) ([]ServicePrincipalIdentity, 
 		}
 		if !idPattern.MatchString(principal.ServicePrincipalID) || !idPattern.MatchString(principal.AgentID) || principal.SubjectToken == "" || principal.ExpireTime.IsZero() || principal.Groups == nil {
 			return nil, nil, fmt.Errorf("%w: incomplete service-principal identity", ErrBundleUnsupported)
+		}
+		if principal.ServicePrincipalName != "" && !namePattern.MatchString(principal.ServicePrincipalName) {
+			return nil, nil, fmt.Errorf("%w: invalid service-principal name", ErrBundleUnsupported)
 		}
 		seenGroups := make(map[string]struct{}, len(principal.Groups))
 		for _, group := range principal.Groups {

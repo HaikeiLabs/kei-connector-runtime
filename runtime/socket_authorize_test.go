@@ -425,7 +425,8 @@ func principalBundle(t *testing.T, agentID, principalID string, expires time.Tim
 	doc["issued_at"], doc["not_after"] = now.Format(time.RFC3339Nano), now.Add(12*time.Hour).Format(time.RFC3339Nano)
 	doc["identities"] = []any{map[string]any{
 		"subject_type": "service_principal", "service_principal_id": principalID,
-		"agent_id": agentID, "groups": []string{"bug-intake"},
+		"service_principal_name": "kei-bug-intake",
+		"agent_id":               agentID, "groups": []string{"bug-intake"},
 		"subject_token": "principal-subject-token", "expire_time": expires.Format(time.RFC3339Nano),
 	}}
 	audience := doc["audience"].(map[string]any)
@@ -449,6 +450,29 @@ func principalSessionHandler(t *testing.T, bundle []byte, agentID string, emit k
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir}, emit)
 	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: agentID})
 	return l, sessionHandler(t, l)
+}
+
+func TestSocketSessionStartAsNamedBoundServicePrincipal(t *testing.T) {
+	const agentID, principalID = "20000000-0000-0000-0000-000000000006", "sp-bug-intake"
+	l, h := principalSessionHandler(t, principalBundle(t, agentID, principalID, time.Now().Add(time.Hour)), agentID, nil)
+	rec := putSession(t, h, `{"schema":"kei.session/v2","service_principal_name":"kei-bug-intake"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("start: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		SessionID          string `json:"session_id"`
+		ServicePrincipalID string `json:"service_principal_id"`
+		SubjectType        string `json:"subject_type"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ServicePrincipalID != principalID || response.SubjectType != "service_principal" {
+		t.Fatalf("principal response = %+v", response)
+	}
+	if sub, ok := l.Sessions.Get(response.SessionID); !ok || sub.UserID != principalID || sub.Token != "principal-subject-token" {
+		t.Fatalf("principal session subject = %+v, live=%t", sub, ok)
+	}
 }
 
 func TestSocketSessionStartAsBoundServicePrincipal(t *testing.T) {
@@ -476,6 +500,30 @@ func TestSocketSessionStartAsBoundServicePrincipal(t *testing.T) {
 	}
 }
 
+func TestSocketSessionNameSelectorRejectsAmbiguousBundleName(t *testing.T) {
+	const agentID = "20000000-0000-0000-0000-000000000006"
+	raw := principalBundle(t, agentID, "sp-bug-intake", time.Now().Add(time.Hour))
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	identities := doc["identities"].([]any)
+	duplicate := make(map[string]any)
+	for key, value := range identities[0].(map[string]any) {
+		duplicate[key] = value
+	}
+	duplicate["service_principal_id"] = "sp-bug-intake-duplicate"
+	doc["identities"] = append(identities, duplicate)
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, h := principalSessionHandler(t, raw, agentID, nil)
+	if rec := putSession(t, h, `{"schema":"kei.session/v2","service_principal_name":"kei-bug-intake"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous name status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSocketSessionPrincipalSelectorRejectsUnboundAndCallerFields(t *testing.T) {
 	const agentID = "20000000-0000-0000-0000-000000000006"
 	for _, tc := range []struct {
@@ -483,7 +531,9 @@ func TestSocketSessionPrincipalSelectorRejectsUnboundAndCallerFields(t *testing.
 		expiry            time.Time
 	}{
 		{"wrong agent", "other-agent", `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake"}`, time.Now().Add(time.Hour)},
+		{"name wrong agent", "other-agent", `{"schema":"kei.session/v2","service_principal_name":"kei-bug-intake"}`, time.Now().Add(time.Hour)},
 		{"expired disabled identity", agentID, `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake"}`, time.Now().Add(-time.Hour)},
+		{"name expired identity", agentID, `{"schema":"kei.session/v2","service_principal_name":"kei-bug-intake"}`, time.Now().Add(-time.Hour)},
 		{"caller groups", agentID, `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake","groups":["admin"]}`, time.Now().Add(time.Hour)},
 		{"caller agent", agentID, `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake","agent_id":"other-agent"}`, time.Now().Add(time.Hour)},
 		{"caller user", agentID, `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake","user_id":"user-admin"}`, time.Now().Add(time.Hour)},
@@ -501,6 +551,15 @@ func TestSocketSessionPrincipalSelectorRejectsUnboundAndCallerFields(t *testing.
 	_, h := principalSessionHandler(t, principalBundle(t, agentID, "different-principal", time.Now().Add(time.Hour)), agentID, nil)
 	if rec := putSession(t, h, `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing principal status=%d", rec.Code)
+	}
+	if rec := putSession(t, h, `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake","service_principal_name":"kei-bug-intake"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("both selectors status=%d", rec.Code)
+	}
+	if rec := putSession(t, h, `{"schema":"kei.session/v2","service_principal_id":""}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty selector status=%d", rec.Code)
+	}
+	if rec := putSession(t, h, `{"schema":"kei.session/v2","service_principal_name":"unknown"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown name status=%d", rec.Code)
 	}
 }
 

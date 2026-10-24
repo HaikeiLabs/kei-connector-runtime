@@ -102,14 +102,15 @@ type socketCredentialReleaseCred struct {
 }
 
 type socketSessionRequest struct {
-	Schema             string          `json:"schema"`
-	ServicePrincipalID string          `json:"service_principal_id,omitempty"`
-	UserID             string          `json:"user_id,omitempty"`
-	Email              string          `json:"email,omitempty"`
-	Status             string          `json:"status"`
-	Enrollment         json.RawMessage `json:"enrollment,omitempty"`
-	Source             string          `json:"source,omitempty"`
-	ExternalID         string          `json:"external_id,omitempty"`
+	Schema               string          `json:"schema"`
+	ServicePrincipalID   string          `json:"service_principal_id,omitempty"`
+	ServicePrincipalName string          `json:"service_principal_name,omitempty"`
+	UserID               string          `json:"user_id,omitempty"`
+	Email                string          `json:"email,omitempty"`
+	Status               string          `json:"status"`
+	Enrollment           json.RawMessage `json:"enrollment,omitempty"`
+	Source               string          `json:"source,omitempty"`
+	ExternalID           string          `json:"external_id,omitempty"`
 }
 
 type EmitAuditFunc func(json.RawMessage)
@@ -829,9 +830,15 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" (or legacy "+sessionSchema+") object with no unknown fields")
 		return
 	}
-	if req.ServicePrincipalID != "" {
-		var fields map[string]json.RawMessage
-		_ = json.Unmarshal(body, &fields)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(body, &fields)
+	_, hasPrincipalID := fields["service_principal_id"]
+	_, hasPrincipalName := fields["service_principal_name"]
+	if hasPrincipalID || hasPrincipalName {
+		if hasPrincipalID == hasPrincipalName || req.ServicePrincipalID == "" && req.ServicePrincipalName == "" {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "exactly one non-empty service-principal selector is required")
+			return
+		}
 		for _, forbidden := range []string{"user_id", "email", "status", "source", "external_id", "enrollment", "groups", "subject_token", "agent_id"} {
 			if _, supplied := fields[forbidden]; supplied {
 				writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "principal sessions do not accept caller-supplied identity fields")
@@ -848,7 +855,13 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "the trusted agent identity is unavailable")
 			return
 		}
-		principal, ok := e.BundleServicePrincipalIdentity(req.ServicePrincipalID, identity.AgentID)
+		var principal policybundle.ServicePrincipalIdentity
+		var ok bool
+		if hasPrincipalID {
+			principal, ok = e.BundleServicePrincipalIdentity(req.ServicePrincipalID, identity.AgentID)
+		} else {
+			principal, ok = e.BundleServicePrincipalIdentityByName(req.ServicePrincipalName, identity.AgentID)
+		}
 		if !ok {
 			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "service principal is missing, disabled, expired, or not bound to this agent")
 			return

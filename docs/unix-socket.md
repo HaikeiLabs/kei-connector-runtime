@@ -124,12 +124,16 @@ its own connector credentials, and nothing it holds is visible to another.
 - **Create:** `PUT /v1/session` with
   `{"schema":"kei.session/v2","source":"discord","external_id":"..."}` (or
   `"source":"cli"`) answers `201`. A bound service principal instead uses
-  the typed selector `{"schema":"kei.session/v2","service_principal_id":"<id>"}`.
-  The runtime resolves the ID only in the fresh bundle identity for its trusted
-  agent; groups and the subject token come from that identity. Caller-supplied
+  exactly one typed selector: `{"schema":"kei.session/v2","service_principal_id":"<id>"}`
+  or `{"schema":"kei.session/v2","service_principal_name":"kei-bug-intake"}`.
+  Supplying both selectors is rejected. The runtime resolves the ID or name only
+  in the fresh bundle identity for its trusted agent; groups and the subject token
+  come from that identity. Caller-supplied
   user, status, source, group, agent, enrollment, and token fields are rejected.
-  Missing, disabled, expired, or differently bound principals cannot open a
-  session. Principal audit records use `service_principal:<id>`. Principal
+  Missing, ambiguous, disabled, expired, or differently bound principals cannot
+  open a session. Names are resolved only among this runtime agent's bundle
+  identities; older bundles without `service_principal_name` still support the ID
+  selector. Principal audit records use `service_principal:<id>`. Principal
   credential release remains tool-bound and supports shared connections only.
   Both forms answer `201`:
 
