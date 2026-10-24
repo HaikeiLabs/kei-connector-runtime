@@ -1,0 +1,15 @@
+{
+  "schema": "kei.tool-manifest/v1",
+  "tools": [
+    {
+      "schema": "kei.tool-definition/v1",
+      "name": "example.search",
+      "description": "Search example records",
+      "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+      "permission": "web_search",
+      "category": "search",
+      "service": "example",
+      "tags": ["example"]
+    }
+  ]
+}

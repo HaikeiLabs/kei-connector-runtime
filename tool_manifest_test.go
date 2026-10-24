@@ -40,14 +40,14 @@ func TestSyncToolManifestUnsupportedSchemaSkips(t *testing.T) {
 	}
 }
 
-func TestLoadToolManifestV1SchemaRejected(t *testing.T) {
+func TestLoadToolManifestV1SchemaAccepted(t *testing.T) {
 	path := t.TempDir() + "/v1.json"
-	if err := os.WriteFile(path, []byte(`{"schema":"kei.tool-manifest/v1","tools":[{"name":"test.tool","service":"test","action":"read","resources":["r:*"]}]}`), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"test.tool","description":"Test tool"}]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadToolManifest(path)
-	if err == nil || !strings.Contains(err.Error(), "unsupported manifest schema") {
-		t.Fatalf("expected v1 schema rejection, got %v", err)
+	manifest, err := LoadToolManifest(path)
+	if err != nil || manifest.Schema != "kei.tool-manifest/v1" {
+		t.Fatalf("expected v1 manifest acceptance, manifest=%+v err=%v", manifest, err)
 	}
 }
 
