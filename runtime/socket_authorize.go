@@ -48,6 +48,7 @@ type socketAuthorizeRequest struct {
 	DelegationDepth int                       `json:"delegation_depth,omitempty"`
 	Framework       string                    `json:"framework,omitempty"`
 	ToolArgsDigest  string                    `json:"tool_args_digest,omitempty"`
+	OnBehalfOf      string                    `json:"on_behalf_of,omitempty"`
 	// ShellCommand is accepted only over the tenant-local socket and is used
 	// solely to evaluate shell: policies. It is never copied to audit events.
 	ShellCommand string `json:"shell_command,omitempty"`
@@ -131,6 +132,7 @@ type socketDecisionEvent struct {
 	Framework           string   `json:"framework"`
 	ToolName            string   `json:"tool_name"`
 	InvokingSubject     string   `json:"invoking_subject"`
+	OnBehalfOf          string   `json:"on_behalf_of,omitempty"`
 	ResourcesTouched    []string `json:"resources_touched"`
 	Decision            string   `json:"decision"`
 	DenySource          string   `json:"deny_source"`
@@ -342,6 +344,8 @@ func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = stor
 
 // errCredentialReleaseOff is returned by UseCredential in legacy mode.
 var errCredentialReleaseOff = errors.New("session credential release is not enabled")
+var errCredentialAccountModelUnsupported = errors.New("tool-bound credential release requires a shared account model")
+var errCredentialAudienceMismatch = errors.New("tool-bound credential does not match its requested audience")
 
 // UseCredential runs fn with the credential for provider held by session id
 // (DefaultSession for the legacy default session) for subject (a user id),
@@ -1094,6 +1098,10 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs exactly one of tool or connector{connector_id, capability}")
 		return
 	}
+	if !validOnBehalfOf(req.OnBehalfOf) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "on_behalf_of must be empty or a type-prefixed value")
+		return
+	}
 	sessionID := session.FromRequest(r)
 	d, auditTrustedAgent, err := l.decideAuthorize(r.Context(), sessionID, req)
 	if err != nil {
@@ -1166,6 +1174,53 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	return d, auditTrustedAgent, err
 }
 
+// decideCredentialReleaseV2 authorizes one exact tool/connector/capability/
+// resource tuple using the trusted installation agent and named session.
+func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID string, req socketAuthorizeRequest) (pdp.Decision, bool) {
+	denied := func(code, reason string) (pdp.Decision, bool) {
+		return pdp.Decision{ReasonCode: code, DenySource: "policy", Reason: reason, BundleState: "ready"}, true
+	}
+	if sessionID == pdp.DefaultSession || !l.Sessions.Exists(sessionID) {
+		return denied(pdp.ReasonSessionNotFound, "v2 credential release requires a live named session")
+	}
+	e, identity := l.evaluator.Load(), l.identity.Load()
+	if e == nil || identity == nil {
+		return denied("policy_bundle_missing", "runtime identity or policy bundle is unavailable")
+	}
+	trusted := identity.AgentID
+	if trusted == "" || (req.AgentID != "" && req.AgentID != trusted) {
+		return denied("agent_mismatch", "the request agent is not this installation's default agent")
+	}
+	verified, ok := e.Bundle()
+	if !ok || verified.Payload.Schema != "kei.policy-bundle/v2" {
+		return denied("policy_bundle_invalid", "tool-bound credential release requires a verified v2 bundle")
+	}
+	connector, ok := verified.Connector(req.Connector.ConnectorID)
+	if !ok {
+		return denied("connector_not_registered", "connector is not described in the verified v2 bundle")
+	}
+	if connector.AccountModel != "shared" {
+		return denied("account_model_not_supported", "tool-bound release requires a shared connector")
+	}
+	capabilityFound := false
+	for _, capability := range connector.Capabilities {
+		if capability.Name == req.Connector.Capability {
+			capabilityFound = true
+			break
+		}
+	}
+	if !capabilityFound {
+		return denied("capability_not_registered", "capability is not declared for the connector")
+	}
+	d, err := e.AuthorizeV2HarnessToolForTarget(ctx, pdp.Request{
+		Session: sessionID, Tool: req.Tool, AgentID: trusted,
+	}, req.Connector.ConnectorID, req.Connector.Capability, req.Resource)
+	if err != nil {
+		return pdp.Decision{ReasonCode: "request_canceled", DenySource: "runtime_state", Reason: "request canceled", BundleState: "ready"}, true
+	}
+	return d, true
+}
+
 // handleCredentialRelease serves POST /v1/credentials:release (HAI-722,
 // kei-connector-contracts docs/credential-passthrough.md). It re-runs the
 // /v1/authorize decision for the request and, only on allow, releases the
@@ -1179,11 +1234,7 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+credentialReleaseRequestSchema+" object with no unknown fields")
 		return
 	}
-	if (req.Tool == "") == (req.Connector == nil) || (req.Connector != nil && (req.Connector.ConnectorID == "" || req.Connector.Capability == "")) {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs exactly one of tool or connector{connector_id, capability}")
-		return
-	}
-	if req.Connector == nil {
+	if req.Connector == nil || req.Connector.ConnectorID == "" || req.Connector.Capability == "" {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a connector{connector_id, capability} is required for a credential release")
 		return
 	}
@@ -1191,8 +1242,19 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a resource is required")
 		return
 	}
+	if !validOnBehalfOf(req.OnBehalfOf) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "on_behalf_of must be empty or a type-prefixed value")
+		return
+	}
 	sessionID := session.FromRequest(r)
-	d, auditTrustedAgent, err := l.decideAuthorize(r.Context(), sessionID, req)
+	var d pdp.Decision
+	var auditTrustedAgent bool
+	var err error
+	if req.Tool != "" {
+		d, auditTrustedAgent = l.decideCredentialReleaseV2(r.Context(), sessionID, req)
+	} else {
+		d, auditTrustedAgent, err = l.decideAuthorize(r.Context(), sessionID, req)
+	}
 	if err != nil {
 		writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
 		return
@@ -1205,6 +1267,12 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		}
 		var cred *socketCredentialReleaseCred
 		releaseErr := l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, req.Resource, func(c credrelease.ConnectorCredential) error {
+			if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != req.Resource) {
+				return errCredentialAudienceMismatch
+			}
+			if req.Tool != "" && c.AccountModel != "shared" {
+				return errCredentialAccountModelUnsupported
+			}
 			cred = &socketCredentialReleaseCred{
 				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
 				AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
@@ -1215,6 +1283,10 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 			var denied *credrelease.DeniedError
 			if errors.As(releaseErr, &denied) {
 				resp.ReasonCode = credentialReleaseReason(denied.Reason)
+			} else if errors.Is(releaseErr, errCredentialAccountModelUnsupported) {
+				resp.ReasonCode = "account_model_not_supported"
+			} else if errors.Is(releaseErr, errCredentialAudienceMismatch) {
+				resp.ReasonCode = "credential_audience_mismatch"
 			} else {
 				resp.ReasonCode = "credential_provider_unavailable"
 			}
@@ -1295,6 +1367,25 @@ func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) 
 	return resp
 }
 
+func validOnBehalfOf(value string) bool {
+	if value == "" {
+		return true
+	}
+	kind, identifier, ok := strings.Cut(value, ":")
+	return ok && strings.TrimSpace(kind) == kind && kind != "" && strings.TrimSpace(identifier) == identifier && identifier != ""
+}
+
+func typedSubject(subject pdp.Subject) string {
+	kind := subject.SubjectKind
+	if kind == "" {
+		kind = "user"
+	}
+	if subject.UserID == "" {
+		return ""
+	}
+	return kind + ":" + subject.UserID
+}
+
 func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialReleased *bool) json.RawMessage {
 	spanID := req.SpanID
 	if spanID == "" {
@@ -1314,7 +1405,10 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID strin
 		e.Decision = "allow"
 	}
 	if subject, ok := l.Sessions.Get(sessionID); ok {
-		e.InvokingSubject = subject.UserID
+		e.InvokingSubject = typedSubject(subject)
+	}
+	if req.OnBehalfOf != "" {
+		e.OnBehalfOf = req.OnBehalfOf
 	}
 	if sessionID != pdp.DefaultSession {
 		e.SessionID = &sessionID

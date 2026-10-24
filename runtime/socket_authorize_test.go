@@ -1053,7 +1053,7 @@ func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
 
 	// Send an authorize request with a DIFFERENT agent_id. The subject
 	// must still resolve to the session user, not the request's agent_id.
-	body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"attacker-agent"}`
+	body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"attacker-agent","on_behalf_of":"user:trigger"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
 
@@ -1072,15 +1072,19 @@ func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
 	var audit struct {
 		InvokingSubject string `json:"invoking_subject"`
 		AgentID         string `json:"agent_id"`
+		OnBehalfOf      string `json:"on_behalf_of"`
 	}
 	if err := json.Unmarshal(auditEvent, &audit); err != nil {
 		t.Fatal(err)
 	}
-	if audit.InvokingSubject != "user-alice" {
-		t.Fatalf("InvokingSubject=%q, want %q (session user, not request agent_id)", audit.InvokingSubject, "user-alice")
+	if audit.InvokingSubject != "user:user-alice" {
+		t.Fatalf("InvokingSubject=%q, want %q (typed session user, not request agent_id)", audit.InvokingSubject, "user:user-alice")
 	}
 	if audit.AgentID != "attacker-agent" {
 		t.Fatalf("AgentID=%q, want %q (request agent_id passed through for policy matching)", audit.AgentID, "attacker-agent")
+	}
+	if audit.OnBehalfOf != "user:trigger" {
+		t.Fatalf("OnBehalfOf=%q, want harness attribution %q", audit.OnBehalfOf, "user:trigger")
 	}
 }
 

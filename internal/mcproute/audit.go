@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
@@ -49,6 +50,13 @@ type AuditRecord struct {
 	Listed               int             `json:"listed,omitempty"`
 	HiddenByPolicy       int             `json:"hidden_by_policy,omitempty"`
 	Unapproved           int             `json:"unapproved,omitempty"`
+}
+
+func typedUserSubject(userID string) string {
+	if userID == "" || strings.Contains(userID, ":") {
+		return userID
+	}
+	return "user:" + userID
 }
 
 // describe adds the connector descriptor's fields to the record.
@@ -153,7 +161,7 @@ func (a SpoolAuditor) Record(_ context.Context, rec AuditRecord) error {
 		return errors.New("mcp audit: no spool")
 	}
 	out := spoolRecord{
-		SpanID: rec.DecisionID, InvokedAt: time.Now().UTC(), InvokingSubject: rec.UserID,
+		SpanID: rec.DecisionID, InvokedAt: time.Now().UTC(), InvokingSubject: typedUserSubject(rec.UserID),
 		AgentID: rec.AgentID, Framework: rec.HarnessKind, ToolName: "mcp:" + rec.ConnectorSlug,
 		ResourcesTouched: []string{}, Decision: rec.Decision, PolicyID: rec.PolicyID,
 		PolicyBundleVersion: rec.BundleVersion, PolicyBundleDigest: rec.BundleDigest,

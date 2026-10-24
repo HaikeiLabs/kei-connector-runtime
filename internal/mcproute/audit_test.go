@@ -261,7 +261,7 @@ func TestSpoolAuditor_WritesADecisionEventSuperset(t *testing.T) {
 	out := recordOnce(t, &fakeSealer{})
 	for k, want := range map[string]any{
 		// DecisionEvent fields the existing collector ships.
-		"span_id": "6f1c2b6e-1d2a-4c3b-9e8f-0a1b2c3d4e5f", "invoking_subject": "user-1", "agent_id": "agent-1", "framework": "claude_code",
+		"span_id": "6f1c2b6e-1d2a-4c3b-9e8f-0a1b2c3d4e5f", "invoking_subject": "user:user-1", "agent_id": "agent-1", "framework": "claude_code",
 		"tool_name": "mcp:grafana_prod.search", "decision": "allow", "policy_id": "pol-1", "org_id": "org-1", "workspace_id": "ws-1",
 		"policy_bundle_version": float64(7), "policy_bundle_digest": "sha256:bundle", "tool_args_digest": "hmac-sha256:digest-of-args",
 		// ADR-036 §4.9 fields.

@@ -304,16 +304,25 @@ client disconnects, the request is canceled and the child is killed.
 ### `POST /v1/credentials:release` (`KEI_CREDENTIAL_RELEASE=identity`)
 
 A sibling of `/v1/authorize` on the owner-only socket (HAI-722). The agentware
-SDK calls it over the Unix socket **after an allow decision**: the daemon
-re-runs the same `/v1/authorize` decision for the request and, only on allow,
-releases the session-held connector credential. The request is
-`kei.credential-release-request/v1` (the session in `X-Kei-Session`, a
-`connector{connector_id, capability}`, and the `resource`); the answer is
+SDK calls it over the Unix socket **after an allow decision**: the daemon makes
+a fresh decision and, only on allow, releases the session-held connector
+credential. A v1 connector-only request keeps the legacy behavior. For a v2
+harness-executor tool, include both `tool` and
+`connector{connector_id, capability}`; the daemon checks the named tool against
+the trusted installation agent and live named session, verifies the connector
+and capability in the v2 bundle, and evaluates the tool policy with the exact
+connector/capability/resource context. Only `shared` connectors may release;
+non-shared or unsupported models, a mismatch, a deny, or unavailable
+credentials return no credential. Optional `on_behalf_of` is forwarded only
+for audit attribution and never affects authorization. The request is
+`kei.credential-release-request/v1` (the session in `X-Kei-Session`); the answer is
 `kei.credential-release-response/v1` — `decision`, the `credential` value
 with its `expires_at`, or a typed `reason_code` and no credential, never a
-fallback. `POST` only: any other method, and a daemon without session
-credential release, answers `404`. The value is held in session memory and
-flushed when the session ends; it is never logged or printed.
+fallback. Audit events use `invoking_subject=user:<id>` (or the typed session
+principal) and may carry the harness-provided type-prefixed `on_behalf_of`.
+`POST` only: any other method, and a daemon without session credential
+release, answers `404`. The value is held in session memory and flushed when
+the session ends; it is never logged or printed.
 
 ### Same-host daemon and harness (primary deployment)
 

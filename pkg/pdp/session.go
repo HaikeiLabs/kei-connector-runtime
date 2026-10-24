@@ -24,22 +24,27 @@ const (
 	StatusRevoked Status = policybundle.SubjectRevoked
 )
 
-// Subject is the acting user of a worker session, from machine login plus
-// kei or harness login. Enrollment is the private link returned only on a
-// subject_unlinked denial. Token holds the CLI login token for cli sessions.
+// Subject is the security principal of a worker session, established from
+// runtime-verified identity and bundle state. SubjectKind is retained for
+// typed audit attribution; empty preserves the legacy user interpretation.
+// Enrollment is the private link returned only on a subject_unlinked denial.
+// Token holds the CLI login token for cli sessions.
 //
 // Groups is what the session recorded, never what a decision uses: the
 // groups a decision matches on are the ones the verified bundle holds for
-// that user (B-20).
+// that principal (B-20).
 type Subject struct {
-	UserID     string
-	Email      string
-	Source     string
-	ExternalID string
-	Groups     []string
-	Status     Status
-	Enrollment json.RawMessage
-	Token      string
+	// SubjectKind is the typed security-principal kind recorded in audit.
+	// Empty is the legacy user kind; principal sessions set service_principal.
+	SubjectKind string
+	UserID      string
+	Email       string
+	Source      string
+	ExternalID  string
+	Groups      []string
+	Status      Status
+	Enrollment  json.RawMessage
+	Token       string
 }
 
 // DefaultSession is the session id of the legacy default session: requests

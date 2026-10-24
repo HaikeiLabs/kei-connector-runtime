@@ -126,6 +126,15 @@ func (v *Verified) v2SubjectDenial(subject *SessionSubject, now time.Time) (Deci
 // the local policy decision. A fresh bundle identity must corroborate the
 // named session subject before any tool policy can permit it.
 func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *SessionSubject, now time.Time) Decision {
+	return v.EvaluateV2HarnessToolForTarget(toolName, agentID, "", "", "", subject, now)
+}
+
+// EvaluateV2HarnessToolForTarget evaluates a harness tool while binding any
+// connector release context to this same policy decision. Target dimensions
+// are available to selectors, so a policy may narrow the tool to a connector,
+// capability, or resource; omitted selector dimensions remain governed by the
+// tool's ordinary authorization policy.
+func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource string, subject *SessionSubject, now time.Time) Decision {
 	if decision, denied := v.v2SubjectDenial(subject, now); denied {
 		return decision
 	}
@@ -144,6 +153,15 @@ func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *Sess
 		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "harness tool is not registered in the policy bundle"}
 	}
 	request := map[string]string{"tool": registered.Name, "source": registered.Source}
+	if connectorID != "" {
+		request["connector_id"] = connectorID
+	}
+	if capability != "" {
+		request["capability"] = capability
+	}
+	if resource != "" {
+		request["resource_id"] = resource
+	}
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
 	decision := evaluateV2Check(set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
 	// A rule that matched decided the call. Where no rule matched, a live

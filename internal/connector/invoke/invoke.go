@@ -45,6 +45,7 @@ type Request struct {
 	TraceID         string `json:"trace_id"`
 	IdempotencyKey  string `json:"idempotency_key,omitempty"`
 	InvokingSubject string `json:"invoking_subject,omitempty"`
+	OnBehalfOf      string `json:"on_behalf_of,omitempty"`
 	UserID          string `json:"user_id,omitempty"`
 	Framework       string `json:"framework,omitempty"`
 	// ProviderUserID is the chat-platform identity (e.g. a WhatsApp E.164
