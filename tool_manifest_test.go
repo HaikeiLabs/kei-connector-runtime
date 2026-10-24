@@ -40,17 +40,6 @@ func TestSyncToolManifestUnsupportedSchemaSkips(t *testing.T) {
 	}
 }
 
-func TestLoadToolManifestV1SchemaAccepted(t *testing.T) {
-	path := t.TempDir() + "/v1.json"
-	if err := os.WriteFile(path, []byte(`{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"test.tool","description":"Test tool"}]}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := LoadToolManifest(path)
-	if err != nil || manifest.Schema != "kei.tool-manifest/v1" {
-		t.Fatalf("expected v1 manifest acceptance, manifest=%+v err=%v", manifest, err)
-	}
-}
-
 func TestLoadToolManifestSchemalessRejected(t *testing.T) {
 	path := t.TempDir() + "/schemaless.json"
 	if err := os.WriteFile(path, []byte(`{"tools":[{"name":"test.tool","service":"test"}]}`), 0644); err != nil {
@@ -62,57 +51,19 @@ func TestLoadToolManifestSchemalessRejected(t *testing.T) {
 	}
 }
 
-func TestLoadToolManifestV2HappyPath(t *testing.T) {
-	m, err := LoadToolManifest("testdata/tool-manifest.v2.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(m.Tools) != 3 {
-		t.Fatalf("tools = %d, want 3", len(m.Tools))
-	}
-	if m.Schema != ToolManifestSchemaV2 {
-		t.Fatalf("schema = %q, want %q", m.Schema, ToolManifestSchemaV2)
-	}
-	td := m.Tools[0]
-	if td.Name != "github.get_issue" || td.Source != "github" {
-		t.Fatalf("tool[0] = %+v", td)
-	}
-	if len(td.RequiredCapabilities) != 1 || td.RequiredCapabilities[0] != "issue.read" {
-		t.Fatalf("tool[0] capabilities = %v", td.RequiredCapabilities)
-	}
-	if len(td.ResourceTypes) != 1 || td.ResourceTypes[0].Type != "issue" || td.ResourceTypes[0].ParentType != "repository" {
-		t.Fatalf("tool[0] resource_types = %+v", td.ResourceTypes)
-	}
-	if td.OperationClass != "read" {
-		t.Fatalf("tool[0] operation_class = %q", td.OperationClass)
-	}
-	if td.Service != "github" {
-		t.Fatalf("tool[0] service = %q", td.Service)
-	}
-}
-
-func TestSyncToolManifestV2PassesSchemaThrough(t *testing.T) {
-	var gotSchema string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body ToolManifest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		gotSchema = body.Schema
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ToolSyncResponse{Added: 1})
-	}))
-	defer server.Close()
-
-	client := NewRuntimeClient(server.URL, time.Second)
-	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{
-		{Name: "github.get_issue", Source: "github", RequiredCapabilities: []string{"issue.read"}, ResourceTypes: []KeiResourceType{{Type: "issue", ParentType: "repository"}}, OperationClass: "read", Service: "github"},
-	}}
-	if err := client.SyncTools(context.Background(), "test-token", manifest); err != nil {
-		t.Fatal(err)
-	}
-	if gotSchema != ToolManifestSchemaV2 {
-		t.Fatalf("PUT body schema = %q, want %q", gotSchema, ToolManifestSchemaV2)
+func TestLoadToolManifestRejectsUnsupportedVersions(t *testing.T) {
+	for _, version := range []string{"kei.tool-manifest/v1", "kei.tool-manifest/v2", "kei.tool-manifest/v4", "garbage"} {
+		t.Run(version, func(t *testing.T) {
+			path := t.TempDir() + "/manifest.json"
+			body := `{"schema":"` + version + `","tools":[]}`
+			if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadToolManifest(path)
+			if err == nil || !strings.Contains(err.Error(), "supported kei.tool-manifest/v3") || !strings.Contains(err.Error(), version) {
+				t.Fatalf("LoadToolManifest error = %v, want supported v3 and received %q", err, version)
+			}
+		})
 	}
 }
 
@@ -136,7 +87,7 @@ func TestLoadToolManifestInvalidJSON(t *testing.T) {
 
 func TestLoadToolManifestEmptyToolsList(t *testing.T) {
 	path := t.TempDir() + "/empty.json"
-	if err := os.WriteFile(path, []byte(`{"schema":"kei.tool-manifest/v2","tools":[]}`), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"schema":"kei.tool-manifest/v3","tools":[]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	m, err := LoadToolManifest(path)
@@ -150,7 +101,7 @@ func TestLoadToolManifestEmptyToolsList(t *testing.T) {
 
 func TestLoadToolManifestNullTools(t *testing.T) {
 	path := t.TempDir() + "/null-tools.json"
-	if err := os.WriteFile(path, []byte(`{"schema":"kei.tool-manifest/v2","tools":null}`), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"schema":"kei.tool-manifest/v3","tools":null}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	m, err := LoadToolManifest(path)
@@ -174,7 +125,7 @@ func TestSyncToolsSendsPUTAndParsesResponse(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Fatalf("Content-Type = %q", got)
 		}
-		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v2+json" {
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v3+json" {
 			t.Fatalf("Accept = %q, want v2 media type", got)
 		}
 		var body ToolManifest
@@ -186,14 +137,14 @@ func TestSyncToolsSendsPUTAndParsesResponse(t *testing.T) {
 		}
 		routes["PUT /api/v1/runtime/tools"]++
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV2)
-		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV2+", "+ToolManifestSchemaV3)
+		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV3)
+		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV3)
 		json.NewEncoder(w).Encode(ToolSyncResponse{Added: 1, Unchanged: 1})
 	}))
 	defer server.Close()
 
 	client := NewRuntimeClient(server.URL, time.Second)
-	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{
 		{Name: "test.tool", Source: "test", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
 	}}
 	if err := client.SyncTools(context.Background(), "test-token", manifest); err != nil {
@@ -222,21 +173,6 @@ func TestSyncToolsV3RequiresExplicitProtocolAcknowledgment(t *testing.T) {
 	}
 }
 
-func TestSyncToolsPreservesLegacyV2PeerCompatibility(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v2+json" {
-			t.Fatalf("Accept = %q", got)
-		}
-		w.WriteHeader(http.StatusOK) // pre-negotiation v2 catalog
-	}))
-	defer server.Close()
-	client := NewRuntimeClient(server.URL, time.Second)
-	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{{Name: "local.echo", Source: "local", OperationClass: "write"}}}
-	if err := client.SyncTools(context.Background(), "test-token", manifest); err != nil {
-		t.Fatalf("legacy v2 sync: %v", err)
-	}
-}
-
 func TestSyncToolsAcceptsNegotiatedV3(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v3+json" {
@@ -244,7 +180,7 @@ func TestSyncToolsAcceptsNegotiatedV3(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV3)
-		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV2+", "+ToolManifestSchemaV3)
+		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV3)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -273,7 +209,7 @@ func TestSyncToolsConflictIsNonFatal(t *testing.T) {
 	defer server.Close()
 
 	client := NewRuntimeClient(server.URL, time.Second)
-	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{
 		{Name: "conflict.tool", Source: "test", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
 	}}
 	err := client.SyncTools(context.Background(), "test-token", manifest)
@@ -293,7 +229,7 @@ func TestSyncTools500IsNonFatal(t *testing.T) {
 	defer server.Close()
 
 	client := NewRuntimeClient(server.URL, time.Second)
-	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{
 		{Name: "err.tool", Source: "test", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
 	}}
 	err := client.SyncTools(context.Background(), "test-token", manifest)
@@ -315,7 +251,7 @@ func TestSyncTools400SurfacesCatalogBodyMessage(t *testing.T) {
 	defer server.Close()
 
 	client := NewRuntimeClient(server.URL, time.Second)
-	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{
 		{Name: "codex.shell", Source: "test", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
 	}}
 	err := client.SyncTools(context.Background(), "test-token", manifest)
@@ -329,7 +265,7 @@ func TestSyncTools400SurfacesCatalogBodyMessage(t *testing.T) {
 
 func TestSyncToolsTransportError(t *testing.T) {
 	client := NewRuntimeClient("http://127.0.0.1:1", time.Millisecond)
-	manifest := &ToolManifest{Schema: ToolManifestSchemaV2, Tools: []ToolDefinition{
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: []ToolDefinition{
 		{Name: "t", Source: "s", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
 	}}
 	err := client.SyncTools(context.Background(), "token", manifest)
@@ -372,7 +308,7 @@ func TestSyncToolManifestHTTPErrorLoggedNonFatal(t *testing.T) {
 
 	dir := t.TempDir()
 	manifestPath := dir + "/manifest.json"
-	if err := os.WriteFile(manifestPath, []byte(`{"schema":"kei.tool-manifest/v2","tools":[{"name":"test.tool","source":"test","required_capabilities":["r"],"resource_types":[{"type":"r"}],"operation_class":"read"}]}`), 0644); err != nil {
+	if err := os.WriteFile(manifestPath, []byte(`{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := Config{

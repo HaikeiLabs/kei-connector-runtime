@@ -114,7 +114,7 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 }
 
 func TestSocketToolRegistrationRoundTrip(t *testing.T) {
-	manifest := `{"schema":"kei.tool-manifest/v2","tools":[{"name":"demo.read","source":"demo","required_capabilities":["demo.read"],"resource_types":[{"type":"item"}],"operation_class":"read"}]}`
+	manifest := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"demo.read","service":"demo","source":"demo","operation_class":"read","route":{"harness_executor":{"executor":"demo","registration":"demo.read"}}}]}`
 	catalogCalls := 0
 	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		catalogCalls++
@@ -124,7 +124,9 @@ func TestSocketToolRegistrationRoundTrip(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+policyTestToken {
 			t.Errorf("catalog authorization = %q", got)
 		}
-		w.Header().Set("X-Kei-Tool-Manifest-Schema", keiruntime.ToolManifestSchemaV2)
+		w.Header().Set("X-Kei-Tool-Manifest-Schema", keiruntime.ToolManifestSchemaV3)
+		w.Header().Set("X-Kei-Supported-Tool-Manifest-Schemas", keiruntime.ToolManifestSchemaV3)
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"added":1,"updated":2,"removed":3,"unchanged":4}`))
 	}))
 	defer catalog.Close()
@@ -165,7 +167,7 @@ func TestSocketToolRegistrationRejectsMissingRuntimeToken(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example"}, nil)
 	h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return false })
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(`{"schema":"kei.tool-manifest/v2","tools":[]}`)))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(`{"schema":"kei.tool-manifest/v3","tools":[]}`)))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing runtime token status = %d, want 401: %s", rec.Code, rec.Body.String())
 	}
@@ -173,9 +175,9 @@ func TestSocketToolRegistrationRejectsMissingRuntimeToken(t *testing.T) {
 
 func TestSocketToolRegistrationRejectsInvalidAndEmptyManifests(t *testing.T) {
 	for name, body := range map[string]string{
-		"empty tools":        `{"schema":"kei.tool-manifest/v2","tools":[]}`,
+		"empty tools":        `{"schema":"kei.tool-manifest/v3","tools":[]}`,
 		"unsupported schema": `{"schema":"kei.tool-manifest/v99","tools":[]}`,
-		"invalid definition": `{"schema":"kei.tool-manifest/v2","tools":[{"name":"bad name"}]}`,
+		"invalid definition": `{"schema":"kei.tool-manifest/v3","tools":[{"name":"bad name"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example"}, nil)
@@ -198,7 +200,7 @@ func TestSocketToolRegistrationSurfacesCatalogBadRequest(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: catalog.URL}, nil)
 	h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(`{"schema":"kei.tool-manifest/v2","tools":[{"name":"demo.read","source":"demo","required_capabilities":["demo.read"],"resource_types":[{"type":"item"}],"operation_class":"read"}]}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(`{"schema":"kei.tool-manifest/v3","tools":[{"name":"demo.read","service":"demo","source":"demo","operation_class":"read","route":{"harness_executor":{"executor":"demo","registration":"demo.read"}}}]}`))
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "catalog rejected this manifest") {
 		t.Fatalf("catalog error response = %d %s", rec.Code, rec.Body.String())

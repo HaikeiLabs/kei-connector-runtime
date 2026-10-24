@@ -7,25 +7,13 @@ import (
 	"testing"
 )
 
-func TestLoadToolManifestSyncMode(t *testing.T) {
-	validV4 := `{"schema":"kei.tool-manifest/v4","sync_mode":"merge","tools":[{"name":"codex.shell","service":"codex","source":"codex","operation_class":"write","route":{"harness_executor":{"executor":"codex","registration":"codex.shell"}}}]}`
+func TestLoadToolManifestV3Only(t *testing.T) {
 	cases := []struct {
 		name, raw string
 		wantErr   bool
 	}{
-		{"v1 contracts definition", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search","description":"Search examples","permission":"web_search","category":"search"}]}`, false},
-		{"v1 unknown permission and category are accepted", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search","description":"Search examples","permission":"future_permission","category":"future_category"}]}`, false},
-		{"v1 missing required schema", `{"schema":"kei.tool-manifest/v1","tools":[{"name":"example.search","description":"Search examples"}]}`, true},
-		{"v1 missing required name", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","description":"Search examples"}]}`, true},
-		{"v1 missing required description", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search"}]}`, true},
-		{"v1 invalid parameter shape", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"example.search","description":"Search examples","parameters":[{}]}]}`, true},
-		{"v4 merge", validV4, false},
-		{"v4 omitted replace default", `{"schema":"kei.tool-manifest/v4","tools":[{"name":"codex.shell","service":"codex","source":"codex","operation_class":"write","route":{"harness_executor":{"executor":"codex","registration":"codex.shell"}}}]}`, false},
-		{"v4 unsupported value", strings.Replace(validV4, `"merge"`, `"replace"`, 1), true},
-		{"v4 invalid mode", strings.Replace(validV4, `"merge"`, `"merge-ish"`, 1), true},
-		{"v2 merge forbidden", `{"schema":"kei.tool-manifest/v2","sync_mode":"merge","tools":[]}`, true},
-		{"v3 merge forbidden", `{"schema":"kei.tool-manifest/v3","sync_mode":"merge","tools":[]}`, true},
-		{"unknown field closed", strings.Replace(validV4, `"sync_mode":"merge"`, `"sync_mode":"merge","other":"value"`, 1), true},
+		{"v3 valid", `{"schema":"kei.tool-manifest/v3","tools":[{"name":"local.echo","service":"harness","source":"local","operation_class":"write","route":{"harness_executor":{"executor":"harness","registration":"echo"}}}]}`, false},
+		{"unknown field closed", `{"schema":"kei.tool-manifest/v3","other":"value","tools":[]}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -37,11 +25,8 @@ func TestLoadToolManifestSyncMode(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("manifest=%+v err=%v wantErr=%v", manifest, err, tc.wantErr)
 			}
-			if err == nil && tc.name == "v4 merge" && manifest.SyncMode != "merge" {
-				t.Fatalf("sync mode=%q", manifest.SyncMode)
-			}
-			if err == nil && tc.name == "v4 omitted replace default" && manifest.SyncMode != "" {
-				t.Fatalf("omitted sync mode=%q", manifest.SyncMode)
+			if err == nil && tc.name == "v3 valid" && manifest.Schema != ToolManifestSchemaV3 {
+				t.Fatalf("schema=%q", manifest.Schema)
 			}
 		})
 	}
@@ -73,83 +58,11 @@ func TestValidateToolManifestV3MissingService(t *testing.T) {
 	}
 }
 
-func TestValidateToolManifestV2MissingSource(t *testing.T) {
-	m := &ToolManifest{
-		Schema: ToolManifestSchemaV2,
-		Tools: []ToolDefinition{
-			{Name: "test.tool", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
-		},
-	}
-	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "source is required") {
-		t.Fatalf("expected source-required error, got %v", err)
-	}
-}
-
-func TestValidateToolManifestV2MissingCapabilities(t *testing.T) {
-	m := &ToolManifest{
-		Schema: ToolManifestSchemaV2,
-		Tools: []ToolDefinition{
-			{Name: "test.tool", Source: "github", ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
-		},
-	}
-	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "required_capabilities") {
-		t.Fatalf("expected capabilities-required error, got %v", err)
-	}
-}
-
-func TestValidateToolManifestV2MissingResourceTypes(t *testing.T) {
-	m := &ToolManifest{
-		Schema: ToolManifestSchemaV2,
-		Tools: []ToolDefinition{
-			{Name: "test.tool", Source: "github", RequiredCapabilities: []string{"r"}, OperationClass: "read"},
-		},
-	}
-	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "resource_types") {
-		t.Fatalf("expected resource_types-required error, got %v", err)
-	}
-}
-
-func TestValidateToolManifestV2MissingOperationClass(t *testing.T) {
-	m := &ToolManifest{
-		Schema: ToolManifestSchemaV2,
-		Tools: []ToolDefinition{
-			{Name: "test.tool", Source: "github", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}},
-		},
-	}
-	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "operation_class") {
-		t.Fatalf("expected operation_class-required error, got %v", err)
-	}
-}
-
-func TestValidateToolManifestV2InvalidOperationClass(t *testing.T) {
-	m := &ToolManifest{
-		Schema: ToolManifestSchemaV2,
-		Tools: []ToolDefinition{
-			{Name: "test.tool", Source: "github", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "delete"},
-		},
-	}
-	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "invalid operation_class") {
-		t.Fatalf("expected invalid operation_class error, got %v", err)
-	}
-}
-
-func TestValidateToolManifestV2InvalidSource(t *testing.T) {
-	m := &ToolManifest{
-		Schema: ToolManifestSchemaV2,
-		Tools: []ToolDefinition{
-			{Name: "test.tool", Source: "UPPERCASE", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read"},
-		},
-	}
-	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "invalid source") {
-		t.Fatalf("expected invalid source error, got %v", err)
-	}
-}
-
 func TestValidateToolManifestDuplicateNames(t *testing.T) {
-	m := &ToolManifest{
+	m := &ToolManifest{Schema: ToolManifestSchemaV3,
 		Tools: []ToolDefinition{
-			{Name: "foo.bar", Source: "foo", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read", Description: "first"},
-			{Name: "foo.bar", Source: "foo", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read", Description: "second"},
+			{Name: "foo.bar", Service: "foo", Source: "foo", OperationClass: "read", Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "foo", Registration: "foo.bar"}}, Description: "first"},
+			{Name: "foo.bar", Service: "foo", Source: "foo", OperationClass: "read", Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "foo", Registration: "foo.bar"}}, Description: "second"},
 		},
 	}
 	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "duplicate name") {
@@ -162,7 +75,7 @@ func TestValidateToolManifestTooManyTools(t *testing.T) {
 	for i := range tools {
 		tools[i] = ToolDefinition{Name: "t", Service: "s"}
 	}
-	m := &ToolManifest{Tools: tools}
+	m := &ToolManifest{Schema: ToolManifestSchemaV3, Tools: tools}
 	err := validateToolManifest(m)
 	if err == nil || !strings.Contains(err.Error(), "too many") {
 		t.Fatalf("expected too-many error, got %v", err)
@@ -170,7 +83,7 @@ func TestValidateToolManifestTooManyTools(t *testing.T) {
 }
 
 func TestValidateToolManifestEmptyName(t *testing.T) {
-	m := &ToolManifest{
+	m := &ToolManifest{Schema: ToolManifestSchemaV3,
 		Tools: []ToolDefinition{{Name: "", Service: "s"}},
 	}
 	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "name is required") {
@@ -179,7 +92,7 @@ func TestValidateToolManifestEmptyName(t *testing.T) {
 }
 
 func TestValidateToolManifestInvalidName(t *testing.T) {
-	m := &ToolManifest{
+	m := &ToolManifest{Schema: ToolManifestSchemaV3,
 		Tools: []ToolDefinition{{Name: "has space", Service: "s"}},
 	}
 	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "invalid name") {
@@ -188,9 +101,9 @@ func TestValidateToolManifestInvalidName(t *testing.T) {
 }
 
 func TestValidateToolManifestInvalidService(t *testing.T) {
-	m := &ToolManifest{
+	m := &ToolManifest{Schema: ToolManifestSchemaV3,
 		Tools: []ToolDefinition{
-			{Name: "t", Source: "s", RequiredCapabilities: []string{"r"}, ResourceTypes: []KeiResourceType{{Type: "r"}}, OperationClass: "read", Service: "bad service"},
+			{Name: "t", Source: "s", OperationClass: "read", Service: "bad service", Route: &ToolRoute{HarnessExecutor: &HarnessExecutorRoute{Executor: "s", Registration: "t"}}},
 		},
 	}
 	if err := validateToolManifest(m); err == nil || !strings.Contains(err.Error(), "invalid service") {

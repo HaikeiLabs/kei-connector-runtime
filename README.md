@@ -463,12 +463,10 @@ the socket. The socket serves health, readiness, model profile, and
 chat-completion, authorize, and session routes; governed tool authorization
 (the PEP) over the socket replaces the legacy `authorize` CLI subprocess.
 Clients can register tool metadata with `POST /v1/tools:register` by sending
-the tool-manifest JSON body. The daemon accepts contracts-defined
-`kei.tool-definition/v1` definitions in a `kei.tool-manifest/v1` envelope,
-as well as legacy `kei.tool-manifest/v2`, `/v3`, and `/v4`. Agentware
-clients that emit v1 require kei-proxy **v0.3.5 or later**; older releases
-accept v2/v3/v4. The daemon validates it, syncs it to the catalog
-using its runtime credential, and returns the catalog's added, updated,
+the tool-manifest JSON body. The daemon accepts only `kei.tool-manifest/v3`;
+v1, v2, and v4 are rejected. Agentware 0.12.0 posts v3 and is unaffected.
+The daemon validates it, syncs it to the catalog using its runtime credential,
+and returns the catalog's added, updated,
 removed, and unchanged counts. Registration requires the normal socket runtime
 authentication and does not grant policy access. The daemon does not create or
 modify a manifest file. With `KEI_CREDENTIAL_RELEASE=identity`, the socket

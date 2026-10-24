@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -772,8 +773,8 @@ func (l *LocalPDP) handleToolRegistration(w http.ResponseWriter, r *http.Request
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "invalid tool manifest JSON")
 		return
 	}
-	if manifest.Schema != ToolManifestSchemaV1 && manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4 {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "unsupported tool manifest schema")
+	if manifest.Schema != ToolManifestSchemaV3 {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", fmt.Sprintf("unsupported tool manifest schema: supported %s, received %q", ToolManifestSchemaV3, manifest.Schema))
 		return
 	}
 	if len(manifest.Tools) == 0 {
