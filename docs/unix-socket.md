@@ -123,12 +123,22 @@ its own connector credentials, and nothing it holds is visible to another.
 
 - **Create:** `PUT /v1/session` with
   `{"schema":"kei.session/v2","source":"discord","external_id":"..."}` (or
-  `"source":"cli"`) answers `201`:
+  `"source":"cli"`) answers `201`. A bound service principal instead uses
+  the typed selector `{"schema":"kei.session/v2","service_principal_id":"<id>"}`.
+  The runtime resolves the ID only in the fresh bundle identity for its trusted
+  agent; groups and the subject token come from that identity. Caller-supplied
+  user, status, source, group, agent, enrollment, and token fields are rejected.
+  Missing, disabled, expired, or differently bound principals cannot open a
+  session. Principal audit records use `service_principal:<id>`. Principal
+  credential release remains tool-bound and supports shared connections only.
+  Both forms answer `201`:
 
   ```json
   {"schema":"kei.session/v2","session_id":"ks_…","user_id":"u-…","status":"linked","idle_ttl_seconds":1800}
   ```
 
+  A principal session response identifies the typed subject without labeling it
+  as a user: `{"schema":"kei.session/v2","session_id":"ks_…","subject_type":"service_principal","service_principal_id":"<id>","idle_ttl_seconds":1800}`.
   `session_id` is opaque and unguessable (`ks_` + 32 random bytes,
   base64url), held in daemon memory only.
 - **Use:** send `X-Kei-Session: <session_id>` on `POST /v1/authorize`,
@@ -162,7 +172,8 @@ before: a v1 PUT replaces it, and it has no idle TTL. The daemon logs
 ### Session credentials (`KEI_CREDENTIAL_RELEASE=identity`)
 
 With `KEI_CREDENTIAL_RELEASE=identity` (default `legacy`, which changes
-nothing), a linked `PUT /v1/session` makes one call to the identity service's
+nothing), a linked user `PUT /v1/session` or an accepted principal session makes
+one call to the identity service's
 `POST /api/v1/connectorCredentials:resolve` (ADR-032 I11) with the runtime token
 and the subject's token in `X-Kei-Subject-Token`. A tokenless owner session may
 also load credentials when the fresh verified bundle contains a linked identity
@@ -171,9 +182,11 @@ token, never the installation token or caller input. Missing linked identity or
 subject token means no credentials are loaded and connector use denies. The call
 goes to `KEI_CREDENTIAL_RELEASE_URL`, or to the runtime control plane when that
 is unset. I11 requests carry a generated `X-Request-ID`; failed-load warnings
-include only the target hostname and safe request IDs for log correlation. The
-client does not follow redirects, so runtime and subject credentials cannot be
-forwarded to a redirect target. Credentials live only in each session's daemon-
+include only the target hostname and safe request IDs for log correlation.
+Principal sessions use the principal token from the verified bundle and never
+accept a caller-supplied token; their releases are tool-bound and shared-only.
+The client does not follow redirects, so runtime and subject credentials cannot
+be forwarded to a redirect target. Credentials live only in each session's daemon-
 memory store (ADR-034, owner option A). Ending a session, owner-session reconciliation on
 bundle refresh, revocation, or daemon exit zeroes and drops that session's
 credentials. A provider 401 triggers one single-provider re-fetch and one retry,

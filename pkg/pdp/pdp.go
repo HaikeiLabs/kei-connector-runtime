@@ -432,6 +432,33 @@ func (e *Evaluator) LookupLinkedUser(userID string) (policybundle.Identity, bool
 	return v.LookupLinkedUser(userID, e.now().UTC())
 }
 
+// BundleServicePrincipalIdentity resolves a principal only from the current
+// verified bundle and only for the agent named by its binding projection.
+func (e *Evaluator) BundleServicePrincipalIdentity(id, agentID string) (policybundle.ServicePrincipalIdentity, bool) {
+	v, _, err := e.check()
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(e.now().UTC()) {
+		return policybundle.ServicePrincipalIdentity{}, false
+	}
+	now := e.now().UTC()
+	var found *policybundle.ServicePrincipalIdentity
+	for i := range v.Payload.ServicePrincipalIdentities {
+		candidate := &v.Payload.ServicePrincipalIdentities[i]
+		if candidate.ServicePrincipalID != id || candidate.AgentID != agentID || candidate.SubjectType != "service_principal" || !now.Before(candidate.ExpireTime) {
+			continue
+		}
+		if found != nil {
+			return policybundle.ServicePrincipalIdentity{}, false
+		}
+		found = candidate
+	}
+	if found == nil {
+		return policybundle.ServicePrincipalIdentity{}, false
+	}
+	out := *found
+	out.Groups = append([]string(nil), found.Groups...)
+	return out, true
+}
+
 // BundleIdentities returns the identities from the current verified bundle,
 // or nil when the bundle is missing, invalid, expired, or has no identities.
 func (e *Evaluator) BundleIdentities() []policybundle.Identity {

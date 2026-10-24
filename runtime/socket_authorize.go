@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -101,13 +102,14 @@ type socketCredentialReleaseCred struct {
 }
 
 type socketSessionRequest struct {
-	Schema     string          `json:"schema"`
-	UserID     string          `json:"user_id,omitempty"`
-	Email      string          `json:"email,omitempty"`
-	Status     string          `json:"status"`
-	Enrollment json.RawMessage `json:"enrollment,omitempty"`
-	Source     string          `json:"source,omitempty"`
-	ExternalID string          `json:"external_id,omitempty"`
+	Schema             string          `json:"schema"`
+	ServicePrincipalID string          `json:"service_principal_id,omitempty"`
+	UserID             string          `json:"user_id,omitempty"`
+	Email              string          `json:"email,omitempty"`
+	Status             string          `json:"status"`
+	Enrollment         json.RawMessage `json:"enrollment,omitempty"`
+	Source             string          `json:"source,omitempty"`
+	ExternalID         string          `json:"external_id,omitempty"`
 }
 
 type EmitAuditFunc func(json.RawMessage)
@@ -809,6 +811,12 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	if l.preflight != nil {
 		l.preflight.store.Invalidate()
 	}
+	body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSocketRequest))
+	if readErr != nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request body is invalid")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
 	var req socketSessionRequest
 	err := decodeSocketJSON(w, r, &req)
 	legacy := req.Schema == sessionSchema
@@ -821,7 +829,49 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" (or legacy "+sessionSchema+") object with no unknown fields")
 		return
 	}
-	if req.UserID != "" || req.Email != "" || req.Status != "" {
+	if req.ServicePrincipalID != "" {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(body, &fields)
+		for _, forbidden := range []string{"user_id", "email", "status", "source", "external_id", "enrollment", "groups", "subject_token", "agent_id"} {
+			if _, supplied := fields[forbidden]; supplied {
+				writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "principal sessions do not accept caller-supplied identity fields")
+				return
+			}
+		}
+		if req.Schema != sessionSchemaV2 {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "service principals require a kei.session/v2 request")
+			return
+		}
+		identity := l.identity.Load()
+		e := l.evaluator.Load()
+		if identity == nil || identity.AgentID == "" || e == nil {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "the trusted agent identity is unavailable")
+			return
+		}
+		principal, ok := e.BundleServicePrincipalIdentity(req.ServicePrincipalID, identity.AgentID)
+		if !ok {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "service principal is missing, disabled, expired, or not bound to this agent")
+			return
+		}
+		sub := pdp.Subject{SubjectKind: "service_principal", UserID: principal.ServicePrincipalID, Groups: principal.Groups, Status: pdp.StatusLinked, Source: "cli", Token: principal.SubjectToken}
+		id, err := l.Sessions.Create(sub)
+		if err != nil {
+			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
+			return
+		}
+		if l.creds != nil {
+			l.sessionCreds.Store(id, l.creds.NewSession())
+			if !l.Sessions.Exists(id) {
+				l.dropSessionCredentials(id)
+			}
+		}
+		l.loadCredentials(r.Context(), id, sub)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(socketSessionResponse{Schema: sessionSchemaV2, SessionID: id, ServicePrincipalID: principal.ServicePrincipalID, SubjectType: "service_principal", IdleTTLSeconds: l.idleTTLSeconds()})
+		return
+	}
+	if req.UserID != "" || req.Email != "" || req.Status != "" || len(req.Enrollment) > 0 {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", "the user_id/email/status fields are no longer supported; use source/external_id")
 		return
 	}
@@ -1034,11 +1084,13 @@ func (l *LocalPDP) handleConsume(w http.ResponseWriter, r *http.Request) {
 }
 
 type socketSessionResponse struct {
-	Schema         string `json:"schema"`
-	SessionID      string `json:"session_id,omitempty"`
-	UserID         string `json:"user_id"`
-	Status         string `json:"status"`
-	IdleTTLSeconds int64  `json:"idle_ttl_seconds,omitempty"`
+	Schema             string `json:"schema"`
+	SessionID          string `json:"session_id,omitempty"`
+	UserID             string `json:"user_id,omitempty"`
+	ServicePrincipalID string `json:"service_principal_id,omitempty"`
+	SubjectType        string `json:"subject_type,omitempty"`
+	Status             string `json:"status,omitempty"`
+	IdleTTLSeconds     int64  `json:"idle_ttl_seconds,omitempty"`
 }
 
 func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
@@ -1054,8 +1106,13 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := socketSessionResponse{
 		Schema: sessionSchema,
-		UserID: subject.UserID,
-		Status: string(subject.Status),
+	}
+	if subject.SubjectKind == "service_principal" {
+		resp.ServicePrincipalID = subject.UserID
+		resp.SubjectType = subject.SubjectKind
+	} else {
+		resp.UserID = subject.UserID
+		resp.Status = string(subject.Status)
 	}
 	if id != pdp.DefaultSession {
 		resp.Schema, resp.SessionID, resp.IdleTTLSeconds = sessionSchemaV2, id, l.idleTTLSeconds()
@@ -1139,6 +1196,11 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	if e == nil {
 		return d, auditTrustedAgent, nil
 	}
+	if sub, ok := l.Sessions.Get(sessionID); ok && sub.SubjectKind == "service_principal" {
+		if _, valid := e.BundleServicePrincipalIdentity(sub.UserID, l.trustedAgentID()); !valid {
+			return pdp.Decision{ReasonCode: "subject_unlinked", DenySource: "identity", Reason: "the principal is no longer present for this agent", BundleState: "ready"}, auditTrustedAgent, nil
+		}
+	}
 	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
 	if req.Connector != nil {
 		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
@@ -1186,6 +1248,11 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 	e, identity := l.evaluator.Load(), l.identity.Load()
 	if e == nil || identity == nil {
 		return denied("policy_bundle_missing", "runtime identity or policy bundle is unavailable")
+	}
+	if sub, ok := l.Sessions.Get(sessionID); ok && sub.SubjectKind == "service_principal" {
+		if _, valid := e.BundleServicePrincipalIdentity(sub.UserID, identity.AgentID); !valid {
+			return denied("subject_unlinked", "the principal is no longer present for this agent")
+		}
 	}
 	trusted := identity.AgentID
 	if trusted == "" || (req.AgentID != "" && req.AgentID != trusted) {
@@ -1247,6 +1314,10 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	sessionID := session.FromRequest(r)
+	if sub, ok := l.Sessions.Get(sessionID); ok && sub.SubjectKind == "service_principal" && req.Tool == "" {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "principal credential release requires a tool-bound shared credential request")
+		return
+	}
 	var d pdp.Decision
 	var auditTrustedAgent bool
 	var err error

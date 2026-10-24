@@ -73,10 +73,24 @@ type AccessGrant struct {
 // AccessGrants projection (HAI-615).
 type Payload struct {
 	bundle.Payload
+	// ServicePrincipalIdentities are the bound principal identities in a v2 bundle.
+	// They are kept separate from the shared user-identity contract so older
+	// contracts versions can validate bundles without treating principals as users.
+	ServicePrincipalIdentities []ServicePrincipalIdentity `json:"-"`
 	// AccessGrants is the v2-only projection of the workspace's live access
 	// grants (ADR-038 §2, HAI-615). A grant opens one typed target for one
 	// principal until it ends. It never overrides a deny.
 	AccessGrants []AccessGrant `json:"access_grants,omitempty"`
+}
+
+// ServicePrincipalIdentity is a principal identity projected for one bound agent.
+type ServicePrincipalIdentity struct {
+	SubjectType        string    `json:"subject_type"`
+	ServicePrincipalID string    `json:"service_principal_id"`
+	AgentID            string    `json:"agent_id"`
+	Groups             []string  `json:"groups"`
+	SubjectToken       string    `json:"subject_token"`
+	ExpireTime         time.Time `json:"expire_time"`
 }
 
 // AgentModelProfile is one agent's effective model profile in a v2 bundle
@@ -212,17 +226,21 @@ func ValidateV2(bundleBytes []byte, installationID, orgID, workspaceID string, h
 	if err := bundle.RejectDuplicateJSON(bundleBytes); err != nil {
 		return nil, err
 	}
+	principalIdentities, schemaBytes, err := extractServicePrincipalIdentities(bundleBytes)
+	if err != nil {
+		return nil, err
+	}
 	if schemaValidatorV2 == nil {
 		return nil, errors.New("policy bundle v2 schema validator is unavailable")
 	}
-	if err := schemaValidatorV2(bundleBytes); err != nil {
+	if err := schemaValidatorV2(schemaBytes); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "additional properties") {
 			return nil, fmt.Errorf("%w: closed v2 schema rejected unknown field", ErrBundleUnsupported)
 		}
 		return nil, fmt.Errorf("invalid policy bundle v2 schema: %w", err)
 	}
 	var payload Payload
-	if err := strictJSON(bundleBytes, &payload); err != nil {
+	if err := strictJSON(schemaBytes, &payload); err != nil {
 		return nil, fmt.Errorf("decode policy bundle v2: %w", err)
 	}
 	if payload.Schema != "kei.policy-bundle/v2" || payload.Issuer != Issuer || payload.BundleID == "" || payload.BundleVersion < 1 || payload.PolicyRevision < 1 {
@@ -252,8 +270,75 @@ func ValidateV2(bundleBytes []byte, installationID, orgID, workspaceID string, h
 	if err := validateHarnesses(payload.Harnesses, payload.HarnessMatchSemantics); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBundleUnsupported, err)
 	}
+	payload.ServicePrincipalIdentities = principalIdentities
 	digest := sha256.Sum256(bundleBytes)
 	return &Verified{Payload: payload, PayloadBytes: append([]byte(nil), bundleBytes...), Digest: fmt.Sprintf("sha256:%x", digest)}, nil
+}
+
+// extractServicePrincipalIdentities adapts the principal identity extension to
+// older shared bundle contracts: principal entries are validated here and
+// removed only from the bytes passed to the user-only shared schema validator.
+func extractServicePrincipalIdentities(raw []byte) ([]ServicePrincipalIdentity, []byte, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, nil, err
+	}
+	var entries []json.RawMessage
+	if data, ok := doc["identities"]; ok {
+		if err := json.Unmarshal(data, &entries); err != nil {
+			return nil, nil, err
+		}
+	}
+	principals := make([]ServicePrincipalIdentity, 0)
+	users := make([]json.RawMessage, 0, len(entries))
+	for i, entry := range entries {
+		var marker struct {
+			SubjectType string `json:"subject_type"`
+		}
+		if err := json.Unmarshal(entry, &marker); err != nil {
+			return nil, nil, err
+		}
+		if marker.SubjectType == "" {
+			users = append(users, entry)
+			continue
+		}
+		if marker.SubjectType != "service_principal" {
+			return nil, nil, fmt.Errorf("%w: identities[%d].subject_type", ErrBundleUnsupported, i)
+		}
+		var principal ServicePrincipalIdentity
+		if err := strictJSON(entry, &principal); err != nil {
+			return nil, nil, fmt.Errorf("%w: malformed service-principal identity", ErrBundleUnsupported)
+		}
+		if !idPattern.MatchString(principal.ServicePrincipalID) || !idPattern.MatchString(principal.AgentID) || principal.SubjectToken == "" || principal.ExpireTime.IsZero() || principal.Groups == nil {
+			return nil, nil, fmt.Errorf("%w: incomplete service-principal identity", ErrBundleUnsupported)
+		}
+		seenGroups := make(map[string]struct{}, len(principal.Groups))
+		for _, group := range principal.Groups {
+			if strings.TrimSpace(group) == "" {
+				return nil, nil, fmt.Errorf("%w: invalid service-principal group", ErrBundleUnsupported)
+			}
+			if _, duplicate := seenGroups[group]; duplicate {
+				return nil, nil, fmt.Errorf("%w: duplicate service-principal group", ErrBundleUnsupported)
+			}
+			seenGroups[group] = struct{}{}
+		}
+		principals = append(principals, principal)
+		// The shared evaluator currently gates sessions against its user identity
+		// index. This internal compatibility projection is not exposed to callers;
+		// the selected session still retains its service-principal kind.
+		compat, _ := json.Marshal(Identity{Source: "service_principal", ExternalID: principal.ServicePrincipalID, UserID: principal.ServicePrincipalID, Status: "linked", Groups: principal.Groups})
+		users = append(users, compat)
+	}
+	if len(principals) == 0 {
+		return nil, raw, nil
+	}
+	identities, err := json.Marshal(users)
+	if err != nil {
+		return nil, nil, err
+	}
+	doc["identities"] = identities
+	clean, err := json.Marshal(doc)
+	return principals, clean, err
 }
 
 func validatePolicySetV2(raw json.RawMessage) error {
