@@ -10,9 +10,7 @@ type ConnectorBindingRoute = keiruntime.ConnectorBindingRoute
 type HarnessExecutorRoute = keiruntime.HarnessExecutorRoute
 
 const (
-	ToolManifestSchemaV2        = keiruntime.ToolManifestSchemaV2
 	ToolManifestSchemaV3        = keiruntime.ToolManifestSchemaV3
-	ToolManifestSchemaV4        = keiruntime.ToolManifestSchemaV4
 	ToolManifestProtocolHeader  = keiruntime.ToolManifestProtocolHeader
 	ToolManifestSupportedHeader = keiruntime.ToolManifestSupportedHeader
 )

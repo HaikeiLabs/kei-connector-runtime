@@ -43,7 +43,7 @@ func TestSocketToolsRegisterValidManifest(t *testing.T) {
 	})
 	handler := l.NewHandler(next, func() error { return nil }, func(r *http.Request) bool { return true })
 
-	body := `{"schema":"kei.tool-manifest/v4","sync_mode":"merge","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
+	body := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)
@@ -61,7 +61,7 @@ func TestSocketToolsRegisterValidManifest(t *testing.T) {
 	if registrar.lastToken != "test-token" {
 		t.Fatalf("registrar token = %q, want test-token", registrar.lastToken)
 	}
-	if registrar.lastManifest == nil || registrar.lastManifest.Schema != "kei.tool-manifest/v4" {
+	if registrar.lastManifest == nil || registrar.lastManifest.Schema != "kei.tool-manifest/v3" {
 		t.Fatalf("registrar did not receive manifest")
 	}
 	// Confirm the full manifest was passed through.
@@ -70,19 +70,19 @@ func TestSocketToolsRegisterValidManifest(t *testing.T) {
 	}
 }
 
-func TestSocketToolsRegisterContractsV1AndLegacyVersions(t *testing.T) {
+func TestSocketToolsRegisterAcceptsV3Only(t *testing.T) {
 	cases := []struct {
 		name       string
 		body       string
 		wantStatus int
+		wantSchema string
+		wantError  string
 	}{
-		{"contracts v1 valid", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"test.tool","description":"A test tool"}]}`, http.StatusOK},
-		{"v1 missing schema", `{"schema":"kei.tool-manifest/v1","tools":[{"name":"test.tool","description":"A test tool"}]}`, http.StatusBadRequest},
-		{"v1 missing name", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","description":"A test tool"}]}`, http.StatusBadRequest},
-		{"v1 missing description", `{"schema":"kei.tool-manifest/v1","tools":[{"schema":"kei.tool-definition/v1","name":"test.tool"}]}`, http.StatusBadRequest},
-		{"v2 remains accepted", `{"schema":"kei.tool-manifest/v2","tools":[{"name":"test.tool","source":"test","required_capabilities":["test.read"],"resource_types":[{"type":"item"}],"operation_class":"read"}]}`, http.StatusOK},
-		{"v3 remains accepted", `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`, http.StatusOK},
-		{"v4 remains accepted", `{"schema":"kei.tool-manifest/v4","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`, http.StatusOK},
+		{"v3", `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`, http.StatusOK, "kei.tool-manifest/v3", ""},
+		{"v1", `{"schema":"kei.tool-manifest/v1","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "kei.tool-manifest/v1"`},
+		{"v2", `{"schema":"kei.tool-manifest/v2","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "kei.tool-manifest/v2"`},
+		{"v4", `{"schema":"kei.tool-manifest/v4","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "kei.tool-manifest/v4"`},
+		{"garbage", `{"schema":"whatever","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "whatever"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,6 +94,22 @@ func TestSocketToolsRegisterContractsV1AndLegacyVersions(t *testing.T) {
 			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(tc.body)))
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantError != "" {
+				var response struct {
+					Error struct {
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decode error response: %v", err)
+				}
+				if !strings.Contains(response.Error.Message, tc.wantError) {
+					t.Fatalf("error message = %q, want containing %q", response.Error.Message, tc.wantError)
+				}
+			}
+			if tc.wantSchema != "" && (registrar.lastManifest == nil || registrar.lastManifest.Schema != tc.wantSchema) {
+				t.Fatalf("registrar manifest = %+v, want schema %q", registrar.lastManifest, tc.wantSchema)
 			}
 		})
 	}
@@ -114,7 +130,7 @@ func TestSocketToolsRegisterCatalog400(t *testing.T) {
 	})
 	handler := l.NewHandler(next, func() error { return nil }, func(r *http.Request) bool { return true })
 
-	body := `{"schema":"kei.tool-manifest/v4","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
+	body := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)
@@ -192,7 +208,7 @@ func TestSocketToolsRegisterEmptyToolsV4(t *testing.T) {
 	handler := l.NewHandler(next, func() error { return nil }, func(r *http.Request) bool { return true })
 
 	// v4 requires a non-empty tools array.
-	body := `{"schema":"kei.tool-manifest/v4","tools":[]}`
+	body := `{"schema":"kei.tool-manifest/v3","tools":[]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)
@@ -216,7 +232,7 @@ func TestSocketToolsRegisterNoRegistrar(t *testing.T) {
 	})
 	handler := l.NewHandler(next, func() error { return nil }, func(r *http.Request) bool { return true })
 
-	body := `{"schema":"kei.tool-manifest/v4","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
+	body := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)
@@ -240,7 +256,7 @@ func TestSocketToolsRegisterNoAuth(t *testing.T) {
 	// checkAuth returns false.
 	handler := l.NewHandler(next, func() error { return nil }, func(r *http.Request) bool { return false })
 
-	body := `{"schema":"kei.tool-manifest/v4","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
+	body := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)
@@ -263,7 +279,7 @@ func TestSocketToolsRegisterDoesNotTouchManifestFile(t *testing.T) {
 	// Create a temp file to simulate KEI_TOOL_MANIFEST.
 	manifestDir := t.TempDir()
 	manifestPath := filepath.Join(manifestDir, "manifest.json")
-	originalContent := `{"schema":"kei.tool-manifest/v2","tools":[{"name":"original.tool","source":"test","required_capabilities":["r"],"resource_types":[{"type":"r"}],"operation_class":"read"}]}`
+	originalContent := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"original.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"original.tool"}}}]}`
 	if err := os.WriteFile(manifestPath, []byte(originalContent), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +290,7 @@ func TestSocketToolsRegisterDoesNotTouchManifestFile(t *testing.T) {
 	})
 	handler := l.NewHandler(next, func() error { return nil }, func(r *http.Request) bool { return true })
 
-	body := `{"schema":"kei.tool-manifest/v4","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
+	body := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)

@@ -214,18 +214,10 @@ const (
 )
 
 func toolManifestMediaType(schema string) string {
-	switch schema {
-	case ToolManifestSchemaV1:
-		return "application/vnd.kei.tool-definition.v1+json"
-	case ToolManifestSchemaV2:
-		return "application/vnd.kei.tool-manifest.v2+json"
-	case ToolManifestSchemaV3:
+	if schema == ToolManifestSchemaV3 {
 		return "application/vnd.kei.tool-manifest.v3+json"
-	case ToolManifestSchemaV4:
-		return "application/vnd.kei.tool-manifest.v4+json"
-	default:
-		return ""
 	}
+	return ""
 }
 
 // ToolSyncResponse is the catalog response for PUT /api/v1/runtime/tools.
@@ -236,9 +228,7 @@ type ToolSyncResponse struct {
 	Unchanged int `json:"unchanged"`
 }
 
-// SyncTools proposes the exact manifest schema in Accept. V3 and v4 require
-// an explicit catalog acknowledgment; missing acknowledgments remain
-// compatible only for v2 peers predating negotiation.
+// SyncTools proposes v3 in Accept and requires explicit catalog acknowledgment.
 func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *ToolManifest) error {
 	_, err := c.syncTools(ctx, token, manifest, false)
 	return err
@@ -251,16 +241,8 @@ func (c *runtimeClient) SyncToolsWithResponse(ctx context.Context, token string,
 }
 
 func (c *runtimeClient) syncTools(ctx context.Context, token string, manifest *ToolManifest, readCounts bool) (*ToolSyncResponse, error) {
-	if manifest == nil || (manifest.Schema != ToolManifestSchemaV1 && manifest.Schema != ToolManifestSchemaV2 && manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4) {
+	if manifest == nil || manifest.Schema != ToolManifestSchemaV3 {
 		return nil, fmt.Errorf("unsupported tool manifest protocol")
-	}
-	if err := validateToolManifestSyncMode(manifest.Schema, manifest.SyncMode); err != nil {
-		return nil, fmt.Errorf("invalid tool manifest sync mode")
-	}
-	if manifest.Schema == ToolManifestSchemaV4 {
-		if err := validateToolManifest(manifest); err != nil {
-			return nil, fmt.Errorf("invalid v4 tool manifest")
-		}
 	}
 	body, err := json.Marshal(manifest)
 	if err != nil {
@@ -308,7 +290,7 @@ func (c *runtimeClient) syncTools(ctx context.Context, token string, manifest *T
 	if supportedHeader != "" && (ack != manifest.Schema || response.Header.Get("Content-Type") != "application/json") {
 		return nil, fmt.Errorf("tool sync protocol was advertised but not explicitly selected")
 	}
-	if (manifest.Schema == ToolManifestSchemaV1 || manifest.Schema == ToolManifestSchemaV3 || manifest.Schema == ToolManifestSchemaV4) && (ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema) || response.Header.Get("Content-Type") != "application/json") {
+	if ack != manifest.Schema || !containsManifestSchema(supportedHeader, manifest.Schema) || response.Header.Get("Content-Type") != "application/json" {
 		return nil, fmt.Errorf("tool sync protocol was not explicitly negotiated")
 	}
 	if !readCounts {
