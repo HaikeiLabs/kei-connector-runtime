@@ -595,6 +595,58 @@ func TestSocketSessionPrincipalAuditUsesTypedSubject(t *testing.T) {
 	}
 }
 
+func TestSocketAuthorizeServicePrincipalNoLongerBoundDeniesSubjectUnlinked(t *testing.T) {
+	const agentID, principalID = "20000000-0000-0000-0000-000000000006", "sp-bug-intake"
+	validator := subjectV2SchemaValidator(t)
+	policybundle.SetV2SchemaValidator(validator)
+	t.Cleanup(func() { policybundle.SetV2SchemaValidator(validator) })
+	dir := t.TempDir()
+	activateBundle(t, dir, principalBundle(t, agentID, principalID, time.Now().Add(time.Hour)))
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
+	}, nil)
+	t.Cleanup(l.Close)
+	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: agentID})
+	h := sessionHandler(t, l)
+	started := putSession(t, h, `{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake"}`)
+	if started.Code != http.StatusCreated {
+		t.Fatalf("start: status=%d body=%s", started.Code, started.Body.String())
+	}
+	var sessionResponse struct {
+		ID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(started.Body.Bytes(), &sessionResponse); err != nil {
+		t.Fatal(err)
+	}
+
+	updated := principalBundle(t, agentID, "sp-replacement", time.Now().Add(time.Hour))
+	var bundle map[string]any
+	if err := json.Unmarshal(updated, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	bundle["bundle_version"], bundle["policy_revision"] = float64(4), float64(8)
+	updated, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activateBundle(t, dir, updated)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"harness.open_file"}`))
+	req.Header.Set(session.Header, sessionResponse.ID)
+	h.ServeHTTP(rec, req)
+	var decision struct {
+		Decision   string `json:"decision"`
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &decision); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || decision.Decision != "deny" || decision.ReasonCode != "subject_unlinked" {
+		t.Fatalf("authorize status=%d decision=%+v body=%s; want 200 deny/subject_unlinked", rec.Code, decision, rec.Body.String())
+	}
+}
+
 func TestSocketSessionStartResolvesLinkedIdentity(t *testing.T) {
 	ids := []policybundle.Identity{
 		{Source: "discord", ExternalID: "ext-123", UserID: "u-alice", Status: "linked", Groups: []string{"members"}},
