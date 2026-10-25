@@ -250,6 +250,37 @@ func (e *Evaluator) AuthorizeV2HarnessToolForTarget(ctx context.Context, req Req
 	return e.authorizeV2HarnessTool(ctx, req, connectorID, capability, resource)
 }
 
+// AuthorizeV2UnregisteredTool evaluates an unregistered tool name for the
+// verified installation-owner subject held by a live named session.
+func (e *Evaluator) AuthorizeV2UnregisteredTool(ctx context.Context, req Request) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
+	if req.Session == DefaultSession {
+		return Decision{Reason: "v2 unregistered-tool authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
+	}
+	if live, reason := e.sessionLive(req.Session); !live {
+		return sessionDenial(reason), nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return stateDenial(state), nil
+	}
+	var subject *policybundle.SessionSubject
+	if current, ok := e.sessions.Get(req.Session); ok {
+		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+	}
+	d := v.EvaluateV2UnregisteredTool(req.Tool, req.AgentID, subject, e.now().UTC())
+	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+}
+
+// IsV2UnregisteredTool reports whether name has no tool registration in the
+// currently verified v2 bundle.
+func (e *Evaluator) IsV2UnregisteredTool(name string) bool {
+	v, ok := e.Bundle()
+	return ok && v.Payload.Schema == "kei.policy-bundle/v2" && !v.V2ToolRegistered(name)
+}
+
 func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err

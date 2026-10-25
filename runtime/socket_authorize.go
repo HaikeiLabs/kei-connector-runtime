@@ -62,7 +62,7 @@ type socketAuthorizeConnector struct {
 
 type socketAuthorizeResponse struct {
 	Schema              string          `json:"schema"`
-	Decision            string          `json:"decision"`
+	Decision            string          `json:"decision"` // permit | deny | unmatched
 	ReasonCode          string          `json:"reason_code,omitempty"`
 	Hint                string          `json:"hint,omitempty"`
 	DenySource          string          `json:"deny_source,omitempty"`
@@ -1104,12 +1104,15 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		return
 	}
 	sessionID := session.FromRequest(r)
-	d, auditTrustedAgent, err := l.decideAuthorize(r.Context(), sessionID, req)
+	d, auditTrustedAgent, unmatched, err := l.decideAuthorize(r.Context(), sessionID, req)
 	if err != nil {
 		writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
 		return
 	}
 	resp := socketAuthorizeResponseForDecision(d, includeEnrollment)
+	if unmatched {
+		resp.Decision = "unmatched"
+	}
 	if l.emit != nil {
 		auditReq := req
 		if auditTrustedAgent {
@@ -1117,7 +1120,7 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 			// default identity used for the policy decision.
 			auditReq.AgentID = l.trustedAgentID()
 		}
-		data := l.decisionEventJSON(auditReq, sessionID, d, nil)
+		data := l.decisionEventJSONWithUnmatched(auditReq, sessionID, d, nil, unmatched)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1129,16 +1132,16 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 // agree. auditTrustedAgent is true when the decision used the runtime
 // identity's default agent (the audit records that agent instead of the
 // request's). The error is non-nil only when ctx is done.
-func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent bool, err error) {
+func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
 	d = pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
 	auditTrustedAgent = req.Tool == "pi.bash"
 	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
-		return d, auditTrustedAgent, nil
+		return d, auditTrustedAgent, false, nil
 	}
 	e := l.evaluator.Load()
 	if e == nil {
-		return d, auditTrustedAgent, nil
+		return d, auditTrustedAgent, false, nil
 	}
 	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
 	if req.Connector != nil {
@@ -1157,6 +1160,19 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		}
 	case req.ShellCommand != "":
 		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
+	case req.Tool != "" && req.Connector == nil && e.IsV2UnregisteredTool(req.Tool) && l.isOwnerSession(sessionID):
+		// Unregistered tool names receive a local policy decision by name.
+		// Identity and memberships come from the verified installation-owner
+		// session, never the request.
+		trusted := l.trustedAgentID()
+		auditTrustedAgent = true
+		if req.AgentID != "" && req.AgentID != trusted {
+			d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+			break
+		}
+		preq.AgentID = trusted
+		d, err = e.AuthorizeV2UnregisteredTool(ctx, preq)
+		unmatched = d.ReasonCode == "no_matching_policy"
 	case e.IsV2HarnessTool(req.Tool):
 		// The request's AgentID is untrusted: decide for the authenticated
 		// runtime identity's default agent, and deny a request that names
@@ -1172,7 +1188,16 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	default:
 		d, err = e.Evaluate(ctx, preq)
 	}
-	return d, auditTrustedAgent, err
+	return d, auditTrustedAgent, unmatched, err
+}
+
+func (l *LocalPDP) isOwnerSession(sessionID string) bool {
+	if sessionID == "" || sessionID == pdp.DefaultSession {
+		return false
+	}
+	l.ownerMu.RLock()
+	defer l.ownerMu.RUnlock()
+	return l.ownerID == sessionID && !l.ownerUnavailable
 }
 
 // decideCredentialReleaseV2 authorizes one exact tool/connector/capability/
@@ -1254,7 +1279,7 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 	if req.Tool != "" {
 		d, auditTrustedAgent = l.decideCredentialReleaseV2(r.Context(), sessionID, req)
 	} else {
-		d, auditTrustedAgent, err = l.decideAuthorize(r.Context(), sessionID, req)
+		d, auditTrustedAgent, _, err = l.decideAuthorize(r.Context(), sessionID, req)
 	}
 	if err != nil {
 		writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
@@ -1388,6 +1413,10 @@ func typedSubject(subject pdp.Subject) string {
 }
 
 func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialReleased *bool) json.RawMessage {
+	return l.decisionEventJSONWithUnmatched(req, sessionID, d, credentialReleased, false)
+}
+
+func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialReleased *bool, unmatched bool) json.RawMessage {
 	spanID := req.SpanID
 	if spanID == "" {
 		spanID = uuid.NewString()
@@ -1402,7 +1431,9 @@ func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID strin
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: d.ReasonCode,
 		CredentialReleased: credentialReleased,
 	}
-	if d.Allow {
+	if unmatched && d.ReasonCode == "no_matching_policy" {
+		e.Decision = "unmatched"
+	} else if d.Allow {
 		e.Decision = "allow"
 	}
 	if subject, ok := l.Sessions.Get(sessionID); ok {

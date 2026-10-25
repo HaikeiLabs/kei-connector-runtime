@@ -107,6 +107,17 @@ is not enabled on TCP. The legacy `kei-proxy authorize` CLI
 subprocess is deprecated; it delegates PDP to the remote catalog and is
 retained for harnesses that have not yet migrated.
 
+The `kei.authorize-response/v1` `decision` is `permit`, `deny`, or `unmatched`.
+`unmatched` with `reason_code: no_matching_policy` means the local PDP found no
+applicable policy; it is not a permit and the runtime does not defer execution.
+An adapter may choose its own native decision for unmatched calls, while SDK
+and connector callers remain on their existing non-permit paths. A matching
+explicit deny remains `deny` with `reason_code: policy_deny`.
+
+For a v2 bundle, a named verified installation-owner session may authorize a
+tool by its name against `tool_policies` even when the catalog has no tool
+registration for it. Registered tools continue through their existing routes.
+
 Both the PEP and the PDP run in the same daemon process. The PDP evaluates
 policy locally from an unsigned canonical JSON bundle (ADR-026), and the PEP
 enforces the result on every governed invocation without a round trip to the
