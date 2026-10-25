@@ -169,6 +169,51 @@ func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 	return v.v2GrantOrRule(decision, v2ToolTarget(registered.Name), subject, groups, now)
 }
 
+// V2ToolRegistered reports whether a v2 policy set has a catalog registration
+// for the named tool, regardless of its execution route.
+func (v *Verified) V2ToolRegistered(toolName string) bool {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" {
+		return false
+	}
+	var set v2PolicySet
+	if strictJSON(v.Payload.PolicySet, &set) != nil {
+		return false
+	}
+	for _, tool := range set.Tools {
+		if tool.Name == toolName {
+			return true
+		}
+	}
+	return false
+}
+
+// EvaluateV2UnregisteredTool evaluates an unregistered tool name against the
+// v2 tool policies for the verified installation-owner session.
+func (v *Verified) EvaluateV2UnregisteredTool(toolName, agentID string, subject *SessionSubject, now time.Time) Decision {
+	if decision, denied := v.v2SubjectDenial(subject, now); denied {
+		return decision
+	}
+	if subject.Source != "installation_owner" {
+		return Decision{Outcome: "deny", ReasonCode: "owner_session_required", Reason: "unregistered tool policy evaluation requires the verified installation owner session"}
+	}
+	if toolName == "" || v.V2ToolRegistered(toolName) {
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "tool is empty or already registered in the policy bundle"}
+	}
+	if agentID == "" {
+		return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "agent is not assigned to this installation"}
+	}
+	var set v2PolicySet
+	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
+		return invalidDecision()
+	}
+	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
+	if subject.Source == "installation_owner" && v.Payload.Subject != nil && v.Payload.Subject.UserID == subject.UserID {
+		groups = v.Payload.Subject.Groups
+	}
+	decision := evaluateV2Check(set.ToolPolicies, map[string]string{"tool": toolName}, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	return v.v2GrantOrRule(decision, v2ToolTarget(toolName), subject, groups, now)
+}
+
 // EvaluateV2Plan locally AND-authorizes a complete exact operation plan for a
 // registered connector tool. The runtime derives operations from its validated
 // cached bundle plan; caller capability declarations are never authority.

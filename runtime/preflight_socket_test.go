@@ -437,6 +437,87 @@ func TestTokenlessOwnerSocketBindsVerifiedBundleSubjectAndKeepsSessionRoutesToke
 	}
 }
 
+func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	tests := []struct {
+		name         string
+		effect       string
+		tool         string
+		shell        string
+		wantDecision string
+		wantReason   string
+		wantPolicyID string
+	}{
+		{name: "group permit", effect: "permit", tool: "custom.read", wantDecision: "permit", wantPolicyID: "tool-policy"},
+		{name: "group deny", effect: "deny", tool: "custom.write", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "tool-policy"},
+		{name: "unmatched tool is neutral on the socket", tool: "custom.unmatched", wantDecision: "unmatched", wantReason: "no_matching_policy"},
+		{name: "unsupported shell syntax remains denied", tool: "pi.bash", shell: "git status && whoami", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testPolicyConfig{policyStateDir: t.TempDir()}
+			var audit json.RawMessage
+			local := NewLocalPDP(cfg, func(event json.RawMessage) { audit = append(json.RawMessage(nil), event...) })
+			defer local.Close()
+			local.SetTokenlessOwnerSession(true)
+			identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
+			local.SetIdentity(identity)
+			var doc map[string]any
+			if err := json.Unmarshal(v2PreflightBundle(t, now), &doc); err != nil {
+				t.Fatal(err)
+			}
+			doc["subject"] = map[string]any{"user_id": "user-alice", "email": "alice@example.test", "groups": []string{"members"}}
+			doc["identities"] = []any{}
+			set := doc["policy_set"].(map[string]any)
+			if tc.effect != "" {
+				set["tool_policies"] = []any{map[string]any{
+					"policy_id": "tool-policy", "name": "unregistered tool policy", "effect": tc.effect, "priority": 10,
+					"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
+					"selector": map[string]any{"source_principal": "group:members", "tool": tc.tool},
+				}}
+			}
+			bundle, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = store.Activate(bundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+				t.Fatal(err)
+			}
+			local.AfterSync(nil)
+			h := local.NewSocketHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return false })
+			rec := httptest.NewRecorder()
+			tool := tc.tool
+			if tool == "" {
+				tool = "custom.unmatched"
+			}
+			body := `{"schema":"kei.authorize-request/v1","tool":"` + tool + `"}`
+			if tc.shell != "" {
+				body = `{"schema":"kei.authorize-request/v1","tool":"pi.bash","shell_command":"` + tc.shell + `","tool_args_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
+			h.ServeHTTP(rec, req)
+			var response socketAuthorizeResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK || response.Decision != tc.wantDecision || response.ReasonCode != tc.wantReason || response.PolicyID != tc.wantPolicyID {
+				t.Fatalf("tool authorization status=%d response=%+v err=%v", rec.Code, response, err)
+			}
+			if tc.wantDecision == "unmatched" {
+				var event struct {
+					Decision   string `json:"decision"`
+					ReasonCode string `json:"reason_code"`
+				}
+				if err := json.Unmarshal(audit, &event); err != nil || event.Decision != "unmatched" || event.ReasonCode != "no_matching_policy" {
+					t.Fatalf("audit event=%s err=%v, want unmatched/no_matching_policy", audit, err)
+				}
+			}
+		})
+	}
+}
+
 func TestTokenlessOwnerSessionLoadsCredentialsFromMatchingLinkedIdentity(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()

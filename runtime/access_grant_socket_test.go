@@ -38,7 +38,7 @@ func v2GrantAuthorizationBundle(t *testing.T, now time.Time, version int64, gran
 // surfaces an access grant the way it surfaces any other decision: a live
 // grant permits the call it opens, an ended grant denies with
 // access_grant_expired and a next-step hint, and a bundle without grants
-// decides exactly as it did before grants existed.
+// returns a deny response when no registered policy matches.
 func TestSocketAuthorizeCarriesAccessGrantDecisions(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
@@ -71,7 +71,7 @@ func TestSocketAuthorizeCarriesAccessGrantDecisions(t *testing.T) {
 	var response socketAuthorizeResponse
 	rec := call()
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || response.Decision != "deny" || response.ReasonCode != "no_matching_policy" {
-		t.Fatalf("bundle without grants response=%+v err=%v", response, err)
+		t.Fatalf("bundle without grants response=%+v err=%v, want deny/no_matching_policy", response, err)
 	}
 
 	live := []any{map[string]any{"principal": "user:user-alice", "target": "tool:github.read_repo", "expire_time": now.Add(time.Hour).Format(time.RFC3339)}}
