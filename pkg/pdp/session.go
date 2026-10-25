@@ -344,7 +344,7 @@ func (s *Sessions) revokeIf(match func(Subject) bool) []string {
 	var revoked []string
 	s.mu.Lock()
 	if s.cur != nil && match(*s.cur) {
-		s.cur = &Subject{UserID: s.cur.UserID, Status: StatusRevoked}
+		s.cur = &Subject{SubjectKind: s.cur.SubjectKind, UserID: s.cur.UserID, Status: StatusRevoked}
 		revoked = append(revoked, DefaultSession)
 	}
 	s.mu.Unlock()
@@ -352,7 +352,7 @@ func (s *Sessions) revokeIf(match func(Subject) bool) []string {
 		e := v.(*idSession)
 		e.mu.Lock()
 		if match(e.sub) {
-			e.sub = Subject{UserID: e.sub.UserID, Status: StatusRevoked}
+			e.sub = Subject{SubjectKind: e.sub.SubjectKind, UserID: e.sub.UserID, Status: StatusRevoked}
 			revoked = append(revoked, k.(string))
 		}
 		e.mu.Unlock()

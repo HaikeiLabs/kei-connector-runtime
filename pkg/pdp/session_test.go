@@ -217,6 +217,19 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 	}
 }
 
+func TestRevokingServicePrincipalSessionPreservesTypedSubject(t *testing.T) {
+	sessions := NewSessions()
+	id, err := sessions.Create(Subject{SubjectKind: "service_principal", UserID: "sp-intake", Status: StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.revokeIf(func(Subject) bool { return true })
+	sub, ok := sessions.Get(id)
+	if !ok || sub.Status != StatusRevoked || sub.SubjectKind != "service_principal" {
+		t.Fatalf("revoked principal subject = %+v, live=%t", sub, ok)
+	}
+}
+
 // TestSessionsMaxAge: a named session is recycled after 8 hours (max age)
 // regardless of use; the next sessionLive check returns session_revalidation_required;
 // onRecycle and onEnd both fire; the default session is not affected.

@@ -432,6 +432,46 @@ func (e *Evaluator) LookupLinkedUser(userID string) (policybundle.Identity, bool
 	return v.LookupLinkedUser(userID, e.now().UTC())
 }
 
+// BundleServicePrincipalIdentity resolves a principal only from the current
+// verified bundle and only for the agent named by its binding projection.
+func (e *Evaluator) BundleServicePrincipalIdentity(id, agentID string) (policybundle.ServicePrincipalIdentity, bool) {
+	return e.lookupBundleServicePrincipalIdentity(func(candidate policybundle.ServicePrincipalIdentity) bool {
+		return candidate.ServicePrincipalID == id
+	}, agentID)
+}
+
+// BundleServicePrincipalIdentityByName resolves exactly one named principal
+// from the current bundle for the trusted agent.
+func (e *Evaluator) BundleServicePrincipalIdentityByName(name, agentID string) (policybundle.ServicePrincipalIdentity, bool) {
+	return e.lookupBundleServicePrincipalIdentity(func(candidate policybundle.ServicePrincipalIdentity) bool {
+		return candidate.ServicePrincipalName == name
+	}, agentID)
+}
+
+func (e *Evaluator) lookupBundleServicePrincipalIdentity(matches func(policybundle.ServicePrincipalIdentity) bool, agentID string) (policybundle.ServicePrincipalIdentity, bool) {
+	v, _, err := e.check()
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(e.now().UTC()) {
+		return policybundle.ServicePrincipalIdentity{}, false
+	}
+	var found *policybundle.ServicePrincipalIdentity
+	for i := range v.Payload.ServicePrincipalIdentities {
+		candidate := &v.Payload.ServicePrincipalIdentities[i]
+		if candidate.AgentID != agentID || candidate.SubjectType != "service_principal" || !matches(*candidate) {
+			continue
+		}
+		if found != nil {
+			return policybundle.ServicePrincipalIdentity{}, false
+		}
+		found = candidate
+	}
+	if found == nil || !e.now().UTC().Before(found.ExpireTime) {
+		return policybundle.ServicePrincipalIdentity{}, false
+	}
+	out := *found
+	out.Groups = append([]string(nil), found.Groups...)
+	return out, true
+}
+
 // BundleIdentities returns the identities from the current verified bundle,
 // or nil when the bundle is missing, invalid, expired, or has no identities.
 func (e *Evaluator) BundleIdentities() []policybundle.Identity {

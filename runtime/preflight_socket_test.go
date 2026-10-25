@@ -129,6 +129,94 @@ func v2SharedCredentialReleaseBundle(t *testing.T, now time.Time, target string)
 	return raw
 }
 
+func principalV2CredentialBundle(t *testing.T, now time.Time, accountModel string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(v2SharedCredentialReleaseBundle(t, now, "repos/owner/name"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	identities := []any{map[string]any{
+		"subject_type": "service_principal", "service_principal_id": "sp-bug-intake",
+		"agent_id": "agent-fixture-0001", "groups": []string{"bug-intake"},
+		"subject_token": "principal-subject-token", "expire_time": now.Add(time.Hour).Format(time.RFC3339Nano),
+	}}
+	doc["identities"] = identities
+	set := doc["policy_set"].(map[string]any)
+	connector := set["connectors"].([]any)[0].(map[string]any)
+	connector["account_model"] = accountModel
+	policy := set["tool_policies"].([]any)[0].(map[string]any)
+	policy["selector"].(map[string]any)["source_principal"] = "group:bug-intake"
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestSocketPrincipalSessionReleasesOnlySharedToolCredential(t *testing.T) {
+	validator := runtimeV2SchemaValidator(t)
+	policybundle.SetV2SchemaValidator(validator)
+	defer policybundle.SetV2SchemaValidator(validator)
+	for _, tc := range []struct{ accountModel, want string }{{"shared", "allow"}, {"per_user", "deny"}} {
+		t.Run(tc.accountModel, func(t *testing.T) {
+			now := time.Now().UTC()
+			dir := t.TempDir()
+			store, err := policybundle.OpenStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Activate(principalV2CredentialBundle(t, now, tc.accountModel), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+				t.Fatal(err)
+			}
+			bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == credrelease.ResolvePath {
+					_ = json.NewEncoder(w).Encode(map[string]any{"credentials": []any{}})
+					return
+				}
+				var body struct {
+					Resource string `json:"resource"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": "conn-fixture-0001", "resource": body.Resource, "account_model": tc.accountModel, "credential": map[string]any{"access_token": "principal-shared-token", "token_type": "Bearer", "expire_time": now.Add(time.Hour).Format(time.RFC3339Nano)}})
+			}))
+			defer bridge.Close()
+			local := NewLocalPDP(testPolicyConfig{policyStateDir: dir, token: "runtime-token"}, nil)
+			defer local.Close()
+			local.SetIdentity(&Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"})
+			local.SetCredentialStore(credrelease.NewStore(credrelease.NewClient(bridge.URL, "runtime-token", time.Second)))
+			h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+			start := httptest.NewRecorder()
+			h.ServeHTTP(start, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","service_principal_id":"sp-bug-intake"}`)))
+			if start.Code != http.StatusCreated {
+				t.Fatalf("session start=%d %s", start.Code, start.Body.String())
+			}
+			var sessionBody struct {
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(start.Body.Bytes(), &sessionBody); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"schema":"kei.credential-release-request/v1","tool":"github.read_repo","agent_id":"agent-fixture-0001","connector":{"connector_id":"conn-fixture-0001","capability":"repository.read"},"resource":"repos/owner/name"}`
+			req := httptest.NewRequest(http.MethodPost, "/v1/credentials:release", strings.NewReader(body))
+			session.SetHeader(req, sessionBody.SessionID)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			var got struct {
+				Decision   string `json:"decision"`
+				Credential *struct {
+					AccessToken string `json:"access_token"`
+				} `json:"credential"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Decision != tc.want || (tc.want == "allow" && (got.Credential == nil || got.Credential.AccessToken != "principal-shared-token")) || (tc.want == "deny" && got.Credential != nil) {
+				t.Fatalf("release=%+v body=%s", got, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	defer policybundle.SetV2SchemaValidator(nil)
