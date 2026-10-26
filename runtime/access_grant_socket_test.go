@@ -45,7 +45,7 @@ func TestSocketAuthorizeCarriesAccessGrantDecisions(t *testing.T) {
 	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
 	local := NewLocalPDP(cfg, nil)
 	defer local.Close()
-	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
 	local.SetIdentity(identity)
 	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
 	if err != nil {
