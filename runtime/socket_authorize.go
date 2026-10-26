@@ -1232,6 +1232,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			// Never use the caller's optional AgentID; the authenticated
 			// runtime identity supplies the installation's assigned default.
 			d, err = e.AuthorizePiShell(ctx, sessionID, req.ShellCommand, identity.AgentID)
+			unmatched = d.ReasonCode == "no_matching_policy"
 		}
 	case req.ShellCommand != "":
 		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
