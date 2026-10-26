@@ -80,7 +80,7 @@ func TestServeCredentialsReleaseRoute(t *testing.T) {
 	if _, err := store.Activate(releaseServeBundle(t), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
 		t.Fatalf("activate release bundle: %v", err)
 	}
-	local, _, err := newServeLocalPDP(cfg, serveSeams{})
+	local, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}

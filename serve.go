@@ -25,7 +25,6 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
-	"github.com/HaikeiLabs/kei-connector-runtime/internal/mcproute"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/socket"
@@ -36,7 +35,6 @@ import (
 
 const (
 	defaultListenAddr     = ":8085"
-	defaultMCPListenAddr  = "127.0.0.1:8086"
 	shutdownFlushTimeout  = 5 * time.Second
 	collectorPollInterval = time.Minute
 )
@@ -65,12 +63,6 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		slog.Warn("runtime_core_limit_failed", "error", err)
 	}
-	if cfg.MCPListenAddr != "" {
-		if err := validateMCPListenAddr(cfg.MCPListenAddr); err != nil {
-			slog.Error("runtime_mcp_listener_invalid", "addr", cfg.MCPListenAddr, "error", err)
-			return 1
-		}
-	}
 	// serve owns its state directory: it is the one process that refreshes
 	// policy, ships audit, and reports heartbeats for it (HAI-438). Claim it
 	// before any child starts, so a `runtime heartbeat` beside it can never
@@ -82,7 +74,7 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		return 1
 	}
 	defer releaseStateDir()
-	local, route, err := newServeLocalPDP(cfg, serveSeams{})
+	local, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		slog.Error("runtime_credential_release_invalid", "error", err)
 		return 1
@@ -124,18 +116,6 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 	children.Go("unix listener", func(ctx context.Context) error {
 		return keiruntime.ServeHTTP(ctx, newServer(socketHandler), unixListener, shutdownFlushTimeout)
 	})
-	if cfg.MCPListenAddr != "" {
-		mcpListener, err := net.Listen("tcp", cfg.MCPListenAddr)
-		if err != nil {
-			slog.Error("runtime_mcp_listener_failed", "addr", cfg.MCPListenAddr, "error", err)
-			return 1
-		}
-		mcpHandler := route.handler
-		children.Go("mcp listener", func(ctx context.Context) error {
-			return keiruntime.ServeHTTP(ctx, newServer(mcpHandler), mcpListener, shutdownFlushTimeout)
-		})
-		slog.Info("runtime_mcp_listener_started", "addr", cfg.MCPListenAddr)
-	}
 	children.Go("session sweeper", func(ctx context.Context) error {
 		local.SweepSessions(ctx)
 		return nil
@@ -265,10 +245,10 @@ func daemonInvokeEnv(cfg Config, seams serveSeams, store secrets.Store, emit fun
 // owner session with matching linked bundle identity hold connector credentials
 // in session stores; POST /v1/connectors:invoke runs governed calls with them.
 // The caller must Close it on exit.
-func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpRoute, error) {
+func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error) {
 	creds, err := newSessionCredentialStore(cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir)
 	emitFunc := func(data json.RawMessage) {
@@ -280,12 +260,6 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpR
 		}
 	}
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
-	route := newMCPRoute(cfg, local)
-	// Route keys are minted for run children only while the route listens.
-	var routeKeys runcommand.RouteKeys
-	if cfg.MCPListenAddr != "" {
-		routeKeys = mcpRouteKeys{keys: route.keys, local: local}
-	}
 	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
 	local.SetTokenlessOwnerSession(cfg.TokenlessOwnerSession)
 	if creds != nil {
@@ -313,10 +287,9 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, *mcpR
 				return nil
 			},
 			AuditCrypto: auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken),
-			RouteKeys:   routeKeys,
 		})
 	}
-	return local, route, nil
+	return local, nil
 }
 
 // newServeHandlers builds the TCP handler and the Unix socket handler (the
@@ -327,167 +300,6 @@ func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Ha
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
 	local.SetModelConfigHandler(http.HandlerFunc(base.handleModelConfig))
 	return base, local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
-}
-
-// mcpRoute is the /mcp/{slug} route as serve wires it: the handler and the
-// registry of route keys for live sessions.
-type mcpRoute struct {
-	handler     http.Handler
-	keys        *mcproute.KeyRegistry
-	submitter   mcproute.ManifestSubmitter
-	credentials mcproute.CredentialSource
-	secrets     mcproute.SecretFields
-}
-
-// newMCPRoute builds the /mcp/{slug} route with PDP-based authorization and
-// an empty key registry. Route keys are minted per session at runtime.
-func newMCPRoute(cfg Config, local *keiruntime.LocalPDP) *mcpRoute {
-	keys := mcproute.NewKeyRegistry()
-	auditPath := keiruntime.ResolveAuditPath(cfg.AuditPath, cfg.RuntimeStateDir)
-	// Candidate manifests go to the control plane (ADR-036 §5.4).
-	var submitter mcproute.ManifestSubmitter
-	if cfg.RuntimeControlPlaneURL != "" {
-		submitter = mcproute.CatalogManifestClient{BaseURL: cfg.RuntimeControlPlaneURL, RuntimeToken: cfg.RuntimeToken, Scope: local.AuditScope}
-	}
-	sessionCredentials := mcpCredentials{local: local}
-	secretFields := mcpSecretFields{resolver: invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: connectorSecretStore()}}
-	handler := mcproute.NewHandler(mcproute.Config{
-		// Step 10: the session's connector credential, never the harness's.
-		Credentials: sessionCredentials,
-		Secrets:     secretFields,
-		Submitter:   submitter,
-		KeyRegistry: keys,
-		Authorizer:  pdpAuthorizer{pdp: local},
-		// One §4.9 record per tools/list and tools/call, in the local spool;
-		// arguments only as a digest, or encrypted to customer-held keys.
-		Auditor: mcproute.SpoolAuditor{
-			Append: func(class string, record []byte) error {
-				return keiruntime.NewAuditSpool(auditPath, cfg.AuditMaxBytes).Append(class, record)
-			},
-			Sealer: auditcrypto.NewProvider(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken),
-			Scope:  local.AuditScope,
-		},
-		// The bundle in force: mcp descriptors, bindings, approvals.
-		Catalog: local,
-		Logger:  slog.Default(),
-	})
-	local.OnSessionEnd(keys.Revoke)
-	local.OnSessionEnd(handler.EndSession)
-	return &mcpRoute{
-		keys:        keys,
-		handler:     handler,
-		submitter:   submitter,
-		credentials: sessionCredentials,
-		secrets:     secretFields,
-	}
-}
-
-// mcpRouteKeys mints route keys for `kei-proxy run` children (ADR-036 §4.4):
-// one per run, for a live linked named session, revoked when the child exits.
-type mcpRouteKeys struct {
-	keys  *mcproute.KeyRegistry
-	local *keiruntime.LocalPDP
-}
-
-func (m mcpRouteKeys) Mint(sessionID, agentID, harnessKind string) (string, error) {
-	subject, agent, reason := m.local.RouteKeySession(sessionID, agentID)
-	if reason != "" {
-		return "", &runcommand.RouteKeyDenied{Code: reason, Reason: "the session cannot have an MCP route key"}
-	}
-	return m.keys.Mint(mcproute.Session{Subject: subject, Agent: agent, HarnessKind: harnessKind, SessionID: sessionID})
-}
-
-func (m mcpRouteKeys) Revoke(key string) { m.keys.RevokeKey(key) }
-
-// mcpCredentials is the route's credential source: the session-held,
-// connector-scoped credential release of the local PDP (HAI-577). A release
-// failure becomes a CredentialDenied with its reason; errors from the route's
-// own callback pass through unchanged.
-type mcpCredentials struct{ local *keiruntime.LocalPDP }
-
-func (m mcpCredentials) UseCredential(ctx context.Context, sess *mcproute.Session, connectorID, resource string, fn func(mcproute.ConnectorCredential) error) error {
-	err := m.local.UseConnectorCredential(ctx, sess.SessionID, sess.Subject, connectorID, resource, func(c credrelease.ConnectorCredential) error {
-		return fn(mcproute.ConnectorCredential{ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource, AccountModel: c.AccountModel, AccessToken: c.AccessToken})
-	})
-	var denied *credrelease.DeniedError
-	if errors.As(err, &denied) {
-		return &mcproute.CredentialDenied{Reason: denied.Reason}
-	}
-	return err
-}
-
-func (m mcpCredentials) Discard(sess *mcproute.Session, connectorID, resource string) {
-	m.local.DropConnectorCredential(sess.SessionID, connectorID, resource)
-}
-
-// mcpSecretFields resolves a secret_ref mcp connector's credential_fields
-// (HAI-581) exactly as an opaque_ref connector's credential: the reference
-// kei://connectors/<id>/<field> through the connector reference index, the
-// backend the descriptor names, and the tenant secret store.
-type mcpSecretFields struct{ resolver invoke.SecretResolver }
-
-func (m mcpSecretFields) Resolve(ctx context.Context, d policybundle.Connector, field string) (string, error) {
-	c := d
-	c.CredentialRef = "kei://connectors/" + d.ID + "/" + field
-	return m.resolver.Resolve(ctx, c)
-}
-
-// pdpAuthorizer maps an MCP decision to a PDP tool call and denies on any
-// PDP denial or error. When the PDP is unavailable, every call is denied.
-type pdpAuthorizer struct {
-	pdp *keiruntime.LocalPDP
-}
-
-func (a pdpAuthorizer) Authorize(ctx context.Context, d mcproute.Decision) (mcproute.Verdict, error) {
-	result, err := a.pdp.AuthorizeMCPTool(ctx, d.SessionID, d.ConnectorSlug, d.Tool, d.Agent, d.HarnessKind)
-	if err != nil {
-		return mcproute.Verdict{}, &mcproute.PermissionError{Reason: "internal_error", Tool: d.Tool}
-	}
-	verdict := mcproute.Verdict{PolicyID: result.PolicyID, BundleVersion: result.BundleVersion, DenySource: result.DenySource}
-	if sub, ok := a.pdp.Sessions.Get(d.SessionID); ok {
-		verdict.Groups = sub.Groups
-	}
-	if !result.Allow {
-		return verdict, &mcproute.PermissionError{Reason: mcpReason(result.ReasonCode), Tool: d.Tool}
-	}
-	return verdict, nil
-}
-
-// mcpReason maps a PDP reason code to its ADR-036 §4.5 name. The PDP calls a
-// deny policy policy_deny everywhere; the MCP route calls it policy_denied.
-func mcpReason(code string) string {
-	if code == "policy_deny" {
-		return "policy_denied"
-	}
-	return code
-}
-
-// validateMCPListenAddr rejects addresses that do not resolve to a loopback
-// IP, ensuring the MCP route listener is only reachable from the local host.
-func validateMCPListenAddr(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("invalid MCP listen address %q: %w", addr, err)
-	}
-	if host == "" {
-		return fmt.Errorf("MCP listen address %q binds all interfaces; must be loopback", addr)
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if !ip.IsLoopback() {
-			return fmt.Errorf("MCP listen address %q is not loopback", addr)
-		}
-		return nil
-	}
-	ips, err := net.LookupHost(host)
-	if err != nil {
-		return fmt.Errorf("cannot resolve MCP listen address %q: %w", addr, err)
-	}
-	for _, ipStr := range ips {
-		if ip := net.ParseIP(ipStr); ip != nil && ip.IsLoopback() {
-			return nil
-		}
-	}
-	return fmt.Errorf("MCP listen address %q does not resolve to a loopback IP", addr)
 }
 
 const (

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,23 +46,7 @@ func runHelperChild() int {
 	fmt.Printf("raw=%s\n", token)
 	fmt.Printf("env-keys=%s\n", strings.Join(keys, ","))
 	fmt.Fprintf(os.Stderr, "err-raw=%s\n", token)
-	// HAI-488: with an MCP route URL, ping the route with the injected key,
-	// print the key (the daemon must redact it), and hand it to the test.
-	if routeURL := os.Getenv("KEI_RUN_HELPER_MCP_URL"); routeURL != "" {
-		key := os.Getenv("KEI_MCP_ROUTE_KEY")
-		req, _ := http.NewRequest(http.MethodPost, routeURL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
-		req.Header.Set("Authorization", "Bearer "+key)
-		status := 0
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			status = resp.StatusCode
-			resp.Body.Close()
-		}
-		fmt.Printf("mcp-ping=%d\n", status)
-		fmt.Printf("route-key=%s\n", key)
-		if path := os.Getenv("KEI_RUN_HELPER_KEY_FILE"); path != "" {
-			_ = os.WriteFile(path, []byte(key), 0o600)
-		}
-	}
+
 	code, _ := strconv.Atoi(os.Getenv("KEI_RUN_HELPER_EXIT"))
 	return code
 }

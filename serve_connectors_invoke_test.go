@@ -28,6 +28,8 @@ import (
 const (
 	invokeExternalID = "ext-linked-0001"
 	invokeConnector  = "conn-github-0001"
+	mcpConnectorID   = "conn-mcp-1"
+	mcpTokenCanary   = "kei-canary-mcp-connector-token-577"
 )
 
 // invokeRig is a running daemon with a linked bundle session available.
@@ -35,7 +37,6 @@ type invokeRig struct {
 	t      *testing.T
 	cfg    Config
 	local  *keiruntime.LocalPDP
-	mcp    *mcpRoute
 	client *http.Client
 	socket string
 
@@ -70,7 +71,7 @@ func newInvokeRigConfig(t *testing.T, mutate func(*Config)) *invokeRig {
 	if _, err := store.Activate(connectorTestBundle(t), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	rig.local, rig.mcp, err = newServeLocalPDP(rig.cfg, serveSeams{providerTransport: roundTripFunc(rig.serveGitHub)})
+	rig.local, err = newServeLocalPDP(rig.cfg, serveSeams{providerTransport: roundTripFunc(rig.serveGitHub)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +445,7 @@ func TestDaemonConnectorInvokeRequiresRuntimeTokenAndIdentityMode(t *testing.T) 
 	// legacy: the route is not served.
 	cfg := rig.cfg
 	cfg.CredentialRelease = CredentialReleaseLegacy
-	local, _, err := newServeLocalPDP(cfg, serveSeams{})
+	local, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}

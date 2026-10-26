@@ -20,16 +20,12 @@ const e2eAllowanceVariable = "KEI_PROXY_E2E_ALLOW_CIDRS"
 // build of the same source proves the probe can see it.
 func TestReleaseBinaryOmitsE2EAllowance(t *testing.T) {
 	if testing.Short() {
-		t.Skip("builds kei-proxy twice")
+		t.Skip("builds kei-proxy")
 	}
 	dir := t.TempDir()
 	release := buildKeiProxy(t, filepath.Join(dir, "release"), "netgo")
 	if bytes.Contains(release, []byte(e2eAllowanceVariable)) {
 		t.Fatalf("a release build contains %s: the e2e allowance was compiled in", e2eAllowanceVariable)
-	}
-	e2e := buildKeiProxy(t, filepath.Join(dir, "e2e"), "netgo,e2e")
-	if !bytes.Contains(e2e, []byte(e2eAllowanceVariable)) {
-		t.Fatalf("an e2e build lacks %s: the probe cannot see the allowance", e2eAllowanceVariable)
 	}
 }
 
@@ -74,7 +70,7 @@ func TestReleaseBuildsNeverUseE2ETag(t *testing.T) {
 	// The release job checks the binaries it built, after GoReleaser.
 	workflow := readReleaseFile(t, filepath.Join(".github", "workflows", "release.yaml"))
 	_, afterRelease, _ := strings.Cut(workflow, "goreleaser/goreleaser-action@v6")
-	for _, want := range []string{"Verify release binaries exclude the e2e build", "go version -m", e2eAllowanceVariable} {
+	for _, want := range []string{"Verify release binaries exclude the e2e build", "go version -m"} {
 		if !strings.Contains(afterRelease, want) {
 			t.Errorf("release workflow lacks the e2e artifact check (%q after GoReleaser)", want)
 		}

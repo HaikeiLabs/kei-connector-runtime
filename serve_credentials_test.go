@@ -159,7 +159,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 	keychain := &canaryKeychain{token: subjectCanary}
 	stdout, stderr := captureFDs(t, func() {
 		func() {
-			local, _, err := newServeLocalPDP(cfg, serveSeams{})
+			local, err := newServeLocalPDP(cfg, serveSeams{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -245,7 +245,7 @@ func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 	var calls atomic.Int32
 	i11 := canaryI11(t, &calls)
 	cfg := identityServeConfig(t, i11.URL)
-	local, _, err := newServeLocalPDP(cfg, serveSeams{})
+	local, err := newServeLocalPDP(cfg, serveSeams{})
 	if err != nil {
 		t.Fatal(err)
 	}
