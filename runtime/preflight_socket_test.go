@@ -309,7 +309,7 @@ func TestSocketAuthorizeV2HarnessToolRequiresNamedSessionAndUsesToolPolicies(t *
 	now := time.Now().UTC()
 	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
 	local := NewLocalPDP(cfg, nil)
-	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
 	local.SetIdentity(identity)
 	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
 	if err != nil {
@@ -358,7 +358,7 @@ func TestTokenlessOwnerSocketBindsVerifiedBundleSubjectAndKeepsSessionRoutesToke
 	local := NewLocalPDP(cfg, nil)
 	defer local.Close()
 	local.SetTokenlessOwnerSession(true)
-	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")}
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
 	local.SetIdentity(identity)
 	var doc map[string]any
 	if err := json.Unmarshal(v2HarnessAuthorizationBundle(t, now), &doc); err != nil {
@@ -390,7 +390,7 @@ func TestTokenlessOwnerSocketBindsVerifiedBundleSubjectAndKeepsSessionRoutesToke
 		t.Fatalf("owner authorization=%d %+v err=%v", allowed.Code, response, err)
 	}
 	denied := call("/v1/authorize", `{"schema":"kei.authorize-request/v1","tool":"unknown.tool"}`)
-	if err := json.Unmarshal(denied.Body.Bytes(), &response); err != nil || response.Decision != "deny" {
+	if err := json.Unmarshal(denied.Body.Bytes(), &response); err != nil || response.Decision != "unmatched" {
 		t.Fatalf("owner denied call=%d %+v err=%v", denied.Code, response, err)
 	}
 	for _, route := range []struct{ path, body string }{
@@ -814,8 +814,8 @@ func TestSocketAuthorizeV2HarnessToolResolvesAgentFromTrustedIdentity(t *testing
 		{name: "agent-bound permit allows with no request agent", defaultAgent: "agent-fixture-0001", wantDecision: "permit", wantPolicy: "agent-bound-policy", wantAuditAgent: "agent-fixture-0001"},
 		{name: "request agent equal to trusted default is accepted", defaultAgent: "agent-fixture-0001", requestAgent: "agent-fixture-0001", wantDecision: "permit", wantPolicy: "agent-bound-policy", wantAuditAgent: "agent-fixture-0001"},
 		{name: "request agent other than trusted default is denied as agent mismatch", defaultAgent: "agent-fixture-0001", requestAgent: "agent-other-0002", wantDecision: "deny", wantReason: "agent_mismatch", wantAuditAgent: "agent-fixture-0001"},
-		{name: "request agent with no trusted default is denied as agent mismatch", requestAgent: "agent-fixture-0001", wantDecision: "deny", wantReason: "agent_mismatch"},
-		{name: "person-sourced permit works with no trusted default agent", wantDecision: "permit", wantPolicy: "person-policy"},
+		{name: "request agent with no trusted default is denied as agent not assigned", requestAgent: "agent-fixture-0001", wantDecision: "deny", wantReason: "agent_not_assigned"},
+		{name: "person-sourced permit is denied when no trusted default agent", wantDecision: "deny", wantReason: "agent_not_assigned"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -874,8 +874,8 @@ func TestSocketV2PreflightResolvesAgentFromTrustedIdentity(t *testing.T) {
 		{name: "no request agent uses trusted default", defaultAgent: "agent-fixture-0001", wantStatus: http.StatusOK, wantHandle: true},
 		{name: "matching request agent accepted", defaultAgent: "agent-fixture-0001", requestAgent: "agent-fixture-0001", wantStatus: http.StatusOK, wantHandle: true},
 		{name: "non-matching request agent denied", defaultAgent: "agent-fixture-0001", requestAgent: "agent-other-0002", wantStatus: http.StatusForbidden, wantReason: "agent_mismatch"},
-		{name: "request agent with no trusted default denied", requestAgent: "agent-fixture-0001", wantStatus: http.StatusForbidden, wantReason: "agent_mismatch"},
-		{name: "no agent and no trusted default denied", wantStatus: http.StatusForbidden, wantReason: "preflight_denied"},
+		{name: "request agent with no trusted default denied", requestAgent: "agent-fixture-0001", wantStatus: http.StatusForbidden, wantReason: "agent_not_assigned"},
+		{name: "no agent and no trusted default denied", wantStatus: http.StatusForbidden, wantReason: "agent_not_assigned"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -992,5 +992,63 @@ func TestSocketV2ConsumeResolvesAgentFromTrustedIdentity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSocketV2ConsumeDeniesWithAgentNotAssigned(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	local := NewLocalPDP(cfg, nil)
+	// Start with an agent that matches the preflight bundle policy scope.
+	local.SetIdentity(&Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"})
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Activate(v2PreflightBundle(t, now), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil {
+		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+	}
+
+	// Preflight — succeeds because AgentID matches the bundle policy scope.
+	preflightBody, _ := json.Marshal(socketPreflightRequest{Schema: "kei.preflight-request/v1", Tool: "github.read_repo", SessionID: sessionResponse.SessionID, AgentID: "agent-fixture-0001", Arguments: json.RawMessage(`{}`), Context: json.RawMessage(`{"repository":"acme/kei"}`)})
+	pre := httptest.NewRecorder()
+	h.ServeHTTP(pre, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/preflight", strings.NewReader(string(preflightBody))), sessionResponse.SessionID))
+	if pre.Code != http.StatusOK {
+		t.Fatalf("preflight status=%d body=%s (expected OK with AgentID)", pre.Code, pre.Body.String())
+	}
+	var grant socketPreflightResponse
+	if err := json.Unmarshal(pre.Body.Bytes(), &grant); err != nil || grant.Handle == "" {
+		t.Fatalf("preflight response=%s err=%v", pre.Body.String(), err)
+	}
+	_, ops, planErr := local.PlanV2(context.Background(), sessionResponse.SessionID, "github.read_repo", "agent-fixture-0001", json.RawMessage(`{}`), json.RawMessage(`{"repository":"acme/kei"}`), "", 0)
+	if planErr != nil || len(ops) != 1 {
+		t.Fatalf("PlanV2 ops=%+v err=%v", ops, planErr)
+	}
+
+	// Remove the AgentID from the identity — subsequent consume must deny
+	// with agent_not_assigned even though a valid grant handle exists.
+	local.SetIdentity(&Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")})
+
+	consumeBody, _ := json.Marshal(socketConsumeRequest{Schema: "kei.consume-request/v1", Handle: grant.Handle, Tool: "github.read_repo", SessionID: sessionResponse.SessionID, AgentID: "agent-fixture-0001", Arguments: json.RawMessage(`{}`), Context: json.RawMessage(`{"repository":"acme/kei"}`), Operation: socketConsumeOperation{ID: ops[0].ID, ConnectorID: ops[0].ConnectorID, Capability: ops[0].Capability, Action: ops[0].Action, Resource: ops[0].Resource, ResourceType: ops[0].ResourceType, ResourceID: ops[0].ResourceID, InputDigest: ops[0].InputDigest}})
+	con := httptest.NewRecorder()
+	h.ServeHTTP(con, withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/consume", strings.NewReader(string(consumeBody))), sessionResponse.SessionID))
+	if con.Code != http.StatusForbidden {
+		t.Fatalf("consume status=%d want 403 body=%s", con.Code, con.Body.String())
+	}
+	var errResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(con.Body.Bytes(), &errResp); err != nil || errResp.Error.Code != "agent_not_assigned" {
+		t.Fatalf("consume error response=%s want reason=agent_not_assigned err=%v", con.Body.String(), err)
 	}
 }

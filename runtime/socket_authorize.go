@@ -1057,6 +1057,10 @@ func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
 		return
 	}
+	if l.trustedAgentID() == "" {
+		writeRuntimeError(w, http.StatusForbidden, "agent_not_assigned", "the trusted default agent is unavailable")
+		return
+	}
 	if req.AgentID != "" && req.AgentID != l.trustedAgentID() {
 		writeRuntimeError(w, http.StatusForbidden, "agent_mismatch", "the request agent is not this installation's default agent")
 		return
@@ -1083,6 +1087,10 @@ func (l *LocalPDP) handleConsume(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SessionID == "" || boundSession != req.SessionID {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
+		return
+	}
+	if l.trustedAgentID() == "" {
+		writeRuntimeError(w, http.StatusForbidden, "agent_not_assigned", "the trusted default agent is unavailable")
 		return
 	}
 	if req.AgentID != "" && req.AgentID != l.trustedAgentID() {
@@ -1241,6 +1249,10 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		// session, never the request.
 		trusted := l.trustedAgentID()
 		auditTrustedAgent = true
+		if trusted == "" {
+			d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+			break
+		}
 		if req.AgentID != "" && req.AgentID != trusted {
 			d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
 			break
@@ -1254,6 +1266,10 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		// any other agent instead of trusting it.
 		trusted := l.trustedAgentID()
 		auditTrustedAgent = true
+		if trusted == "" {
+			d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+			break
+		}
 		if req.AgentID != "" && req.AgentID != trusted {
 			d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
 			break
@@ -1261,6 +1277,21 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		preq.AgentID = trusted
 		d, err = e.AuthorizeV2HarnessTool(ctx, preq)
 	default:
+		// For v2 bundles, resolve the agent from the runtime identity.
+		// For v1 bundles, delegate agent resolution to Evaluate/bundle default.
+		if v, ok := e.Bundle(); ok && v.Payload.Schema == "kei.policy-bundle/v2" {
+			trusted := l.trustedAgentID()
+			auditTrustedAgent = true
+			if trusted == "" {
+				d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+				break
+			}
+			if req.AgentID != "" && req.AgentID != trusted {
+				d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+				break
+			}
+			preq.AgentID = trusted
+		}
 		d, err = e.Evaluate(ctx, preq)
 	}
 	return d, auditTrustedAgent, unmatched, err

@@ -980,6 +980,7 @@ func TestSocketSessionAuthorizeAfterBundleLinkedSession(t *testing.T) {
 		ID:          "inst-fixture-0001",
 		OrgID:       "org-fixture-0001",
 		WorkspaceID: strPtr("ws-fixture-0001"),
+		AgentID:     "agent-fixture-0001",
 	})
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1033,6 +1034,7 @@ func TestSocketSessionAuthorizeAfterBundleRevokedSession(t *testing.T) {
 		ID:          "inst-fixture-0001",
 		OrgID:       "org-fixture-0001",
 		WorkspaceID: strPtr("ws-fixture-0001"),
+		AgentID:     "agent-fixture-0001",
 	})
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1085,6 +1087,7 @@ func TestSocketSessionAuthorizeAfterUnlinkedSession(t *testing.T) {
 		ID:          "inst-fixture-0001",
 		OrgID:       "org-fixture-0001",
 		WorkspaceID: strPtr("ws-fixture-0001"),
+		AgentID:     "agent-fixture-0001",
 	})
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1288,7 +1291,9 @@ func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
 	}
 
 	// Send an authorize request with a DIFFERENT agent_id. The subject
-	// must still resolve to the session user, not the request's agent_id.
+	// must still resolve to the session user, not the request's agent_id,
+	// and the authorization AgentID must use the trusted default, not the
+	// caller-supplied value.
 	body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"attacker-agent","on_behalf_of":"user:trigger"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
@@ -1316,12 +1321,106 @@ func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
 	if audit.InvokingSubject != "user:user-alice" {
 		t.Fatalf("InvokingSubject=%q, want %q (typed session user, not request agent_id)", audit.InvokingSubject, "user:user-alice")
 	}
-	if audit.AgentID != "attacker-agent" {
-		t.Fatalf("AgentID=%q, want %q (request agent_id passed through for policy matching)", audit.AgentID, "attacker-agent")
+	if audit.AgentID != "trusted-default" {
+		t.Fatalf("AgentID=%q, want %q (trusted default agent, not request agent_id)", audit.AgentID, "trusted-default")
 	}
 	if audit.OnBehalfOf != "user:trigger" {
 		t.Fatalf("OnBehalfOf=%q, want harness attribution %q", audit.OnBehalfOf, "user:trigger")
 	}
+}
+
+// TestAuthorizeDefaultEvaluatePathResolvesAgentFromTrustedIdentity verifies
+// that the default Evaluate path uses the runtime identity's trusted agent
+// for authorization, sets auditTrustedAgent, and denies agent_not_assigned
+// when no agent is assigned to the identity.
+func TestAuthorizeDefaultEvaluatePathResolvesAgentFromTrustedIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	raw, err := os.ReadFile(filepath.Join("..", "pkg", "policybundle", "testdata", "catalog-v2-bundle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle map[string]any
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	bundle["issued_at"] = now.Format(time.RFC3339Nano)
+	bundle["not_after"] = now.Add(12 * time.Hour).Format(time.RFC3339Nano)
+	audience := bundle["audience"].(map[string]any)
+	audience["installation_id"], audience["org_id"], audience["workspace_id"] = "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001"
+	identities := bundle["identities"].([]any)
+	identity := identities[0].(map[string]any)
+	identity["source"], identity["external_id"] = "discord", "ext-alice"
+	identity["user_id"] = "user-alice"
+	set := bundle["policy_set"].(map[string]any)
+	set["org_id"], set["workspace_id"] = "org-fixture-0001", "ws-fixture-0001"
+	raw, err = json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("no trusted agent denies with agent_not_assigned", func(t *testing.T) {
+		dir := t.TempDir()
+		activateBundle(t, dir, raw)
+		l := keiruntime.NewLocalPDP(connectorruntime.Config{
+			RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
+		}, nil)
+		// No AgentID assigned to the identity.
+		l.SetIdentity(&keiruntime.Identity{
+			ID: "inst-fixture-0001", OrgID: "org-fixture-0001",
+			WorkspaceID: strPtr("ws-fixture-0001"),
+		})
+		h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+		putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`)
+		if putRec.Code != http.StatusNoContent {
+			t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
+		}
+		// web_search is a v1 bundled tool (not a harness tool) that falls
+		// through to the default Evaluate path.
+		body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"some-agent"}`
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+		var response struct {
+			Decision   string `json:"decision"`
+			ReasonCode string `json:"reason_code"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusOK || response.Decision != "deny" || response.ReasonCode != "agent_not_assigned" {
+			t.Fatalf("status=%d response=%+v", rec.Code, response)
+		}
+	})
+
+	t.Run("trusted agent is used for audit", func(t *testing.T) {
+		dir := t.TempDir()
+		activateBundle(t, dir, raw)
+		var auditEvent json.RawMessage
+		l := keiruntime.NewLocalPDP(connectorruntime.Config{
+			RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
+		}, func(event json.RawMessage) { auditEvent = append(json.RawMessage(nil), event...) })
+		l.SetIdentity(&keiruntime.Identity{
+			ID: "inst-fixture-0001", OrgID: "org-fixture-0001",
+			WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "trusted-default",
+		})
+		h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+		putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`)
+		if putRec.Code != http.StatusNoContent {
+			t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
+		}
+		// Send request with a DIFFERENT agent_id; audit must show the trusted one.
+		body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"attacker-agent"}`
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+		var audit struct {
+			AgentID string `json:"agent_id"`
+		}
+		if err := json.Unmarshal(auditEvent, &audit); err != nil {
+			t.Fatal(err)
+		}
+		if audit.AgentID != "trusted-default" {
+			t.Fatalf("audit AgentID=%q, want %q (trusted default agent)", audit.AgentID, "trusted-default")
+		}
+	})
 }
 
 // subjectTestAgent is the one installation agent every HAI-603 path decides

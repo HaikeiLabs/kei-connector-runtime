@@ -54,7 +54,7 @@ func multiSessionPDP(t *testing.T, f *perSubjectI11, emit keiruntime.EmitAuditFu
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{
 		RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
 	}, emit)
-	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")})
+	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"})
 	l.SetCredentialStore(credrelease.NewStore(credrelease.NewClient(srv.URL, policyTestToken, 5*time.Second)))
 	t.Cleanup(l.Close)
 	return l, sessionHandler(t, l)
