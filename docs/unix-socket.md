@@ -110,8 +110,9 @@ retained for harnesses that have not yet migrated.
 The `kei.authorize-response/v1` `decision` is `permit`, `deny`, or `unmatched`.
 `unmatched` with `reason_code: no_matching_policy` means the local PDP found no
 applicable policy; it is not a permit and the runtime does not defer execution.
-An adapter may choose its own native decision for unmatched calls, while SDK
-and connector callers remain on their existing non-permit paths. A matching
+An adapter may choose its own native decision for unmatched calls, including a
+Pi shell command with no matching shell policy, while SDK and connector callers
+remain on their existing non-permit paths. A matching
 explicit deny remains `deny` with `reason_code: policy_deny`.
 
 For a v2 bundle, a named verified installation-owner session may authorize a

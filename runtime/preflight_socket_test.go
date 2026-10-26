@@ -445,6 +445,7 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		effect       string
 		tool         string
 		shell        string
+		shellEffect  string
 		wantDecision string
 		wantReason   string
 		wantPolicyID string
@@ -452,6 +453,9 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		{name: "group permit", effect: "permit", tool: "custom.read", wantDecision: "permit", wantPolicyID: "tool-policy"},
 		{name: "group deny", effect: "deny", tool: "custom.write", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "tool-policy"},
 		{name: "unmatched tool is neutral on the socket", tool: "custom.unmatched", wantDecision: "unmatched", wantReason: "no_matching_policy"},
+		{name: "unmatched pi shell command is neutral on the socket", tool: "pi.bash", shell: "git log", wantDecision: "unmatched", wantReason: "no_matching_policy"},
+		{name: "matching pi shell permit", tool: "pi.bash", shell: "git log", shellEffect: "permit", wantDecision: "permit", wantReason: "policy_permit", wantPolicyID: "shell-policy"},
+		{name: "matching pi shell deny", tool: "pi.bash", shell: "git log", shellEffect: "deny", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
 		{name: "unsupported shell syntax remains denied", tool: "pi.bash", shell: "git status && whoami", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
 	}
 	for _, tc := range tests {
@@ -468,13 +472,21 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 				t.Fatal(err)
 			}
 			doc["subject"] = map[string]any{"user_id": "user-alice", "email": "alice@example.test", "groups": []string{"members"}}
-			doc["identities"] = []any{}
+			if tc.tool != "pi.bash" {
+				doc["identities"] = []any{}
+			}
 			set := doc["policy_set"].(map[string]any)
 			if tc.effect != "" {
 				set["tool_policies"] = []any{map[string]any{
 					"policy_id": "tool-policy", "name": "unregistered tool policy", "effect": tc.effect, "priority": 10,
 					"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
 					"selector": map[string]any{"source_principal": "group:members", "tool": tc.tool},
+				}}
+			}
+			if tc.shellEffect != "" {
+				set["harness_policies"] = []any{map[string]any{
+					"policy_id": "shell-policy", "name": "Pi shell policy", "src_pattern": "group:members", "dst_pattern": "shell:git log", "action": tc.shellEffect, "priority": 10,
+					"scope": map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
 				}}
 			}
 			bundle, err := json.Marshal(doc)
