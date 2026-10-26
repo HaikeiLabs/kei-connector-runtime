@@ -1215,7 +1215,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	}
 	if sub, ok := l.Sessions.Get(sessionID); ok && sub.SubjectKind == "service_principal" {
 		if _, valid := e.BundleServicePrincipalIdentity(sub.UserID, l.trustedAgentID()); !valid {
-			return pdp.Decision{ReasonCode: "subject_unlinked", DenySource: "identity", Reason: "the principal is no longer present for this agent", BundleState: "ready"}, auditTrustedAgent, nil
+			return pdp.Decision{ReasonCode: "subject_unlinked", DenySource: "identity", Reason: "the principal is no longer present for this agent", BundleState: "ready"}, auditTrustedAgent, false, nil
 		}
 	}
 	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
