@@ -446,6 +446,7 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		tool         string
 		shell        string
 		shellEffect  string
+		shellDst     string // shell policy destination command; defaults to "git log"
 		wantDecision string
 		wantReason   string
 		wantPolicyID string
@@ -456,7 +457,10 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		{name: "unmatched pi shell command is neutral on the socket", tool: "pi.bash", shell: "git log", wantDecision: "unmatched", wantReason: "no_matching_policy"},
 		{name: "matching pi shell permit", tool: "pi.bash", shell: "git log", shellEffect: "permit", wantDecision: "permit", wantReason: "policy_permit", wantPolicyID: "shell-policy"},
 		{name: "matching pi shell deny", tool: "pi.bash", shell: "git log", shellEffect: "deny", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
-		{name: "unsupported shell syntax remains denied", tool: "pi.bash", shell: "git status && whoami", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+		{name: "compound pi shell command with no policies is unmatched", tool: "pi.bash", shell: "git status && whoami", wantDecision: "unmatched", wantReason: "no_matching_policy"},
+		{name: "compound pi shell command is denied by an explicit deny on one stage", tool: "pi.bash", shell: "git status && whoami", shellEffect: "deny", shellDst: "whoami", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
+		{name: "unsupported shell syntax remains denied", tool: "pi.bash", shell: "git status > out", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+		{name: "command substitution remains denied", tool: "pi.bash", shell: "git status $(whoami)", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -484,8 +488,12 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 				}}
 			}
 			if tc.shellEffect != "" {
+				shellDst := tc.shellDst
+				if shellDst == "" {
+					shellDst = "git log"
+				}
 				set["harness_policies"] = []any{map[string]any{
-					"policy_id": "shell-policy", "name": "Pi shell policy", "src_pattern": "group:members", "dst_pattern": "shell:git log", "action": tc.shellEffect, "priority": 10,
+					"policy_id": "shell-policy", "name": "Pi shell policy", "src_pattern": "group:members", "dst_pattern": "shell:" + shellDst, "action": tc.shellEffect, "priority": 10,
 					"scope": map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
 				}}
 			}
