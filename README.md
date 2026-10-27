@@ -90,6 +90,8 @@ The same binary supports two modes. **CLI commands** (`authorize`,
 `collector`, `credential`, `model`, `runtime`, `identity`) each perform one
 governed action and exit; the `authorize`
 command acts as the PEP, and the PDP runs locally in the same process.
+`authorize` exits `0` on permit, `1` on deny, and `2` when an error stopped it
+before a decision (bad flags, missing token, bootstrap failure).
 **`kei-proxy serve`** is a long-running daemon that exposes a local HTTP/1.1
 API on a Unix socket (default `/run/kei-proxy/runtime.sock`, mode `0600`) and
 an optional TCP listener (`KEI_PROXY_LISTEN_ADDR`, default `:8085`). The

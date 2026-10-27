@@ -34,6 +34,14 @@ func resolveRuntimeScope(identity *RuntimeIdentity) (orgID, workspaceID string, 
 	return identity.OrgID, *identity.WorkspaceID, nil
 }
 
+// Exit codes of the authorize CLI (API-012): permit, deny, or an error that
+// stopped the call before any decision was made.
+const (
+	authorizeExitPermit = 0
+	authorizeExitDeny   = 1
+	authorizeExitError  = 2
+)
+
 func runAuthorize(args []string) int {
 	fs := flag.NewFlagSet("authorize", flag.ContinueOnError)
 	user := fs.String("user", "", "user_id to authorize as (or --user-id)")
@@ -59,7 +67,7 @@ func runAuthorize(args []string) int {
 	sessionID := fs.String("session", session.IDFromEnv(), "kei-proxy daemon session id from PUT /v1/session (default $KEI_SESSION_ID; empty = the deprecated default session)")
 
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return authorizeExitError
 	}
 
 	if *userID != "" && *user == "" {
@@ -78,16 +86,16 @@ func runAuthorize(args []string) int {
 
 	if *tool == "" {
 		fmt.Fprintln(os.Stderr, "Error: --tool is required")
-		return 1
+		return authorizeExitError
 	}
 	if cfg.RuntimeToken == "" {
 		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required")
-		return 1
+		return authorizeExitError
 	}
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return authorizeExitError
 	}
 	identity, err := bootstrapRuntime(context.Background(), cfg, time.Duration(*timeout)*time.Second)
 	if err != nil {
@@ -95,7 +103,7 @@ func runAuthorize(args []string) int {
 			RevokePolicyState(cfg)
 		}
 		fmt.Fprintf(os.Stderr, "Error: runtime bootstrap failed: %v\n", err)
-		return 1
+		return authorizeExitError
 	}
 	if identity.Status != "active" || identity.BindingStatus != "verified" {
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "installation_revoked", errors.New("runtime installation is inactive or unverified"))
@@ -107,17 +115,17 @@ func runAuthorize(args []string) int {
 		secretStore, err = secrets.NewStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: runtime secret store initialization failed: %v\n", err)
-			return 1
+			return authorizeExitError
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "Error: KEI_RUNTIME_TOKEN is required")
-		return 1
+		return authorizeExitError
 	}
 
 	orgID, workspaceID, err := resolveRuntimeScope(identity)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return authorizeExitError
 	}
 
 	store, err := policybundle.OpenStore(cfg.RuntimeStateDir)
@@ -202,18 +210,18 @@ func runAuthorize(args []string) int {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return authorizeExitError
 	}
 
 	if err := keiruntime.WriteJSON(os.Stdout, out); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return authorizeExitError
 	}
 
 	if out.Decision == "deny" {
-		return 1
+		return authorizeExitDeny
 	}
-	return 0
+	return authorizeExitPermit
 }
 
 // writeJSON is a thin wrapper retained for callers in this package that have
