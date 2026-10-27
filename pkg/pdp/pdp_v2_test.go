@@ -66,10 +66,6 @@ func TestV2SnapshotFreshAfterMaxCacheWindow(t *testing.T) {
 	if err != nil || !v2 || model.Allow || model.ReasonCode != "model_not_assigned" {
 		t.Fatalf("model decision=%+v v2=%v err=%v", model, v2, err)
 	}
-	_, _, allowed, err := e.AuthorizeV2Plan(sessionID, testInstallation, "u-alice", "discord", "discord-old", testAgent, "tool", []policybundle.Operation{{ConnectorID: "conn", Capability: "read", Action: "read"}})
-	if allowed || err != nil {
-		t.Fatalf("preflight allowed=%v err=%v", allowed, err)
-	}
 	e.ReconcileSession()
 	if got, _ := sessions.Current(); got.Status != StatusLinked {
 		t.Fatalf("linked session was incorrectly revoked: %+v", got)

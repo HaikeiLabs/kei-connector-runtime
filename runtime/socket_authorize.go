@@ -473,44 +473,6 @@ func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp
 	return g, id, err
 }
 
-// AuthorizeMCPTool decides an MCP tool call with the local PDP and the
-// session subject, using the v2 harness_policies set (mcp: dst pattern).
-// Before the identity resolves, every call denies policy_bundle_missing.
-// The error is non-nil only when ctx is done.
-func (l *LocalPDP) AuthorizeMCPTool(ctx context.Context, sessionID, slug, tool, agentID, harnessKind string) (pdp.Decision, error) {
-	e := l.evaluator.Load()
-	if e == nil {
-		if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
-			return pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}, nil
-		}
-		return pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}, nil
-	}
-	return e.AuthorizeV2MCP(ctx, sessionID, slug, tool, agentID, harnessKind)
-}
-
-// RouteKeySession checks that a named session may have an MCP route key
-// (ADR-036 §4.4) and returns its subject and agent: agentID, or the runtime
-// identity's agent. reason is a deny code when it may not.
-func (l *LocalPDP) RouteKeySession(sessionID, agentID string) (subject, agent, reason string) {
-	if sessionID == pdp.DefaultSession || !l.Sessions.Exists(sessionID) {
-		return "", "", pdp.ReasonSessionNotFound
-	}
-	sub, ok := l.Sessions.Get(sessionID)
-	if !ok || sub.Status != pdp.StatusLinked || sub.UserID == "" {
-		return "", "", "subject_unlinked"
-	}
-	agent = agentID
-	if agent == "" {
-		if id := l.identity.Load(); id != nil {
-			agent = id.AgentID
-		}
-	}
-	if agent == "" {
-		return "", "", "agent_not_assigned"
-	}
-	return sub.UserID, agent, ""
-}
-
 // AuditScope returns the installation's org, workspace and installation ids
 // for audit records ("" before the identity resolves).
 func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
@@ -522,54 +484,6 @@ func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
 		workspaceID = *id.WorkspaceID
 	}
 	return id.OrgID, workspaceID, id.ID
-}
-
-// mcpBundle is the verified bundle in force, or nil before the identity
-// resolves or while no valid bundle is held.
-func (l *LocalPDP) mcpBundle() *policybundle.Verified {
-	e := l.evaluator.Load()
-	if e == nil {
-		return nil
-	}
-	v, ok := e.Bundle()
-	if !ok {
-		return nil
-	}
-	return v
-}
-
-// MCPConnector returns the bundle's mcp connector descriptor for slug
-// (ADR-036 §4.3). With no valid bundle there is none.
-func (l *LocalPDP) MCPConnector(slug string) (policybundle.Connector, bool) {
-	v := l.mcpBundle()
-	if v == nil {
-		return policybundle.Connector{}, false
-	}
-	return v.MCPConnector(slug)
-}
-
-// AgentBoundToConnector reports the bundle's agent_connector_bindings entry.
-func (l *LocalPDP) AgentBoundToConnector(agentID, connectorID string) bool {
-	v := l.mcpBundle()
-	return v != nil && v.AgentBoundToConnector(agentID, connectorID)
-}
-
-// MCPHosts returns host:port of every mcp descriptor URL in the bundle.
-func (l *LocalPDP) MCPHosts() []string {
-	v := l.mcpBundle()
-	if v == nil {
-		return nil
-	}
-	return v.MCPHosts()
-}
-
-// BundleDigest identifies the bundle in force ("" without one).
-func (l *LocalPDP) BundleDigest() string {
-	v := l.mcpBundle()
-	if v == nil {
-		return ""
-	}
-	return v.Digest
 }
 
 // Close stops the session sweeper and flushes every held session
