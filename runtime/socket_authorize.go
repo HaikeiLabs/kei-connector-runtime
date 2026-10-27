@@ -175,15 +175,12 @@ type LocalPDP struct {
 	emit      EmitAuditFunc
 	keychain  SessionKeychain
 
-	// creds is the legacy default session's credential store; each named
-	// session has its own in sessionCreds (id -> *credrelease.Store).
+	// creds creates per-session credential stores held in sessionCreds.
 	creds              *credrelease.Store
 	sessionCreds       sync.Map
 	runner             http.Handler
 	toolRegistrar      ToolRegistrar
 	modelConfigHandler http.Handler
-	// deprecated records the routes already warned about the default session.
-	deprecated            sync.Map
 	stopSweep             chan struct{}
 	closeOnce             sync.Once
 	ownerMu               sync.RWMutex
@@ -323,16 +320,6 @@ func (l *LocalPDP) SweepSessions(ctx context.Context) {
 // never reported as zero.
 func (l *LocalPDP) idleTTLSeconds() int64 {
 	return int64((l.Sessions.IdleTTL() + time.Second - 1) / time.Second)
-}
-
-// deprecate warns once per process per route that a request used the legacy
-// default session.
-func (l *LocalPDP) deprecate(route string) {
-	if _, warned := l.deprecated.LoadOrStore(route, struct{}{}); !warned {
-		slog.Warn("default_session_deprecated", "route", route,
-			"detail", "name a session: PUT /v1/session with "+sessionSchemaV2+", then send "+session.Header+" (or KEI_SESSION_ID)")
-	}
-
 }
 
 func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
@@ -592,8 +579,6 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		} else if !authenticated && ownerUnavailable {
 			writeRuntimeError(w, http.StatusForbidden, "owner_subject_unavailable", "the installation owner subject is unavailable in the current v2 bundle")
 			return
-		} else if session.FromRequest(r) == pdp.DefaultSession && authenticated && r.Method != http.MethodPut {
-			l.deprecate(r.Method + " " + r.URL.Path)
 		}
 		switch {
 		case r.URL.Path == "/v1/authorize":
@@ -678,8 +663,7 @@ func (l *LocalPDP) handleToolRegistration(w http.ResponseWriter, r *http.Request
 }
 
 // handleSessionStart serves PUT /v1/session. A kei.session/v2 body creates a
-// new named session and answers 201 with its id; a kei.session/v1 body
-// replaces the legacy default session (deprecated) and answers 204.
+// new named session and answers 201 with its id.
 func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSocketRequest))
 	if readErr != nil {
