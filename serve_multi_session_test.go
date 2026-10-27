@@ -37,7 +37,7 @@ func TestDaemonNamedSessionCLIPassthrough(t *testing.T) {
 	// No default session exists: a call without the id has no session.
 	if code, _, errOut := runProxyRunCLI(t, rig.socket,
 		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_RUN_HELPER_EXIT": "0"},
-		"--", helperBinary(t)); code != 1 || !strings.Contains(errOut, "no active kei-proxy session") {
+		"--", helperBinary(t)); code != 1 || !strings.Contains(errOut, "session_not_found") {
 		t.Fatalf("run without a session id: exit %d stderr %s", code, errOut)
 	}
 

@@ -38,7 +38,7 @@ func TestEvaluate(t *testing.T) {
 		policyID   string
 		enrollment bool
 	}{
-		{name: "agent-only permit with no session", req: Request{Tool: "search_web"}, allow: true, policyID: "pol-5"},
+		{name: "agent-only permit with named session", req: Request{Tool: "search_web"}, allow: true, policyID: "pol-5"},
 		{name: "matching deny policy", req: Request{Tool: "github.delete_repo"}, reasonCode: "policy_deny", denySource: "policy", policyID: "pol-1"},
 		{name: "deny policy wins for a linked subject", req: Request{Tool: "github.delete_repo"}, session: alice, reasonCode: "policy_deny", denySource: "policy", policyID: "pol-1"},
 		{name: "default deny when nothing matches", req: Request{Tool: "github.get_issue"}, reasonCode: "no_matching_policy", denySource: "policy"},
@@ -47,7 +47,7 @@ func TestEvaluate(t *testing.T) {
 		{name: "agent not assigned", req: Request{Tool: "search_web", AgentID: "agent-other"}, reasonCode: "agent_not_assigned", denySource: "registry"},
 		{name: "connector capability permit", req: Request{Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.create"}}, allow: true, policyID: "pol-4"},
 		{name: "connector capability not registered", req: Request{Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.close"}}, reasonCode: "tool_not_registered", denySource: "registry"},
-		{name: "human policy with no session denies unlinked", req: Request{Tool: "github.create_issue"}, reasonCode: "subject_unlinked", denySource: "identity"},
+		{name: "human policy with unlinked named session denies", req: Request{Tool: "github.create_issue"}, session: &Subject{Status: StatusUnlinked}, reasonCode: "subject_unlinked", denySource: "identity"},
 		{name: "linked user permit", req: Request{Tool: "github.create_issue"}, session: alice, allow: true, policyID: "pol-2"},
 		{name: "another user's policy falls through to the agent permit", req: Request{Tool: "github.create_issue"}, session: bob, allow: true, policyID: "pol-4"},
 		{name: "linked user with no matching policy", req: Request{Tool: "github.get_issue"}, session: bob, reasonCode: "no_matching_policy", denySource: "policy"},
@@ -62,16 +62,21 @@ func TestEvaluate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sessions := NewSessions()
-			if tc.session != nil {
-				if err := sessions.Start(*tc.session); err != nil {
-					t.Fatal(err)
-				}
+			subject := tc.session
+			if subject == nil {
+				subject = &Subject{UserID: "u-fixture", Status: StatusLinked}
+			}
+			sessionID, err := sessions.Create(*subject)
+			if err != nil {
+				t.Fatal(err)
 			}
 			e, _, _ := newTestEvaluator(t, testNow, bundle, sessions)
 			if tc.members != nil {
 				e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships { return tc.members }
 			}
-			d, err := e.Evaluate(context.Background(), tc.req)
+			req := tc.req
+			req.Session = sessionID
+			d, err := e.Evaluate(context.Background(), req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -87,8 +92,13 @@ func TestEvaluate(t *testing.T) {
 		})
 	}
 	t.Run("connector capability the agent is not bound to", func(t *testing.T) {
-		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, onlyGetBound), nil)
-		d, _ := e.Evaluate(context.Background(), Request{Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.create"}})
+		sessions := NewSessions()
+		sessionID, err := sessions.Create(Subject{UserID: "u-fixture", Status: StatusLinked})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, onlyGetBound), sessions)
+		d, _ := e.Evaluate(context.Background(), Request{Session: sessionID, Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.create"}})
 		if d.Allow || d.ReasonCode != "agent_not_bound_to_connector" || d.DenySource != "registry" {
 			t.Fatalf("decision = %+v", d)
 		}
@@ -125,9 +135,14 @@ func TestEvaluateRuntimeStateDenies(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e, store, dir := newTestEvaluator(t, testNow, nil, nil)
+			sessions := NewSessions()
+			sessionID, err := sessions.Create(Subject{UserID: "u-fixture", Status: StatusLinked})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, store, dir := newTestEvaluator(t, testNow, nil, sessions)
 			tc.setup(t, e, store, dir)
-			d, err := e.Evaluate(context.Background(), Request{Tool: "search_web"})
+			d, err := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "search_web"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -152,24 +167,26 @@ func TestSessionLifecycle(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	sessions := NewSessions()
 	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), sessions)
-	if err := sessions.Start(Subject{Status: StatusRevoked, UserID: "u-alice"}); err != nil {
+	revokedID, err := sessions.Create(Subject{Status: StatusRevoked, UserID: "u-alice"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	// A revoked session still short-circuits to deny.
-	d, _ := e.Evaluate(context.Background(), Request{Tool: "github.create_issue"})
+	d, _ := e.Evaluate(context.Background(), Request{Session: revokedID, Tool: "github.create_issue"})
 	if d.ReasonCode != "subject_revoked" {
 		t.Fatalf("reason code = %s, want subject_revoked", d.ReasonCode)
 	}
-	sessions.End()
-	if err := sessions.Start(Subject{Status: StatusLinked}); err == nil {
+	sessions.EndID(revokedID)
+	if _, err := sessions.Create(Subject{Status: StatusLinked}); err == nil {
 		t.Fatal("a linked session started without a user id")
 	}
-	if err := sessions.Start(Subject{UserID: "u-alice", Status: StatusLinked}); err != nil {
+	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
+	if err != nil {
 		t.Fatal(err)
 	}
 	want := func(reasonCode string) {
 		t.Helper()
-		d, _ := e.Evaluate(context.Background(), Request{Tool: "github.create_issue"})
+		d, _ := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "github.create_issue"})
 		if d.ReasonCode != reasonCode {
 			t.Fatalf("reason_code = %q, want %q (%+v)", d.ReasonCode, reasonCode, d)
 		}
@@ -183,13 +200,10 @@ func TestSessionLifecycle(t *testing.T) {
 	e.ReconcileSession()
 	e.memberships = policybundle.BundleMembershipsAt
 	want("subject_revoked")
-	if err := sessions.Start(Subject{UserID: "u-alice", Status: StatusLinked}); err != nil {
-		t.Fatal(err)
-	}
-	want("")
-	sessions.End()
-	want("subject_unlinked")
-	if err := sessions.Start(Subject{UserID: "u-alice", Status: StatusLinked}); err != nil {
+	sessions.EndID(sessionID)
+	want(ReasonSessionNotFound)
+	sessionID, err = sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
+	if err != nil {
 		t.Fatal(err)
 	}
 	e.RevokeSession()

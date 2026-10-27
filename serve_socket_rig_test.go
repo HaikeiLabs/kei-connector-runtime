@@ -174,10 +174,7 @@ func (rig *socketRig) providerPaths() []string {
 
 func (rig *socketRig) startSession(t *testing.T) {
 	t.Helper()
-	r := socketDo(t, rig.client, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"discord","external_id":"`+linkedExternalID+`"}`)
-	if r.code != http.StatusNoContent {
-		t.Fatalf("PUT /v1/session = %s", r.dump)
-	}
+	t.Setenv("KEI_SESSION_ID", rig.startNamedSession(t))
 }
 
 func connectorTestBundle(t *testing.T) []byte {

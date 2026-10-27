@@ -41,20 +41,17 @@ func TestV2SnapshotFreshAfterMaxCacheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sessions.Start(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-old", Status: StatusLinked}); err != nil {
-		t.Fatal(err)
-	}
 	e, store, _ := newTestEvaluator(t, now, bundle, sessions)
 	e.now = func() time.Time { return now.Add(time.Second) }
 	// HAI-452: the subject snapshot is no longer stale after the old
 	// max_cache_seconds window. Every PDP entry point proceeds past the
 	// staleness gate and makes its normal decision.
 
-	decision, err := e.Evaluate(context.Background(), Request{Tool: "some.tool"})
+	decision, err := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "some.tool"})
 	if err != nil || decision.Allow || decision.ReasonCode != "preflight_required" {
 		t.Fatalf("authorize decision=%+v err=%v", decision, err)
 	}
-	connector, err := e.EvaluateConnector(context.Background(), Request{Connector: &ConnectorTarget{ConnectorID: "conn", Capability: "read"}})
+	connector, err := e.EvaluateConnector(context.Background(), Request{Session: sessionID, Connector: &ConnectorTarget{ConnectorID: "conn", Capability: "read"}})
 	if err != nil || connector.Allow || connector.ReasonCode != "preflight_required" {
 		t.Fatalf("connector decision=%+v err=%v", connector.Decision, err)
 	}
@@ -67,8 +64,8 @@ func TestV2SnapshotFreshAfterMaxCacheWindow(t *testing.T) {
 		t.Fatalf("model decision=%+v v2=%v err=%v", model, v2, err)
 	}
 	e.ReconcileSession()
-	if got, _ := sessions.Current(); got.Status != StatusLinked {
-		t.Fatalf("linked session was incorrectly revoked: %+v", got)
+	if got, ok := sessions.Get(sessionID); !ok || got.Status != StatusLinked {
+		t.Fatalf("linked session was incorrectly revoked: %+v exists=%t", got, ok)
 	}
 	if _, state, err := store.Check(testInstallation, testOrg, testWorkspace, now.Add(time.Second)); state != policybundle.Active || err != nil {
 		t.Fatalf("store state=%s err=%v", state, err)
@@ -111,19 +108,34 @@ func TestV2RefreshDoesNotPreserveRemovedRemoteIdentityByUserMembership(t *testin
 func TestAuthorizeV2ModelLeavesV1BundlesToTheLegacyPath(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	now := time.Now().UTC()
-	e, _, _ := newTestEvaluator(t, now, testBundle(t, now, 1, evaluatorPolicies, nil), NewSessions())
-	if d, v2, err := e.AuthorizeV2Model(context.Background(), DefaultSession, testAgent, "profile"); err != nil || v2 || d.Allow {
+	sessions := NewSessions()
+	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _, _ := newTestEvaluator(t, now, testBundle(t, now, 1, evaluatorPolicies, nil), sessions)
+	if d, v2, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile"); err != nil || v2 || d.Allow {
 		t.Fatalf("v1 bundle decision=%+v v2=%v err=%v", d, v2, err)
 	}
 }
 
 func TestAuthorizeV2ModelDeniesWithoutABundleAndForEndedSessions(t *testing.T) {
 	now := time.Now().UTC()
-	e, _, _ := newTestEvaluator(t, now, nil, NewSessions())
-	if d, v2, err := e.AuthorizeV2Model(context.Background(), DefaultSession, testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != "policy_bundle_missing" {
+	sessions := NewSessions()
+	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endedSessionID, err := sessions.Create(Subject{UserID: "u-bob", Status: StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.EndID(endedSessionID)
+	e, _, _ := newTestEvaluator(t, now, nil, sessions)
+	if d, v2, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != "policy_bundle_missing" {
 		t.Fatalf("cold decision=%+v v2=%v err=%v", d, v2, err)
 	}
-	if d, v2, err := e.AuthorizeV2Model(context.Background(), "ended-session", testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != ReasonSessionNotFound {
+	if d, v2, err := e.AuthorizeV2Model(context.Background(), endedSessionID, testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != ReasonSessionNotFound {
 		t.Fatalf("ended session decision=%+v v2=%v err=%v", d, v2, err)
 	}
 }

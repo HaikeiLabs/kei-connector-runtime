@@ -34,8 +34,7 @@ type ConnectorTarget struct {
 // comes only from the in-memory session that Session names.
 type Request struct {
 	// Session is the id of the session the call runs in (Sessions.Create);
-	// DefaultSession uses the legacy default session. An id that is not live
-	// denies session_not_found.
+	// empty or non-live ids deny with session_not_found.
 	Session   string
 	Tool      string // registry name in the bundle's policy_set.tools
 	Action    string // optional; must equal the registered action
@@ -97,12 +96,12 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	return d, nil
 }
 
-// sessionLive reports whether the named session can be used: the default
-// session always can (it may hold no subject), an id session only while live.
-// When false, the returned string is the denial reason code.
+// sessionLive reports whether the named session can be used. Empty ids are
+// never live; a named id is live only while it is in the session store. When
+// false, the returned string is the denial reason code.
 func (e *Evaluator) sessionLive(id string) (bool, string) {
 	if id == DefaultSession {
-		return true, ""
+		return false, ReasonSessionNotFound
 	}
 	if e.sessions == nil {
 		return false, ReasonSessionNotFound
