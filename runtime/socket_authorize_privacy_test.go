@@ -13,7 +13,7 @@ func TestShellCommandIsExcludedFromSocketAuditEvent(t *testing.T) {
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	local := &LocalPDP{Sessions: pdp.NewSessions()}
 	event := local.decisionEventJSON(socketAuthorizeRequest{
-		Tool: "pi.bash", ShellCommand: command, ToolArgsDigest: digest,
+		Tool: "shell", ShellCommand: command, ToolArgsDigest: digest,
 	}, pdp.DefaultSession, pdp.Decision{ReasonCode: "policy_unmatched"}, nil)
 	if strings.Contains(string(event), command) {
 		t.Fatalf("audit event included shell command: %s", event)
