@@ -1,0 +1,22 @@
+{
+  "built_ins": [
+    {"name":"cursor.read","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.read","operation_class":"read","description":"Read files"},
+    {"name":"cursor.glob","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.glob","operation_class":"read","description":"Find files by pattern"},
+    {"name":"cursor.grep","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.grep","operation_class":"read","description":"Search file contents"},
+    {"name":"cursor.list","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.list","operation_class":"read","description":"List files"},
+    {"name":"cursor.edit","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.edit","operation_class":"write","description":"Edit files"},
+    {"name":"cursor.write","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.write","operation_class":"write","description":"Write files"},
+    {"name":"cursor.shell","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.shell","operation_class":"write","description":"Run shell commands"},
+    {"name":"cursor.webfetch","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.webfetch","operation_class":"read","description":"Fetch web pages"},
+    {"name":"cursor.websearch","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.websearch","operation_class":"read","description":"Search the web"},
+    {"name":"cursor.task","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.task","operation_class":"write","description":"Delegate a task"},
+    {"name":"cursor.todowrite","service":"harness","source":"cursor","executor":"cursor","registration":"cursor.todowrite","operation_class":"write","description":"Update task list"}
+  ],
+  "skills": [
+    {"name":"cursor.skill.release_notes","source":"cursor","selector":"skill:release-notes","service":"harness","executor":"cursor","registration":"skill:release-notes","operation_class":"write","description":"Prepare a release summary."}
+  ],
+  "mcp": [
+    {"name":"cursor.mcp.docs","source":"mcp","selector":"mcp:docs","service":"harness","executor":"cursor","registration":"mcp:docs","operation_class":"write","description":"MCP server docs"},
+    {"name":"cursor.mcp.linear","source":"mcp","selector":"mcp:linear","service":"harness","executor":"cursor","registration":"mcp:linear","operation_class":"write","description":"MCP server linear"}
+  ]
+}
