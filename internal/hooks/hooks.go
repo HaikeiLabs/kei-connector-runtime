@@ -99,6 +99,18 @@ func validHarnessKind(kind string) bool {
 	return kind == "claude" || kind == "codex" || kind == "opencode"
 }
 
+// validHarnessKindIn is validHarnessKind plus the short names the persisted
+// bundle's harness kind registry declares (HAI-622, CA-5), so a kind added to
+// the registry needs no code change. A short name that is neither built in nor
+// registered is still unknown.
+func validHarnessKindIn(stateDir, kind string) bool {
+	if validHarnessKind(kind) {
+		return true
+	}
+	_, ok := registryKindForShortName(stateDir, kind)
+	return ok
+}
+
 func validNativeDecision(phase, decision string) bool {
 	if phase == "post" {
 		return decision == "executed"

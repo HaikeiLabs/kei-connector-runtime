@@ -20,6 +20,12 @@ const registeredTestInput = `{"tool_name":"Bash","tool_input":{"command":"git st
 // exercised against the v2 shape.
 func activateV2Bundle(t *testing.T, stateDir string, harnesses []map[string]any, notAfter time.Time) {
 	t.Helper()
+	activateV2BundleWithKinds(t, stateDir, harnesses, nil, notAfter)
+}
+
+// activateV2BundleWithKinds is activateV2Bundle with a harness kind registry.
+func activateV2BundleWithKinds(t *testing.T, stateDir string, harnesses []map[string]any, kinds []map[string]any, notAfter time.Time) {
+	t.Helper()
 	// The hooks package does not install the embedded schema validator (the
 	// runtime binary does, in connectorruntime init). A no-op v2 validator is
 	// enough here: ValidateV2 still runs every Go-level check (audience, dates,
@@ -55,6 +61,9 @@ func activateV2Bundle(t *testing.T, stateDir string, harnesses []map[string]any,
 		},
 		"agent_connector_bindings": []any{},
 		"identities":               []any{map[string]any{"source": "discord", "external_id": "ext-1", "user_id": "user-1", "status": "linked", "groups": []string{"members"}}},
+	}
+	if len(kinds) > 0 {
+		doc["harness_kinds"] = kinds
 	}
 	if len(harnesses) > 0 {
 		doc["harnesses"] = harnesses
@@ -173,5 +182,31 @@ func TestHarnessRegisteredKindMapping(t *testing.T) {
 	// An empty harness id never matches.
 	if harnessRegistered(nil, "", "claude") {
 		t.Error("harnessRegistered with an empty harness id must be false")
+	}
+}
+
+// The short name a hook is installed with comes from the bundle's harness kind
+// registry (HAI-622, CA-5), so a kind added to the registry needs no code
+// change here; a short name neither built in nor in the registry is still an
+// unknown subcommand.
+func TestHookKindShortNameComesFromTheBundleRegistry(t *testing.T) {
+	stateDir := t.TempDir()
+	activateV2BundleWithKinds(t, stateDir,
+		[]map[string]any{{"agent_id": "h1", "kind": "example"}},
+		[]map[string]any{{"kind": "example", "short_name": "ex", "tool_prefix": "example.", "gateable": true, "decides_via": "native"}},
+		time.Now().Add(time.Hour))
+	cfg := Config{RuntimeStateDir: stateDir}
+	if !reportHarnessRegistered(t, cfg, []string{"ex", "--harness", "h1"}) {
+		t.Fatal("a harness of a registry kind, reported by its short name, must be registered")
+	}
+	var stdout, stderr bytes.Buffer
+	var spooled int
+	cfg.AppendAudit = func([]byte) error { spooled++; return nil }
+	if code := Run([]string{"nope", "--harness", "h1"}, strings.NewReader(registeredTestInput), &stdout, &stderr, cfg); code != 0 || spooled != 0 || !strings.Contains(stderr.String(), "unknown subcommand") {
+		t.Fatalf("an unregistered short name: exit=%d spooled=%d stderr=%q", code, spooled, stderr.String())
+	}
+	// Built-in short names keep working even when the registry does not list them.
+	if code := Run([]string{"claude", "--harness", "h1"}, strings.NewReader(registeredTestInput), &stdout, &stderr, cfg); code != 0 || spooled == 0 {
+		t.Fatalf("a built-in short name: exit=%d spooled=%d", code, spooled)
 	}
 }
