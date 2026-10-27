@@ -390,7 +390,7 @@ func (l *LocalPDP) DropConnectorCredential(id, connectorID, resource string) {
 // credentialStore is session id's credential store, or nil.
 func (l *LocalPDP) credentialStore(id string) *credrelease.Store {
 	if id == pdp.DefaultSession {
-		return l.creds
+		return nil
 	}
 	if v, ok := l.sessionCreds.Load(id); ok {
 		return v.(*credrelease.Store)
@@ -401,12 +401,6 @@ func (l *LocalPDP) credentialStore(id string) *credrelease.Store {
 // flushSession zeroes session id's credentials; a named session's store is
 // also dropped.
 func (l *LocalPDP) flushSession(id string) {
-	if id == pdp.DefaultSession {
-		if l.creds != nil {
-			l.creds.Flush()
-		}
-		return
-	}
 	l.dropSessionCredentials(id)
 }
 
@@ -840,11 +834,6 @@ func (l *LocalPDP) loadCredentials(ctx context.Context, id string, sub pdp.Subje
 	}
 	// A DELETE or another PUT that landed before Load began must still win.
 	// A named session's end flushes its store, which discards this load.
-	if id == pdp.DefaultSession {
-		if cur, ok := l.Sessions.Current(); !ok || cur.Status != pdp.StatusLinked || cur.UserID != sub.UserID || cur.Token != sub.Token {
-			store.Flush()
-		}
-	}
 }
 
 // resolveBundleSubject looks up (source, external_id) in the evaluator's

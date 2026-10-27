@@ -94,6 +94,26 @@ func TestSessionCredentialsFetchedOnceForLinkedCLISession(t *testing.T) {
 	}
 }
 
+func TestSessionCredentialsCannotUseEmptySessionStore(t *testing.T) {
+	f := &sessionI11{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: srv.URL}, nil)
+	store := credrelease.NewStore(credrelease.NewClient(srv.URL, policyTestToken, 5*time.Second))
+	if err := store.Load(context.Background(), "u-1", "subject-token"); err != nil {
+		t.Fatal(err)
+	}
+	l.SetCredentialStore(store)
+	err := l.UseCredential(context.Background(), "", "u-1", "github", func(string) error {
+		t.Fatal("empty session accessed a credential store")
+		return nil
+	})
+	var denied *credrelease.DeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("empty session error = %v, want credential denial", err)
+	}
+}
+
 func TestSessionCredentialsFlushOnEveryEndPath(t *testing.T) {
 	ends := map[string]func(t *testing.T, l *keiruntime.LocalPDP, h http.Handler, id string){
 		"DELETE /v1/session": func(t *testing.T, _ *keiruntime.LocalPDP, h http.Handler, id string) {
