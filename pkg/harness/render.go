@@ -23,6 +23,8 @@ func ForKind(kind Kind) (Adapter, error) {
 		return CodexAdapter{}, nil
 	case OpenCode:
 		return OpenCodeAdapter{}, nil
+	case Cursor:
+		return CursorAdapter{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported harness kind %q", kind)
 	}
@@ -39,13 +41,13 @@ func Render(kind string, bundle Bundle, cfg []byte) ([]byte, error) {
 		return nil, err
 	}
 	switch k {
-	case ClaudeCode:
+	case ClaudeCode, Cursor:
 		var doc map[string]any
 		if len(cfg) == 0 {
 			cfg = []byte("{}")
 		}
 		if err = json.Unmarshal(cfg, &doc); err != nil {
-			return nil, fmt.Errorf("decode Claude config: %w", err)
+			return nil, fmt.Errorf("decode %s config: %w", k, err)
 		}
 		perms, ok := doc["permissions"].(map[string]any)
 		if !ok {
@@ -144,7 +146,7 @@ func HookSpec(kind string, harnessID string) ([]byte, error) {
 	if harnessID == "" {
 		return nil, errors.New("harness id is required")
 	}
-	short := map[string]string{"claude_code": "claude", "codex": "codex", "opencode": "opencode"}[kind]
+	short := map[string]string{"claude_code": "claude", "codex": "codex", "opencode": "opencode", "cursor": "cursor"}[kind]
 	if short == "" {
 		return nil, fmt.Errorf("unsupported harness kind %q", kind)
 	}
@@ -318,6 +320,9 @@ func nativeEntry(kind Kind, dst, decision string) (string, string, bool) {
 		if kind == OpenCode {
 			return "permission.bash", strings.Join(tokens, " ") + " *", true
 		}
+		if kind == Cursor {
+			return cursorShellEntry(tokens, decision)
+		}
 	}
 	for _, scheme := range []string{"tool:", "skill:", "mcp:"} {
 		if strings.HasPrefix(dst, scheme) {
@@ -375,6 +380,8 @@ func nativeEntry(kind Kind, dst, decision string) (string, string, bool) {
 					raw = strings.TrimPrefix(raw, string(kind)+".")
 				}
 				return "permission.tool", raw + "=" + decision, true
+			case Cursor:
+				return cursorToolEntry(scheme, raw, decision)
 			}
 		}
 	}
@@ -461,6 +468,17 @@ func renderPolicy(ctx context.Context, env Env, b VerifiedBundle, h Harness) (Re
 			config = filepath.Join(root, ".config", "opencode")
 		}
 		plan.ConfigPath = filepath.Join(config, "opencode.json")
+		plan.Config = readConfig(plan.ConfigPath)
+		plan.Config, err = Render(string(h.Kind), b, plan.Config)
+		if err != nil {
+			return RenderPlan{}, err
+		}
+	case Cursor:
+		config := env.ConfigDir
+		if config == "" {
+			config = filepath.Join(root, ".cursor")
+		}
+		plan.ConfigPath = filepath.Join(config, "cli-config.json")
 		plan.Config = readConfig(plan.ConfigPath)
 		plan.Config, err = Render(string(h.Kind), b, plan.Config)
 		if err != nil {

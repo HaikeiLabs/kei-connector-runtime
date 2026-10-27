@@ -1,0 +1,6 @@
+{
+  "mcpServers": {
+    "docs": {"url": "https://docs.example.com/mcp"},
+    "linear": {"command": "linear-mcp", "args": []}
+  }
+}

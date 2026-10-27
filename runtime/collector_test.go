@@ -762,6 +762,7 @@ func TestCanonicalHarnessKind(t *testing.T) {
 		"claude":   "claude_code",
 		"codex":    "codex",
 		"opencode": "opencode",
+		"cursor":   "cursor",
 		"custom":   "custom",
 	}
 	for in, want := range cases {

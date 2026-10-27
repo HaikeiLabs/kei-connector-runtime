@@ -52,7 +52,7 @@ func TestDesktopConfigPresent(t *testing.T) {
 	if DesktopConfigPresent("", "") {
 		t.Fatal("unset HOME reported a desktop config")
 	}
-	for _, dir := range []string{".claude", ".codex", filepath.Join(".config", "opencode")} {
+	for _, dir := range []string{".claude", ".codex", ".cursor", filepath.Join(".config", "opencode")} {
 		home := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
 			t.Fatal(err)

@@ -233,7 +233,7 @@ func removeManaged(kind Kind, config []byte, entries []ManagedEntry) ([]byte, er
 		return config, nil
 	}
 	for _, e := range entries {
-		if kind == ClaudeCode {
+		if kind == ClaudeCode || kind == Cursor {
 			category := strings.TrimPrefix(e.Path, "permissions.")
 			items, _ := permissions[category].([]any)
 			out := items[:0]

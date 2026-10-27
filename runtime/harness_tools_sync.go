@@ -25,7 +25,7 @@ func RunHarnessToolsSync(args []string, stderr io.Writer, token string, client T
 		fmt.Fprintln(stderr, "harness tools sync accepts no arguments")
 		return 2
 	}
-	kinds := []harness.Kind{harness.ClaudeCode, harness.Codex, harness.OpenCode}
+	kinds := []harness.Kind{harness.ClaudeCode, harness.Codex, harness.OpenCode, harness.Cursor}
 	discoveries := make([]harness.Discovery, 0, len(kinds))
 	for _, kind := range kinds {
 		adapter, err := harness.ForKind(kind)
