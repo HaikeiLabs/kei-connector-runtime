@@ -701,14 +701,8 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	var req socketSessionRequest
 	err := decodeSocketJSON(w, r, &req)
-	legacy := req.Schema == sessionSchema
-	if legacy {
-		// A v1 PUT ends the default session's credentials, even one rejected below.
-		l.flushSession(pdp.DefaultSession)
-		l.deprecate("PUT /v1/session " + sessionSchema)
-	}
-	if err != nil || (!legacy && req.Schema != sessionSchemaV2) {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" (or legacy "+sessionSchema+") object with no unknown fields")
+	if err != nil || req.Schema != sessionSchemaV2 {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" object with no unknown fields")
 		return
 	}
 	var fields map[string]json.RawMessage
@@ -802,15 +796,6 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		} else {
 			sub = resolveBundleSubject(e, req.Source, req.ExternalID)
 		}
-	}
-	if legacy {
-		if err := l.Sessions.Start(sub); err != nil {
-			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
-			return
-		}
-		l.loadCredentials(r.Context(), pdp.DefaultSession, sub)
-		w.WriteHeader(http.StatusNoContent)
-		return
 	}
 	id, err := l.Sessions.Create(sub)
 	if err != nil {

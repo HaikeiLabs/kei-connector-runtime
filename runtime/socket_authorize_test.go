@@ -477,10 +477,25 @@ func TestSocketSessionStartRejectsOldFields(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 				t.Fatal(err)
 			}
-			if out.Error.Code != "invalid_session" {
-				t.Fatalf("error code = %s, want invalid_session", out.Error.Code)
+			if out.Error.Code != "invalid_request" {
+				t.Fatalf("error code = %s, want invalid_request", out.Error.Code)
 			}
 		})
+	}
+}
+
+func TestSocketSessionStartRejectsV1Schema(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example"}, nil)
+	h := sessionHandler(t, l)
+	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
+	var out struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if rec.Code != http.StatusBadRequest || out.Error.Code != "invalid_request" {
+		t.Fatalf("legacy PUT = %d %s, want invalid_request", rec.Code, rec.Body.String())
 	}
 }
 
@@ -503,8 +518,8 @@ func TestSocketSessionStartRejectsMissingProvider(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Error.Code != "invalid_session" {
-		t.Fatalf("error code = %s, want invalid_session", out.Error.Code)
+	if out.Error.Code != "invalid_request" {
+		t.Fatalf("error code = %s, want invalid_request", out.Error.Code)
 	}
 }
 

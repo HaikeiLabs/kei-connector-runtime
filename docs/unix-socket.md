@@ -91,7 +91,8 @@ This daemon-socket model brings three benefits:
 
 The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
 `POST /v1/authorize`, `POST /v1/credentials:release`, and
-`PUT/DELETE/GET /v1/session`. `GET /v1/model-config` returns the runtime's
+`PUT/DELETE/GET /v1/session`. Session creation accepts only `kei.session/v2`;
+the legacy `kei.session/v1` request is rejected. `GET /v1/model-config` returns the runtime's
 assigned model profile — model, endpoint, and credential — as a config source;
 inference **never** goes through kei-proxy, and the harness calls the provider
 directly. Governed tool authorization — the PEP — uses the local PDP on the
