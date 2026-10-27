@@ -303,28 +303,6 @@ func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, con
 	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
 }
 
-// AuthorizeV2MCP decides an MCP tool call against the v2 harness_policies
-// set for the subject held by a live named session. It replaces the old v1
-// mcp:call action path with per-call EvaluateV2MCP decisions.
-func (e *Evaluator) AuthorizeV2MCP(ctx context.Context, sessionID, slug, tool, agentID, harnessKind string) (Decision, error) {
-	if err := ctx.Err(); err != nil {
-		return Decision{}, err
-	}
-	if live, reason := e.sessionLive(sessionID); !live {
-		return sessionDenial(reason), nil
-	}
-	v, state, err := e.check()
-	if err != nil {
-		return stateDenial(state), nil
-	}
-	var subject *policybundle.SessionSubject
-	if current, ok := e.sessions.Get(sessionID); ok {
-		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
-	}
-	d := v.EvaluateV2MCP(slug, tool, agentID, harnessKind, subject, e.now().UTC())
-	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
-}
-
 // AuthorizeV2Model decides a model call for the subject held by the request's
 // session (ADR-035 §6). The calling agent's model-profile assignment in the
 // bundle is the permission; nothing is resolved online. v2 is false only when
@@ -353,50 +331,6 @@ func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, pr
 	}
 	m := v.EvaluateV2Model(profileID, agentID, subject, e.now().UTC())
 	return Decision{Allow: m.Outcome == "allow", Reason: m.Reason, ReasonCode: m.ReasonCode, DenySource: denySource(m.ReasonCode), BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, true, nil
-}
-
-// AuthorizeV2Plan revalidates the exact named session and evaluates the complete plan.
-type V2PlanContext struct {
-	BundleDigest  string
-	BundleVersion int64
-	Tool          policybundle.V2Tool
-	// Connector is the descriptor of the tool's routed connector, from the
-	// same bundle, when the bundle carries one; Descriptors reports whether
-	// the bundle carries descriptors at all.
-	Connector   *Connector
-	Descriptors bool
-}
-
-func (e *Evaluator) V2PlanContext(toolName string) (V2PlanContext, bool) {
-	v, _, err := e.check()
-	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(e.now().UTC()) {
-		return V2PlanContext{}, false
-	}
-	tool, ok := v.V2ConnectorTool(toolName, e.now().UTC())
-	if !ok {
-		return V2PlanContext{}, false
-	}
-	planContext := V2PlanContext{BundleDigest: v.Digest, BundleVersion: v.Payload.BundleVersion, Tool: tool, Descriptors: v.CarriesConnectorDescriptors()}
-	if c, ok := v.Connector(tool.Route.ConnectorBinding.ConnectorID); ok {
-		planContext.Connector = &c
-	}
-	return planContext, true
-}
-func (e *Evaluator) AuthorizeV2Plan(sessionID, installationID, subjectID, source, externalID, agentID, tool string, ops []policybundle.Operation) (string, int64, bool, error) {
-	if installationID != e.aud.InstallationID || sessionID == "" || subjectID == "" || agentID == "" || tool == "" || len(ops) == 0 || e.sessions == nil {
-		return "", 0, false, nil
-	}
-	current, ok := e.sessions.Get(sessionID)
-	if !ok || current.UserID != subjectID || current.Source != source || current.ExternalID != externalID || current.Status != StatusLinked {
-		return "", 0, false, nil
-	}
-	v, _, err := e.check()
-	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" {
-		return "", 0, false, err
-	}
-	subject := &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
-	decision := v.EvaluateV2Plan(tool, agentID, subject, ops, e.now().UTC())
-	return v.Digest, v.Payload.BundleVersion, decision.Outcome == "allow", nil
 }
 
 // ReconcileSession is the compatibility wrapper for callers that ignore revoked ids.

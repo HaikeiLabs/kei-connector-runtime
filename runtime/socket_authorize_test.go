@@ -1530,7 +1530,6 @@ func TestAuthorizePathsDecideForSessionUserNotAgent(t *testing.T) {
 		decide func(*testing.T, *keiruntime.LocalPDP, http.Handler, string) subjectPathDecision
 	}{
 		{"authorize v2 harness tool", subjectV2Bundle, decideViaAuthorizeHarnessTool},
-		{"mcp route tools/call", subjectV2Bundle, decideViaMCPTool},
 		{"connector grant", subjectV1ConnectorBundle, decideViaConnectorGrant},
 	}
 	for _, path := range paths {
@@ -1573,15 +1572,6 @@ func decideViaAuthorizeHarnessTool(t *testing.T, _ *keiruntime.LocalPDP, h http.
 		t.Fatalf("authorize status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	return subjectPathDecision{allow: response.Decision == "permit"}
-}
-
-func decideViaMCPTool(t *testing.T, l *keiruntime.LocalPDP, _ http.Handler, sessionID string) subjectPathDecision {
-	t.Helper()
-	d, err := l.AuthorizeMCPTool(context.Background(), sessionID, "slack", "list_channels", subjectTestAgent, "claude_code")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return subjectPathDecision{allow: d.Allow}
 }
 
 func decideViaConnectorGrant(t *testing.T, l *keiruntime.LocalPDP, _ http.Handler, sessionID string) subjectPathDecision {
