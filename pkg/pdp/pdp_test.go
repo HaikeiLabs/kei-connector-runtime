@@ -226,13 +226,14 @@ func TestReconcileBundleSessionRevokesWhenIdentitySnapshotDropsSubject(t *testin
 		t.Fatal(err)
 	}
 	sessions := NewSessions()
-	if err := sessions.Start(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-user", Status: StatusLinked}); err != nil {
+	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Source: "discord", ExternalID: "discord-user", Status: StatusLinked})
+	if err != nil {
 		t.Fatal(err)
 	}
 	e, store, _ := newTestEvaluator(t, testNow, bundle, sessions)
 	e.ReconcileSession()
-	if got, _ := sessions.Current(); got.Status != StatusLinked {
-		t.Fatalf("current snapshot revoked linked identity: %s", got.Status)
+	if got, ok := sessions.Get(sessionID); !ok || got.Status != StatusLinked {
+		t.Fatalf("named session revoked linked identity: %+v exists=%t", got, ok)
 	}
 
 	doc["bundle_version"] = 43
@@ -248,7 +249,7 @@ func TestReconcileBundleSessionRevokesWhenIdentitySnapshotDropsSubject(t *testin
 	}
 	e.now = func() time.Time { return testNow.Add(time.Second) }
 	e.ReconcileSession()
-	if got, _ := sessions.Current(); got.Status != StatusRevoked {
+	if got, ok := sessions.Get(sessionID); !ok || got.Status != StatusRevoked {
 		t.Fatalf("identity removed from refreshed snapshot left session %s", got.Status)
 	}
 }

@@ -76,7 +76,10 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 		RuntimeToken:           policyTestToken,
 		RuntimeControlPlaneURL: "https://kei.example",
 	}, nil)
-	_ = l.Sessions.Start(pdp.Subject{UserID: "user-abc", Email: "user@test", Status: pdp.StatusLinked, Enrollment: json.RawMessage(`"https://claim.url"`)})
+	id, err := l.Sessions.Create(pdp.Subject{UserID: "user-abc", Email: "user@test", Status: pdp.StatusLinked, Enrollment: json.RawMessage(`"https://claim.url"`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -86,6 +89,7 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 	handler := l.NewHandler(next, checkConfig, checkAuth)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/session", nil)
+	session.SetHeader(req, id)
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -102,7 +106,7 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &keys); err != nil {
 		t.Fatal(err)
 	}
-	if keys.Schema != "kei.session/v1" || keys.UserID != "user-abc" || keys.Status != "linked" {
+	if keys.Schema != "kei.session/v2" || keys.UserID != "user-abc" || keys.Status != "linked" {
 		t.Fatalf("response %+v", keys)
 	}
 	if keys.Email != "" {
@@ -512,13 +516,10 @@ func TestSocketSessionStartAcceptsCLI(t *testing.T) {
 	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"cli"}`)
 
 	// Verify the session is linked with the right user.
-	gre := getSession(t, h)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -817,12 +818,8 @@ func TestSocketSessionStartResolvesLinkedIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-123"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -859,12 +856,8 @@ func TestSocketSessionStartResolvesNonLinkedIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-pending"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-pending"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -901,12 +894,8 @@ func TestSocketSessionStartResolvesUnknownIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-unknown"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-unknown"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -939,12 +928,8 @@ func TestSocketSessionStartWithoutBundleIsUnlinked(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-123"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -995,12 +980,8 @@ func TestSocketSessionStartResolvesExpiredIdentityAsUnlinked(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-expired"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-expired"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -1285,12 +1266,8 @@ func TestSocketSessionStartResolvesOpenWebUILinkedIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"openwebui","external_id":"550e8400-e29b-41d4-a716-446655440000"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"openwebui","external_id":"550e8400-e29b-41d4-a716-446655440000"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -1327,12 +1304,8 @@ func TestSocketSessionStartOpenWebUIUnknownIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"openwebui","external_id":"00000000-0000-0000-0000-000000000000"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"openwebui","external_id":"00000000-0000-0000-0000-000000000000"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}

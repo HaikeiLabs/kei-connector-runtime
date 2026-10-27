@@ -201,15 +201,11 @@ func TestMultiSessionUnknownIDFailsClosed(t *testing.T) {
 	}
 }
 
-// TestMultiSessionDeleteIsolation: DELETE ends one session and flushes only
-// its credentials; other sessions and the default session are untouched.
+// TestMultiSessionDeleteIsolation: DELETE ends one named session and flushes
+// only its credentials; other named sessions are untouched.
 func TestMultiSessionDeleteIsolation(t *testing.T) {
 	l, h := multiSessionPDP(t, &perSubjectI11{}, nil)
-	l.SetKeychain(&fakeKeychain{token: "st-default", userID: "u-default"})
 	alice, bob := createSession(t, h, "ext-alice"), createSession(t, h, "ext-bob")
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("legacy PUT = %d", rec.Code)
-	}
 
 	if rec := sessionRequest(h, http.MethodDelete, "/v1/session", alice, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE alice = %d", rec.Code)
@@ -222,9 +218,6 @@ func TestMultiSessionDeleteIsolation(t *testing.T) {
 	}
 	if tok, err := credentialIn(l, bob, "u-bob"); err != nil || tok != "gh-st-bob" {
 		t.Errorf("bob's credential after alice's DELETE: %q %v", tok, err)
-	}
-	if tok, err := credentialIn(l, pdp.DefaultSession, "u-default"); err != nil || tok != "gh-st-default" {
-		t.Errorf("default credential after alice's DELETE: %q %v", tok, err)
 	}
 	if rec := sessionRequest(h, http.MethodGet, "/v1/session", bob, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"session_id":"`+bob+`"`) {
 		t.Errorf("GET bob = %d %s", rec.Code, rec.Body.String())
@@ -327,48 +320,25 @@ func TestMultiSessionSlowSessionDoesNotBlockAnother(t *testing.T) {
 	}
 }
 
-// TestLegacyDefaultSession: requests without a session id keep the single
-// default session (kei.session/v1), unaffected by named sessions.
-func TestLegacyDefaultSession(t *testing.T) {
+// TestLegacyDefaultSessionIsNotStored verifies the removed default storage
+// cannot be populated; named sessions remain independent and live.
+func TestLegacyDefaultSessionIsNotStored(t *testing.T) {
 	l, h := multiSessionPDP(t, &perSubjectI11{}, nil)
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("legacy PUT = %d %s", rec.Code, rec.Body.String())
+	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_session") {
+		t.Fatalf("legacy PUT = %d %s, want invalid_session", rec.Code, rec.Body.String())
 	}
-	alice := createSession(t, h, "ext-alice")
-	bob := createSession(t, h, "ext-bob")
+	if l.Sessions.Exists(pdp.DefaultSession) {
+		t.Fatal("empty session exists after legacy PUT")
+	}
+	alice, bob := createSession(t, h, "ext-alice"), createSession(t, h, "ext-bob")
 	if d, _ := authorizeIn(t, h, alice); d != "permit" {
 		t.Errorf("named session (alice): %s, want permit", d)
 	}
 	if d, _ := authorizeIn(t, h, bob); d != "deny" {
 		t.Errorf("named session (bob): %s, want deny", d)
 	}
-	rec := getSession(t, h)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"schema":"kei.session/v1"`) || strings.Contains(rec.Body.String(), "session_id") {
-		t.Errorf("GET default = %d %s", rec.Code, rec.Body.String())
-	}
-	if tok, err := credentialIn(l, pdp.DefaultSession, "u-alice"); err != nil || tok != "gh-st-alice" {
-		t.Errorf("default credential: %q %v", tok, err)
-	}
-	// A legacy PUT replaces only the default session; named authorization is
-	// unaffected.
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-bob"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("second legacy PUT = %d", rec.Code)
-	}
-	if d, _ := authorizeIn(t, h, alice); d != "permit" {
-		t.Errorf("named session after default replacement: %s, want permit (alice)", d)
-	}
-	if tok, err := credentialIn(l, bob, "u-bob"); err != nil || tok != "gh-st-bob" {
-		t.Errorf("named session after a legacy PUT: %q %v", tok, err)
-	}
-	// A legacy DELETE ends only the default session.
-	if rec := sessionRequest(h, http.MethodDelete, "/v1/session", "", ""); rec.Code != http.StatusNoContent {
-		t.Fatalf("legacy DELETE = %d", rec.Code)
-	}
-	if rec := getSession(t, h); rec.Code != http.StatusNotFound {
-		t.Errorf("default session after DELETE: %d", rec.Code)
-	}
-	if rec := sessionRequest(h, http.MethodGet, "/v1/session", bob, ""); rec.Code != http.StatusOK {
-		t.Errorf("named session after a legacy DELETE: %d", rec.Code)
+	if _, ok := l.Sessions.Get(pdp.DefaultSession); ok {
+		t.Fatal("empty session remains readable")
 	}
 }
 
