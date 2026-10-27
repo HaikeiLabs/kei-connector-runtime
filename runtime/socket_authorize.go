@@ -1073,7 +1073,7 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 // request's). The error is non-nil only when ctx is done.
 func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
 	d = pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
-	auditTrustedAgent = req.Tool == "pi.bash"
+	auditTrustedAgent = req.Tool == "shell"
 	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
 		return d, auditTrustedAgent, false, nil
@@ -1092,8 +1092,8 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
 	switch {
-	// "pi.bash" is the legacy adapter tool name (released contract); it becomes a generic "shell" in a follow-up ticket.
-	case req.Tool == "pi.bash":
+	// "shell" is the generic tool name for command authorization; adapters map their own shell tool to it.
+	case req.Tool == "shell":
 		if !validArgumentDigest(req.ToolArgsDigest) {
 			d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
 		} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
@@ -1105,7 +1105,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			unmatched = d.ReasonCode == "no_matching_policy"
 		}
 	case req.ShellCommand != "":
-		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
+		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for the \"shell\" tool"}
 	case req.Tool != "" && req.Connector == nil && e.IsV2UnregisteredTool(req.Tool) && l.isOwnerSession(sessionID):
 		// Unregistered tool names receive a local policy decision by name.
 		// Identity and memberships come from the verified installation-owner
