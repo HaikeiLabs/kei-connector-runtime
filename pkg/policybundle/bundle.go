@@ -20,7 +20,6 @@ import (
 	"time"
 
 	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
-	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
 )
 
 var (
@@ -192,7 +191,7 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	if err := validatePolicyDialect(payload.PolicySet); err != nil {
 		return nil, err
 	}
-	if err := validateHarnesses(payload.Harnesses, payload.HarnessMatchSemantics); err != nil {
+	if err := validateHarnesses(payload.Payload); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBundleUnsupported, err)
 	}
 	digest := sha256.Sum256(bundleBytes)
@@ -271,7 +270,7 @@ func ValidateV2(bundleBytes []byte, installationID, orgID, workspaceID string, h
 	if err := validatePolicySetV2(payload.PolicySet); err != nil {
 		return nil, err
 	}
-	if err := validateHarnesses(payload.Harnesses, payload.HarnessMatchSemantics); err != nil {
+	if err := validateHarnesses(payload.Payload); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBundleUnsupported, err)
 	}
 	payload.ServicePrincipalIdentities = principalIdentities
@@ -404,7 +403,13 @@ func validatePolicyDialect(raw json.RawMessage) error {
 	return nil
 }
 
-func validateHarnesses(harnesses []Harness, semantics string) error {
+// validateHarnesses checks the registered harnesses against the bundle's own
+// harness kind registry, or the built-in kinds when it carries none.
+func validateHarnesses(payload bundle.Payload) error {
+	if err := bundle.ValidateHarnessKinds(payload.HarnessKinds); err != nil {
+		return err
+	}
+	harnesses, semantics := payload.Harnesses, payload.HarnessMatchSemantics
 	if len(harnesses) == 0 && semantics == "" {
 		return nil
 	}
@@ -412,13 +417,13 @@ func validateHarnesses(harnesses []Harness, semantics string) error {
 		return fmt.Errorf("harness_match_semantics must be %q", "kei.harness-match/v1")
 	}
 	for i, h := range harnesses {
-		if !harnessmatch.Kinds[h.Kind] {
+		if !payload.KnownHarnessKind(h.Kind) {
 			return fmt.Errorf("harnesses[%d].kind %q is not a valid harness kind", i, h.Kind)
 		}
 		if !idPattern.MatchString(h.AgentID) {
 			return fmt.Errorf("harnesses[%d].agent_id %q is not a valid identifier", i, h.AgentID)
 		}
-		if harnessmatch.Kinds[h.AgentID] {
+		if payload.KnownHarnessKind(h.AgentID) {
 			return fmt.Errorf("harnesses[%d].agent_id %q must not equal a harness kind value", i, h.AgentID)
 		}
 	}
