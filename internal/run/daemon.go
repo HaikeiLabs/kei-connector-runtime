@@ -11,10 +11,8 @@ package run
 //
 // Who uses it: this is the path for native CLI tools (gh, git, ...) run by
 // Unix/local-process harnesses such as Claude Code, Codex and opencode,
-// through `kei-proxy run -- <cmd>`. Governed connector API calls made for
-// tool calls and skills use POST /v1/connectors:invoke (internal/connector/
-// invoke) instead. Both run inside the serve daemon with session-held
-// credentials that never leave it.
+// through `kei-proxy run -- <cmd>`. It runs inside the serve daemon with
+// session-held credentials that never leave it.
 //
 // stdin is not passed through: the child reads an empty stdin (/dev/null).
 

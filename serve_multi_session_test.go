@@ -10,9 +10,9 @@ import (
 
 // startNamedSession creates a kei.session/v2 session over the socket and
 // returns its id.
-func (rig *invokeRig) startNamedSession(t *testing.T) string {
+func (rig *socketRig) startNamedSession(t *testing.T) string {
 	t.Helper()
-	r := socketDo(t, rig.client, http.MethodPut, "/v1/session", `{"schema":"kei.session/v2","source":"discord","external_id":"`+invokeExternalID+`"}`)
+	r := socketDo(t, rig.client, http.MethodPut, "/v1/session", `{"schema":"kei.session/v2","source":"discord","external_id":"`+linkedExternalID+`"}`)
 	if r.code != http.StatusCreated {
 		t.Fatalf("PUT /v1/session v2 = %s", r.dump)
 	}
@@ -26,24 +26,19 @@ func (rig *invokeRig) startNamedSession(t *testing.T) string {
 }
 
 // TestDaemonNamedSessionCLIPassthrough drives the daemon's credentialed
-// routes in a named session through the real CLIs: connector invoke --session
-// and run with $KEI_SESSION_ID. Their audit records carry the session id; an
-// unknown or ended id fails closed before any provider call.
+// route in a named session through the real CLI: run with $KEI_SESSION_ID.
+// Its audit record carries the session id; an unknown or ended id fails
+// closed before the child runs.
 func TestDaemonNamedSessionCLIPassthrough(t *testing.T) {
-	rig := newInvokeRig(t)
+	rig := newSocketRig(t)
 	id := rig.startNamedSession(t)
 	t.Setenv("KEI_SESSION_ID", "")
 
 	// No default session exists: a call without the id has no session.
-	if code, stdout, _ := runConnectorCLI(t, rig.socket, cliRepositoryRead...); code != 1 || !strings.Contains(stdout, `"reason_code":"no_session"`) {
-		t.Fatalf("invoke without a session id: exit %d %s", code, stdout)
-	}
-	code, stdout, stderr := runConnectorCLI(t, rig.socket, append([]string{"--session", id}, cliRepositoryRead...)...)
-	if code != 0 || !strings.Contains(stdout, `"decision":"allow"`) {
-		t.Fatalf("invoke --session: exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
-	}
-	if code, stdout, _ := runConnectorCLI(t, rig.socket, append([]string{"--session", "ks_forged"}, cliRepositoryRead...)...); code != 1 || !strings.Contains(stdout, `"reason_code":"session_not_found"`) {
-		t.Fatalf("invoke with an unknown session: exit %d %s", code, stdout)
+	if code, _, errOut := runProxyRunCLI(t, rig.socket,
+		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_RUN_HELPER_EXIT": "0"},
+		"--", helperBinary(t)); code != 1 || !strings.Contains(errOut, "no active kei-proxy session") {
+		t.Fatalf("run without a session id: exit %d stderr %s", code, errOut)
 	}
 
 	code, out, errOut := runProxyRunCLI(t, rig.socket,
@@ -53,32 +48,33 @@ func TestDaemonNamedSessionCLIPassthrough(t *testing.T) {
 		t.Fatalf("run in the named session: exit %d\nstdout %s\nstderr %s", code, out, errOut)
 	}
 
+	if code, _, errOut := runProxyRunCLI(t, rig.socket,
+		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_RUN_HELPER_EXIT": "0", "KEI_SESSION_ID": "ks_forged"},
+		"--", helperBinary(t)); code != 1 || !strings.Contains(errOut, "session_not_found") {
+		t.Fatalf("run with an unknown session: exit %d stderr %s", code, errOut)
+	}
+
 	spool := readSpool(t, rig.cfg.AuditPath)
-	for _, schema := range []string{`"tool_name":"connector:github:repository.read"`, `"schema":"kei.proxy-run-event/v1"`} {
-		found := false
-		for _, line := range strings.Split(spool, "\n") {
-			if strings.Contains(line, schema) && strings.Contains(line, `"session_id":"`+id+`"`) {
-				found = true
-			}
+	found := false
+	for _, line := range strings.Split(spool, "\n") {
+		if strings.Contains(line, `"schema":"kei.proxy-run-event/v1"`) && strings.Contains(line, `"session_id":"`+id+`"`) {
+			found = true
 		}
-		if !found {
-			t.Errorf("no audit record %s with the session id:\n%s", schema, spool)
-		}
+	}
+	if !found {
+		t.Errorf("no run audit record with the session id:\n%s", spool)
 	}
 
 	// After DELETE the id is dead on every credentialed route.
 	if r := socketDoSession(t, rig.client, http.MethodDelete, "/v1/session", id, ""); r.code != http.StatusNoContent {
 		t.Fatalf("DELETE = %s", r.dump)
 	}
-	if code, stdout, _ := runConnectorCLI(t, rig.socket, append([]string{"--session", id}, cliRepositoryRead...)...); code != 1 || !strings.Contains(stdout, `"reason_code":"session_not_found"`) {
-		t.Fatalf("invoke in an ended session: exit %d %s", code, stdout)
-	}
 	if code, _, errOut := runProxyRunCLI(t, rig.socket,
-		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_SESSION_ID": id}, "--", helperBinary(t)); code == 0 || !strings.Contains(errOut, "session_not_found") {
+		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_RUN_HELPER_EXIT": "0", "KEI_SESSION_ID": id}, "--", helperBinary(t)); code != 1 || !strings.Contains(errOut, "session_not_found") {
 		t.Fatalf("run in an ended session: exit %d stderr %s", code, errOut)
 	}
-	if _, github := rig.counts(); len(github) != 1 {
-		t.Fatalf("GitHub calls = %d, want only the one allowed invoke", len(github))
+	if i11, _ := rig.counts(); len(i11) != 1 {
+		t.Fatalf("I11 calls = %v, want only the session start", i11)
 	}
 }
 

@@ -104,8 +104,7 @@ nothing renews it, so about a minute after the last good bundle was issued:
 
 - the state becomes `stale_but_valid`;
 - `serve` denies authorize calls with `reason_code: subject_snapshot_stale`
-  and `deny_source: runtime_state`, and refuses v2 preflight and connector
-  calls because the bundle's tool plans are no longer trusted;
+  and `deny_source: runtime_state`;
 - linked sessions are revoked.
 
 So a v2 runtime fails closed within about a minute of a sustained `409`, not

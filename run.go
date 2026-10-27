@@ -60,8 +60,6 @@ func Main(buildVersion string, args []string) int {
 		code = runAuthorize(args[1:])
 	} else if args[0] == "hook" {
 		code = runHook(args[1:])
-	} else if args[0] == "connector" {
-		code = runConnector(args[1:])
 	} else if args[0] == "collector" {
 		code = runCollector(args[1:])
 	} else if args[0] == "model" {
@@ -178,8 +176,8 @@ func usage() {
 	fmt.Fprint(os.Stderr, `kei-proxy - tenant-side runtime policy engine
 
 CLI commands and a long-running serve daemon. Each CLI command performs one
-governed action (authorize, connector invoke, collector ship, or credential
-sync). The serve daemon exposes a local HTTP/1.1 API on a Unix socket and
+governed action (authorize, collector ship, or credential sync). The serve
+daemon exposes a local HTTP/1.1 API on a Unix socket and
 optional TCP listener. Customer-hosted runtimes resolve credential metadata
 from Kei and fetch values from the configured secret store. Emits each
 decision as a structured JSON audit event on stderr.
@@ -189,7 +187,6 @@ Usage:
 
 Commands:
   authorize    authorize a tool call and serve its credential (stdout JSON, exit codes)
-  connector    invoke a governed data connector through the control plane
   collector    ship pending audit JSONL records to the control plane (idempotent, resumable)
   credential   manage credential sync (see: kei-proxy credential --help)
   hook         report-only harness tool-use hook (see: kei-proxy hook --help)
@@ -216,7 +213,7 @@ Environment:
   KEI_PROXY_AUDIT_MAX_BYTES total audit spool cap in bytes (default 104857600, 100 MiB)
   KEI_RUNTIME_SOCKET_PATH   local HTTP Unix socket (serve; default platform-dependent, see docs/unix-socket.md)
   KEI_SESSION_ID            daemon session id from PUT /v1/session (kei.session/v2); authorize,
-                            connector invoke, run and hook send it as X-Kei-Session (--session)
+                            run and hook send it as X-Kei-Session (--session)
   KEI_SESSION_IDLE_TTL      serve: idle lifetime of a named session (Go duration, default 30m)
   KEI_RUNTIME_STATE_DIR     protected policy bundle state directory (default: macOS
                             $HOME/Library/Application Support/kei-proxy; Linux root
@@ -233,7 +230,6 @@ Environment:
 
 Examples:
   kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets
-  kei-proxy connector invoke --connector conn-1 --capability lead.read --action read --resource leads/42 --trace-id t-1
   kei-proxy runtime bootstrap
 	kei-proxy identity link --platform discord --platform-user-id 123456789
   kei-proxy identity status --platform-user-id 123456789 --tenant-id guild-id

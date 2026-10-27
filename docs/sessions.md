@@ -26,11 +26,11 @@ The current authorization paths treat the empty ID differently:
 | --- | --- |
 | `Evaluator.Evaluate` and `Evaluator.EvaluateConnector` | Accept the empty ID as live. They evaluate using the stored default subject if one exists; a policy may still deny the call (`pkg/pdp/pdp.go:84-110,147-206`). |
 | Generic `/v1/authorize` path | The runtime uses `Evaluator.Evaluate` for calls that do not take a specialized v2 path, so the default session remains accepted as the legacy context (`runtime/socket_authorize.go:1127-1175` on main). |
-| Connector and command execution | Legacy connector calls use `EvaluateConnector`, which accepts the default if it has an active subject. Registered v2 tool execution uses `ConnectorGrant` and also needs a linked subject for the target; `Sessions.Get` can read the active default subject (`runtime/connector_grant.go:15-37`; `runtime/preflight_service.go:192-213`; `pkg/pdp/session.go:209-224`). |
+| Connector and command execution | Legacy connector calls use `EvaluateConnector`, which accepts the default if it has an active subject. The commands:run route resolves credential references through `ConnectorGrant`, which also needs a linked subject for the target; `Sessions.Get` can read the active default subject (`runtime/connector_grant.go`; `pkg/pdp/session.go:209-224`). |
 | V2 registered harness-tool authorization | Refuses the default with `session_required` (`pkg/pdp/pdp.go:240-261`). |
 | V2 MCP and model authorization | Do not require a named ID: both use `sessionLive`, which treats the default ID as live, then evaluate with its stored subject if present (`pkg/pdp/pdp.go:100-110,275-324`). |
 | Pi shell authorization | Does not require a named ID, but needs an active subject in `Sessions`; an empty default with no stored subject returns `session_not_found` (`pkg/pdp/pi_shell.go:15-28`; `pkg/pdp/session.go:209-224`). |
-| V2 plan/preflight | Refuses an empty ID. Runtime preflight requires a nonempty session ID and a linked subject (`pkg/pdp/pdp.go:354-360`; `runtime/preflight_service.go:235-257`). |
+| V2 plan/preflight | Removed with the connector invoke path (HAI-724): the runtime no longer plans or consumes operation plans. |
 | Tool-bound credential release | Refuses the default with `session_not_found`; this path requires a live named session (`runtime/socket_authorize.go:1180-1186`). |
 | MCP route-key creation | Refuses the default with `session_not_found` (`runtime/socket_authorize.go:497-506`). |
 | V2 unregistered-tool authorization | `AuthorizeV2UnregisteredTool` returns deny with `session_required` for the default ID. This entry point is in runtime PR #241 and is not present on the fetched main revision (`pkg/pdp/pdp.go:253-263` in PR #241). |

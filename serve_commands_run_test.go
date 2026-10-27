@@ -19,14 +19,14 @@ import (
 // KEI_RUN_HELPER=1 (see runHelperChild): it reports the SHA-256 of $GH_TOKEN
 // and its environment's keys, echoes the raw token on stdout and stderr, and
 // exits with $KEI_RUN_HELPER_EXIT. The session's GitHub token is
-// credentialCanary (newInvokeRig).
+// credentialCanary (newSocketRig).
 
 var credentialCanaryDigest = func() string {
 	sum := sha256.Sum256([]byte(credentialCanary))
 	return hex.EncodeToString(sum[:])
 }()
 
-const githubTokenRef = "kei://connectors/" + invokeConnector + "/token"
+const githubTokenRef = "kei://connectors/" + githubConnectorID + "/token"
 
 func helperBinary(t *testing.T) string {
 	t.Helper()
@@ -63,7 +63,7 @@ type runStream struct {
 }
 
 // postRun calls POST /v1/commands:run directly and collects its frames.
-func postRun(t *testing.T, rig *invokeRig, argv, env []string) runStream {
+func postRun(t *testing.T, rig *socketRig, argv, env []string) runStream {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{"schema": "kei.command-run-request/v1", "argv": argv, "env": env, "dir": t.TempDir()})
 	resp := socketDo(t, rig.client, http.MethodPost, "/v1/commands:run", string(body))
@@ -102,7 +102,7 @@ func TestCommandRunInjectsSessionCredentialIntoChildOnly(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prevLog) })
 
-	rig := newInvokeRig(t)
+	rig := newSocketRig(t)
 	rig.startSession(t)
 	code, stdout, stderr := runProxyRunCLI(t, rig.socket,
 		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_RUN_HELPER_EXIT": "7"},
@@ -139,7 +139,7 @@ func TestCommandRunInjectsSessionCredentialIntoChildOnly(t *testing.T) {
 }
 
 func TestCommandRunChildEnvironmentIsCallerEnvPlusRefs(t *testing.T) {
-	rig := newInvokeRig(t)
+	rig := newSocketRig(t)
 	rig.startSession(t)
 	// The daemon process has its own environment (KEI_RUNTIME_STATE_DIR,
 	// HOME, ...); none of it may reach the child.
@@ -159,7 +159,7 @@ func TestCommandRunChildEnvironmentIsCallerEnvPlusRefs(t *testing.T) {
 }
 
 func TestCommandRunDenyPaths(t *testing.T) {
-	rig := newInvokeRig(t)
+	rig := newSocketRig(t)
 	helper := helperBinary(t)
 
 	t.Run("no session", func(t *testing.T) {
@@ -179,7 +179,7 @@ func TestCommandRunDenyPaths(t *testing.T) {
 	}{
 		{"no reference", map[string]string{"GH_TOKEN": ""}, []string{"--", helper}, 2, "credential_reference_missing"},
 		{"connector mismatch", map[string]string{"GH_TOKEN": githubTokenRef}, []string{"--connector", "conn-other", "--", helper}, 1, "credential_reference_mismatch"},
-		{"policy deny", map[string]string{"GH_TOKEN": "kei://connectors/" + invokeConnector + "/access_token"}, []string{"--", helper}, 1, "no_matching_policy"},
+		{"policy deny", map[string]string{"GH_TOKEN": "kei://connectors/" + githubConnectorID + "/access_token"}, []string{"--", helper}, 1, "no_matching_policy"},
 		{"unregistered connector", map[string]string{"GH_TOKEN": "kei://connectors/conn-unknown-0001/token"}, []string{"--", helper}, 1, "tool_not_registered"},
 		{"provider not connected", map[string]string{"GH_TOKEN": "kei://connectors/conn-linear-0001/token"}, []string{"--", helper}, 1, "connector_not_connected"},
 		{"opaque_ref provider", map[string]string{"GH_TOKEN": "kei://connectors/conn-notion-0001/token"}, []string{"--", helper}, 1, "credential_source_not_supported"},
@@ -219,7 +219,7 @@ func TestCommandRunDenyPaths(t *testing.T) {
 }
 
 func TestCommandRunRequiresRuntimeTokenAndIdentityMode(t *testing.T) {
-	rig := newInvokeRig(t)
+	rig := newSocketRig(t)
 	req, _ := http.NewRequest(http.MethodPost, "http://unix/v1/commands:run", strings.NewReader(`{}`))
 	resp, err := rig.client.Do(req)
 	if err != nil {

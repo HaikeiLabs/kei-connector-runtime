@@ -1,5 +1,13 @@
 # Connector execution contract
 
+Status: **Superseded by ADR-039 (HAI-724)** for the runtime side. The tenant
+runtime no longer executes provider calls: `kei-proxy connector invoke`, the
+`POST /v1/connectors:invoke` socket route and the daemon executor were removed
+in 2026-10-26 (runtime), and the catalog-side invoke path
+(`POST /api/v1/data-connectors/invoke`, `internal/connectorinvoke`) is being
+removed separately (HAI-724). This document is retained for historical
+reference and for the credential-release sections the runtime still uses.
+
 Status: **Accepted**. Decisions D1–D5 were settled by the user on 2026-09-28
 (see [Decisions](#decisions)). Implementation order: `kei-connector-contracts`
 v0.2.0, then runtime execution (layer 2, against fakes), then the catalog

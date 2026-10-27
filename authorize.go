@@ -139,7 +139,7 @@ func runAuthorize(args []string) int {
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, reason, err)
 	}
 	if activeBundle.Payload.Schema == "kei.policy-bundle/v2" {
-		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "preflight_required", errors.New("v2 connector calls require the local serve daemon preflight path"))
+		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "preflight_required", errors.New("v2 connector calls are not supported by one-shot authorize"))
 	}
 	invokingSubject := *invokingSubjectFlag
 	if invokingSubject == "" && cfg.IsRuntime() {

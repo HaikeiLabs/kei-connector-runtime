@@ -11,8 +11,8 @@ configured tokenless owner-session calls. `KEI_TOKENLESS_OWNER_SESSION` defaults
 on for local desktop installs and off for server deployments; set it to `false`
 to disable. When enabled, the mode-0600 socket binds requests that omit a
 session to a named session for the v2 bundle's verified installation subject.
-The tokenless routes are `POST /v1/authorize`, `/v1/preflight`, `/v1/consume`,
-`/v1/connectors:invoke`, and `/v1/credentials:release`. The subject is
+The tokenless routes are `POST /v1/authorize` and
+`/v1/credentials:release`. The subject is
 rebound on bundle refresh and its session is ended if the subject disappears
 or changes. If the current v2 bundle
 does not provide a usable subject, tokenless calls fail closed with
@@ -40,12 +40,8 @@ request's `agent_id`: omit it, or send that same agent. A request that names
 any other agent, including another agent assigned to the installation, is
 denied with `agent_mismatch`, and the audit event records the resolved agent.
 
-`POST /v1/preflight` and `POST /v1/consume` follow the same agent resolution
-rule. If the request includes an `agent_id`, it must match the runtime
-identity's default agent (`whoami`), or the call is denied with
-`agent_mismatch`. If omitted, the default agent is used. The resolved agent
-is recorded in the preflight's binding context and enforced on consume;
-the request's `agent_id` is never passed through to the decision logic.
+(The ADR-035 preflight/consume plan routes were removed with the connector
+invoke path in HAI-724; they are no longer served.)
 
 V1 socket behavior is
 unchanged, and one-shot `kei-proxy authorize` does not authorize v2.
@@ -158,13 +154,13 @@ its own connector credentials, and nothing it holds is visible to another.
   `session_id` is opaque and unguessable (`ks_` + 32 random bytes,
   base64url), held in daemon memory only.
 - **Use:** send `X-Kei-Session: <session_id>` on `POST /v1/authorize`,
-  `/v1/credentials:release`, `/v1/connectors:invoke`, `/v1/commands:run`, and
+  `/v1/credentials:release`, `/v1/commands:run`, and
   `GET`/`DELETE /v1/session`. A decision uses only that session's subject and
   credentials. A header, not a body field, so one mechanism works on every
   route (the bodies reject unknown fields).
 - **Fail closed:** an id that was never created, has ended or expired denies
   `session_not_found`: a `deny` decision on `/v1/authorize`, a deny on
-  `connectors:invoke` and `commands:run`, `404` on `GET`/`DELETE`.
+  `commands:run`, `404` on `GET`/`DELETE`.
 - **End:** `DELETE /v1/session` with the header ends that session and flushes
   only its credentials. A session unused for `KEI_SESSION_IDLE_TTL` (Go
   duration, default `30m`) ends too; each use restarts the clock. Policy
@@ -175,9 +171,9 @@ its own connector credentials, and nothing it holds is visible to another.
   limit is the host.
 - **Not bound to the connection:** HTTP clients pool and reuse socket
   connections, so the id, not the connection, names the session.
-- **CLI and hooks:** `kei-proxy authorize`, `connector invoke`, `run` and
+- **CLI and hooks:** `kei-proxy authorize`, `run` and
   `hook` take `--session` (default `$KEI_SESSION_ID`) and send the header.
-  Audit records (decision, connector execution, command run, harness hook)
+  Audit records (decision, command run, harness hook)
   carry `session_id`.
 
 **Deprecated, for one release:** a `kei.session/v1` PUT (answers `204`) and
@@ -213,65 +209,15 @@ core-dumps them.
 OS user can reach the owner-only socket. Only the explicitly configured owner
 routes listed above use that same-UID boundary without a bearer token; session
 creation and command execution remain token-authenticated. Credentialed work runs
-inside the daemon instead, through the two routes below.
+inside the daemon instead, through the route below.
 
-### `POST /v1/connectors:invoke` (`KEI_CREDENTIAL_RELEASE=identity`)
+### Removed: `POST /v1/connectors:invoke` (HAI-724)
 
-The daemon runs one governed connector call and returns only its result:
-
-1. **Decide.** The local PDP decides the call with the session subject. With
-   no session the call is denied `no_session`.
-2. **Describe.** The daemon builds the connector's description from the
-   bundle's `policy_set.connectors` entry and the installation audience.
-3. **Call the provider.** The call runs with the session's held credential,
-   through `credrelease.Store.Use`. A provider 401 gets the one re-fetch and
-   one retry.
-4. **Audit.** The execution record goes to the audit spool.
-
-```json
-{"schema":"kei.connector-invoke-request/v1","connector_id":"conn-github-0001",
- "capability":"repository.read","action":"read","resource":"repos/acme/kei",
- "input":{},"trace_id":"…","agent_id":"…"}
-```
-
-The request carries no subject and no credential. For a tokenless owner-session
-call, the caller omits `session_id`; the socket middleware binds the request to
-the owner session and the daemon uses that trusted session header. If a caller
-includes `session_id`, it must exactly match the bound header. The answer is
-`kei.connector-invoke-response/v1`, the same object `kei-proxy connector invoke`
-prints. Which connectors run here depends on the bundle
-(ADR-034, HAI-378 amendment):
-
-- **The v2 bundle carries `policy_set.connectors`.** Each connector's
-  non-secret descriptor decides. `oauth` with `account_model: per_user` uses
-  the session's own credential. `opaque_ref` (for example an `http_api`
-  connector named `crm`) reads its secret inside the daemon: the descriptor's
-  `kei://connectors/<id>/<field>` reference is looked up in the connector
-  reference index that `kei-proxy credential sync` writes, the index entry's
-  backend must equal `credential_backend` (else
-  `credential_backend_mismatch`), and the value is read from the tenant
-  secret store (AWS Secrets Manager or Azure Key Vault) with the runtime's own
-  cloud identity. It goes only on the provider request (for `http_api`, the
-  `credential_injection` header), and a provider response that contains it
-  denies `provider_error`. A routed connector without a descriptor, or one
-  that fails the contract, denies `descriptor_invalid`; `domain_delegation`
-  denies `account_model_not_supported`; shared `oauth` denies
-  `credential_source_not_supported`; a secret that was never delivered or
-  cannot be read denies `credential_unavailable`. There is no retry and no
-  fallback to the catalog.
-- **No `connectors` section (an older catalog).** Only providers whose
-  default credential is the subject's own OAuth connection run (github,
-  gmail, google_drive and linear, from the kei-connector-contracts setup
-  schemas). Connectors that need config or an opaque_ref secret deny
-  `credential_source_not_supported`.
-
-In identity mode `kei-proxy connector invoke` is a
-thin client of this route. It needs no control plane and holds no credential.
-For v2 tool calls, `agent_id` may be omitted: the daemon uses the default
-agent assigned by the authoritative runtime `whoami` identity. If no default
-agent is assigned, preflight denies; the harness must not invent an agent ID.
-It fails closed with `daemon_unavailable` when the daemon is unreachable, and
-it rejects `--user-id`/`--provider-user`.
+The daemon no longer executes connector API calls and `kei-proxy connector
+invoke` is gone (ADR-039: the runtime is decision-only; the ADR-035
+preflight/consume plan path went with it). The socket answers `404` for
+`POST /v1/connectors:invoke`, `POST /v1/preflight` and `POST /v1/consume`.
+Credential resolution for `POST /v1/commands:run` (below) is unchanged.
 
 ### `POST /v1/commands:run` (`KEI_CREDENTIAL_RELEASE=identity`)
 
@@ -289,8 +235,8 @@ unresolved. The daemon:
    it.
 2. **Resolves each reference.** With connector descriptors in the bundle,
    an `opaque_ref` reference must equal the descriptor's `credential_ref` and
-   resolves from the tenant secret store exactly as for
-   `POST /v1/connectors:invoke`, with the same deny codes; a `per_user`
+   resolves from the tenant secret store inside the daemon, with the same deny
+   codes; a `per_user`
    `oauth` reference resolves from the session-held credential. Without
    descriptors, only the `token`/`access_token` field of a session OAuth
    provider (github, gmail, google_drive, linear) resolves; anything else

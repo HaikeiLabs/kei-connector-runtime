@@ -11,8 +11,11 @@ Raised in review of the Grafana adapter (HAI-311).
 
 ### Issue
 
-Each connector adapter (`internal/connector/<provider>`) is a Go package that
-`internal/connector/invoke/execute.go` imports and registers. Every
+Each connector adapter (`internal/connector/<provider>`) is a Go package.
+Since HAI-724 removed the runtime's connector execution (`connector invoke`,
+`POST /v1/connectors:invoke`, `internal/connector/invoke`'s executor wiring),
+nothing imports them; they remain only until the HAI-724 cleanup slice deletes
+them. Every
 `kei-proxy` binary therefore carries every adapter, whether or not a tenant
 uses that provider. Each new connector makes the binary larger, and it also
 widens the code every customer runs and has to trust.

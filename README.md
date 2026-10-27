@@ -86,10 +86,10 @@ and releases publish to the `kei-proxy/` S3 prefix with `install.sh`,
 service was renamed, the artifact was deliberately not. CI asserts the binary
 name.
 
-The same binary supports two modes. **CLI commands** (`authorize`, `connector`,
+The same binary supports two modes. **CLI commands** (`authorize`,
 `collector`, `credential`, `model`, `runtime`, `identity`) each perform one
-governed action and exit; the `authorize` and `connector invoke`
-commands act as the PEP, and the PDP runs locally in the same process.
+governed action and exit; the `authorize`
+command acts as the PEP, and the PDP runs locally in the same process.
 **`kei-proxy serve`** is a long-running daemon that exposes a local HTTP/1.1
 API on a Unix socket (default `/run/kei-proxy/runtime.sock`, mode `0600`) and
 an optional TCP listener (`KEI_PROXY_LISTEN_ADDR`, default `:8085`). The
@@ -129,8 +129,8 @@ harness again within three checks, the timer doubles, up to one hour, and
 
 ### Deny hints
 
-Every deny response — the one-shot `authorize` CLI, the socket `authorize`
-route, and `connector invoke` (daemon and CLI) — carries a stable `hint` field
+Every deny response — the one-shot `authorize` CLI and the socket `authorize`
+route — carries a stable `hint` field
 next to `reason_code`: the concrete next step a developer should take. The hint
 is a pure function of `reason_code`, held in one table (`pkg/denyhint`), and is
 omitted (`omitempty`) for any code outside the table rather than offering a
