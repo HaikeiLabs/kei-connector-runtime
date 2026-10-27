@@ -1,0 +1,19 @@
+{
+  "schema_version": "kei.harness-builtins/v1",
+  "harness_kind": "cursor",
+  "harness_version": "2026.10.01",
+  "verified_at": "2026-10-26T00:00:00Z",
+  "tools": [
+    {"name":"cursor.read","service":"harness","executor":"cursor","registration":"cursor.read","source":"cursor","operation_class":"read","description":"Read files"},
+    {"name":"cursor.glob","service":"harness","executor":"cursor","registration":"cursor.glob","source":"cursor","operation_class":"read","description":"Find files by pattern"},
+    {"name":"cursor.grep","service":"harness","executor":"cursor","registration":"cursor.grep","source":"cursor","operation_class":"read","description":"Search file contents"},
+    {"name":"cursor.list","service":"harness","executor":"cursor","registration":"cursor.list","source":"cursor","operation_class":"read","description":"List files"},
+    {"name":"cursor.edit","service":"harness","executor":"cursor","registration":"cursor.edit","source":"cursor","operation_class":"write","description":"Edit files"},
+    {"name":"cursor.write","service":"harness","executor":"cursor","registration":"cursor.write","source":"cursor","operation_class":"write","description":"Write files"},
+    {"name":"cursor.shell","service":"harness","executor":"cursor","registration":"cursor.shell","source":"cursor","operation_class":"write","description":"Run shell commands"},
+    {"name":"cursor.webfetch","service":"harness","executor":"cursor","registration":"cursor.webfetch","source":"cursor","operation_class":"read","description":"Fetch web pages"},
+    {"name":"cursor.websearch","service":"harness","executor":"cursor","registration":"cursor.websearch","source":"cursor","operation_class":"read","description":"Search the web"},
+    {"name":"cursor.task","service":"harness","executor":"cursor","registration":"cursor.task","source":"cursor","operation_class":"write","description":"Delegate a task"},
+    {"name":"cursor.todowrite","service":"harness","executor":"cursor","registration":"cursor.todowrite","source":"cursor","operation_class":"write","description":"Update task list"}
+  ]
+}

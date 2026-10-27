@@ -152,7 +152,7 @@ func TestHarnessAuditFlushDropsRecordsMissingContractFields(t *testing.T) {
 	client := NewHarnessAuditFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
 	bad := []json.RawMessage{
 		json.RawMessage(`{"event_class":"harness_tool","tool":"web_search"}`),
-		json.RawMessage(strings.Replace(spoolHarnessLine, `"harness_kind":"claude"`, `"harness_kind":"cursor"`, 1)),
+		json.RawMessage(strings.Replace(spoolHarnessLine, `"harness_kind":"claude"`, `"harness_kind":"warp"`, 1)),
 		json.RawMessage(strings.Replace(spoolHarnessLine, `"args_digest":"hmac-sha256:abc"`, `"args_digest":""`, 1)),
 		json.RawMessage(`not json`),
 	}
@@ -161,6 +161,27 @@ func TestHarnessAuditFlushDropsRecordsMissingContractFields(t *testing.T) {
 	}
 	if records := decodeAuditRecords(t, srv.requests[0].body); len(records) != 1 {
 		t.Fatalf("records = %d, want only the valid one", len(records))
+	}
+}
+
+// TestHarnessAuditFlushShipsCursorKinds pins cursor as a forwardable audit
+// kind, like claude, codex and opencode.
+func TestHarnessAuditFlushShipsCursorKinds(t *testing.T) {
+	srv := &recordingServer{}
+	server := httptest.NewServer(http.HandlerFunc(srv.handler))
+	defer server.Close()
+
+	client := NewHarnessAuditFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
+	line := strings.Replace(spoolHarnessLine, `"harness_kind":"claude"`, `"harness_kind":"cursor"`, 1)
+	if _, err := client.FlushHarnessAudit(context.Background(), []json.RawMessage{json.RawMessage(line)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.requests) != 1 {
+		t.Fatalf("audit requests = %d, want the cursor record forwarded", len(srv.requests))
+	}
+	records := decodeAuditRecords(t, srv.requests[0].body)
+	if len(records) != 1 || records[0]["harness_kind"] != "cursor" {
+		t.Fatalf("records = %v, want one cursor record", records)
 	}
 }
 

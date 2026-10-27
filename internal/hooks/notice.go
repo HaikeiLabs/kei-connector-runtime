@@ -13,7 +13,7 @@ import (
 const nudgeRateLimit = 30 * time.Minute
 
 // writeNotice writes a non-blocking harness notice to w. All supported
-// harnesses (claude, codex, opencode) display a systemMessage JSON line.
+// harnesses (claude, codex, opencode, cursor) display a systemMessage JSON line.
 func writeNotice(w io.Writer, harness, msg string) error {
 	if w == nil {
 		return nil

@@ -935,7 +935,7 @@ func TestShellAuthorizeUsesTrustedDefaultAgentNotRequestAgentID(t *testing.T) {
 		t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
 	}
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	body := `{"schema":"kei.authorize-request/v1","tool":"pi.bash","agent_id":"attacker-agent","framework":"pi","shell_command":"git status --short","tool_args_digest":"` + digest + `"}`
+	body := `{"schema":"kei.authorize-request/v1","tool":"shell","agent_id":"attacker-agent","framework":"pi","shell_command":"git status --short","tool_args_digest":"` + digest + `"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
 	var response struct {

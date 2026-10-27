@@ -33,7 +33,6 @@ const (
 
 // EvaluateV2Shell applies ordered v2 harness policies to one shell command
 // using the authenticated session subject and the verified membership snapshot.
-// The bundle-level evaluator is defined in kei-connector-contracts.
 func (v *Verified) EvaluateV2Shell(argv []string, agentID string, subject *SessionSubject, now time.Time) Decision {
 	return v.toBundle().EvaluateV2Shell(argv, agentID, subject, now)
 }

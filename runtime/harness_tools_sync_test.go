@@ -69,7 +69,7 @@ func TestRunHarnessToolsSyncDiscoversAndPutsManifest(t *testing.T) {
 			t.Fatalf("unexpected harness route metadata: %+v", tool)
 		}
 	}
-	for _, name := range []string{"claude_code.read", "codex.shell", "opencode.read"} {
+	for _, name := range []string{"claude_code.read", "codex.shell", "opencode.read", "cursor.shell"} {
 		if !seen[name] {
 			t.Errorf("full installation manifest missing %s", name)
 		}

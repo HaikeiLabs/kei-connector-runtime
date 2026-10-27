@@ -96,7 +96,7 @@ func WriteAudit(cfg Config, record []byte) {
 }
 
 func validHarnessKind(kind string) bool {
-	return kind == "claude" || kind == "codex" || kind == "opencode"
+	return kind == "claude" || kind == "codex" || kind == "opencode" || kind == "cursor"
 }
 
 func validNativeDecision(phase, decision string) bool {

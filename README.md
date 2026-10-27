@@ -2,8 +2,8 @@
 
 The tenant-side connector runtime. It runs inside the customer's own
 environment, enforces ABAC policy decisions, resolves credentials from
-tenant-owned backends, executes approved provider operations, and emits
-redacted audit metadata.
+tenant-owned backends, and emits redacted audit metadata. Since HAI-724 the
+runtime performs no provider calls: it decides and releases credentials only.
 
 In the ADR-011 target architecture, the runtime hosts both a **Policy
 Decision Point (PDP)** and a **Policy Enforcement Point (PEP)**: the PDP
@@ -67,15 +67,15 @@ the denied invocation — a granted policy change reaches the runtime through th
 next bundle sync and affects later invocations.
 
 - Credentials are resolved **here**, from tenant-owned secret/OAuth backends.
-- Provider payloads and results stay **here**, inside the tenant runtime.
+- Provider payloads and results never pass through the runtime: since HAI-724
+  it decides and releases credentials only.
 - Only the decision and redacted audit metadata leave — digests, never content.
 - Failing closed on any ABAC denial, transport error, or unresolvable target
   ensures the data-plane boundary is enforced at the delegation point.
 
 Credential values, provider payloads, model prompts/completions and customer
 documents must never be sent to the Kei control plane. The authorize response
-carries no credential field, and connector invocation returns a metadata-only
-signed envelope that fails closed on any non-200.
+carries no credential field.
 
 ## The binary is `kei-proxy`
 
@@ -571,6 +571,17 @@ runtime-to-catalog **liveness** leg; a harness-local `/healthz` or `whoami` is
 readiness only. The installation, org, and workspace come only from the token
 via `whoami`. The heartbeat body never carries identity, credentials, provider
 payloads, or results.
+
+The body may additionally carry `connector_activations`: the connector ids
+whose **external** `credential_ref` credential sync actually resolved in this
+runtime's state directory (the connector reference index is written only after
+the secret was stored in the tenant backend and validated). Kei-managed
+references (`kei://connectors/...`) never appear — a connector using one is
+activated by its delivery acknowledgment instead. Ids are sent only on the
+beat after they resolve, retried on the next beat if that heartbeat fails, and
+not repeated once a beat carrying them succeeds; a restart may re-report an id
+(already-active connectors are a no-op in the catalog). Only the connector id
+is sent — never the reference or secret material.
 
 A transient catalog failure (unreachable, timeout, 5xx) is retried once within
 the tick and then the loop continues; it no longer exits the process. A `429`
