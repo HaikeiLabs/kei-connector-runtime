@@ -22,9 +22,9 @@ func TestValidatePolicyBundleV2SchemaAcceptsHarnessKinds(t *testing.T) {
 	doc["harness_match_semantics"] = "kei.harness-match/v1"
 	doc["harnesses"] = []any{map[string]any{"agent_id": "agent-fixture-0001", "kind": "pi"}}
 	doc["harness_kinds"] = []any{
-		map[string]any{"kind": "pi", "short_name": "pi", "tool_prefix": "pi.", "shell_tool": "pi.bash", "gateable": true},
+		map[string]any{"kind": "pi", "short_name": "pi", "tool_prefix": "pi.", "shell_tool": "pi.bash", "gateable": true, "decides_via": "pdp"},
 		map[string]any{
-			"kind": "claude_code", "short_name": "claude", "tool_prefix": "claude_code.", "shell_tool": "claude_code.bash", "gateable": true,
+			"kind": "claude_code", "short_name": "claude", "tool_prefix": "claude_code.", "shell_tool": "claude_code.bash", "gateable": true, "decides_via": "native",
 			"native_tools": []any{map[string]any{"tool_name": "claude_code.read", "native_name": "Read"}},
 		},
 	}
@@ -46,5 +46,21 @@ func TestValidatePolicyBundleV2SchemaAcceptsHarnessKinds(t *testing.T) {
 	widened, _ := json.Marshal(doc)
 	if err := validatePolicyBundleV2Schema(widened); err == nil {
 		t.Fatal("accepted a registry entry carrying a field outside the contract")
+	}
+}
+
+func TestValidatePolicyBundleV2SchemaRejectsAnUnknownDecidesVia(t *testing.T) {
+	raw, err := os.ReadFile("docs/contracts/examples/policy-bundle-v2.payload.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["harness_kinds"] = []any{map[string]any{"kind": "pi", "gateable": true, "decides_via": "telepathy"}}
+	bad, _ := json.Marshal(doc)
+	if err := validatePolicyBundleV2Schema(bad); err == nil {
+		t.Fatal("accepted a decides_via outside pdp|native")
 	}
 }
