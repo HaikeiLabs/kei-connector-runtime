@@ -51,7 +51,7 @@ func TestEvaluateHarness(t *testing.T) {
 		{name: "mcp server name", call: HarnessCall{Kind: "codex", MCPServer: "linear", MCPTool: "create_issue"}, outcome: "permit", policyID: "pol-5"},
 		{name: "agent source", call: HarnessCall{Kind: "claude_code", AgentID: "agent-x", Tool: "claude_code.edit"}, outcome: "permit", policyID: "pol-6"},
 		{name: "scope.agent_id skips other agents", call: HarnessCall{Kind: "codex", AgentID: "agent-z", Tool: "codex.view"}, outcome: "permit", policyID: "pol-b"},
-		{name: "unknown harness kind", call: HarnessCall{Kind: "cursor", Tool: "cursor.edit"}, outcome: "not_renderable", reason: policybundle.HarnessReasonUnsupportedKind},
+		{name: "unknown harness kind", call: HarnessCall{Kind: "unlisted", Tool: "unlisted.edit"}, outcome: "not_renderable", reason: policybundle.HarnessReasonUnsupportedKind},
 		{name: "custom kind is known and evaluated via pdp", call: HarnessCall{Kind: "custom", Tool: "any_tool"}, outcome: "not_renderable", reason: policybundle.HarnessReasonEvaluateViaPDP},
 	}
 	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
@@ -83,7 +83,7 @@ func TestEvaluateHarnessReasonCodes(t *testing.T) {
 			{ID: "pol-1", Src: "*", Dst: "*", Action: "permit"},
 		}
 		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
-		got, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "cursor"})
+		got, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "unlisted"})
 		if err != nil {
 			t.Fatal(err)
 		}
