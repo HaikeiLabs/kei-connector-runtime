@@ -31,9 +31,11 @@ const (
 	HarnessReasonEvaluateViaPDP   = harnessmatch.ReasonEvaluateViaPDP
 )
 
-// EvaluateV2PiShell applies ordered v2 harness policies to a Pi shell call
+// EvaluateV2Shell applies ordered v2 harness policies to one shell command
 // using the authenticated session subject and the verified membership snapshot.
-func (v *Verified) EvaluateV2PiShell(argv []string, agentID string, subject *SessionSubject, now time.Time) Decision {
+// The bundle-level evaluator is defined in kei-connector-contracts, which still
+// carries its original name.
+func (v *Verified) EvaluateV2Shell(argv []string, agentID string, subject *SessionSubject, now time.Time) Decision {
 	return v.toBundle().EvaluateV2PiShell(argv, agentID, subject, now)
 }
 

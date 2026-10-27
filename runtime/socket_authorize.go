@@ -1092,6 +1092,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
 	switch {
+	// "pi.bash" is the legacy adapter tool name (released contract); it becomes a generic "shell" in a follow-up ticket.
 	case req.Tool == "pi.bash":
 		if !validArgumentDigest(req.ToolArgsDigest) {
 			d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
@@ -1100,7 +1101,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		} else {
 			// Never use the caller's optional AgentID; the authenticated
 			// runtime identity supplies the installation's assigned default.
-			d, err = e.AuthorizePiShell(ctx, sessionID, req.ShellCommand, identity.AgentID)
+			d, err = e.AuthorizeShell(ctx, sessionID, req.ShellCommand, identity.AgentID)
 			unmatched = d.ReasonCode == "no_matching_policy"
 		}
 	case req.ShellCommand != "":

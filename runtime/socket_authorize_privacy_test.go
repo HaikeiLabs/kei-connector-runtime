@@ -8,7 +8,7 @@ import (
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 )
 
-func TestPiShellCommandIsExcludedFromSocketAuditEvent(t *testing.T) {
+func TestShellCommandIsExcludedFromSocketAuditEvent(t *testing.T) {
 	const command = "git status --short"
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	local := &LocalPDP{Sessions: pdp.NewSessions()}

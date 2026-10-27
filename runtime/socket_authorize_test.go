@@ -890,7 +890,7 @@ func bundleWithPolicy(t *testing.T, ids []policybundle.Identity, policies string
 	}`, now.Format(time.RFC3339), now.Add(12*time.Hour).Format(time.RFC3339), policies, string(idJSON)))
 }
 
-func TestPiShellAuthorizeUsesTrustedDefaultAgentNotRequestAgentID(t *testing.T) {
+func TestShellAuthorizeUsesTrustedDefaultAgentNotRequestAgentID(t *testing.T) {
 	now := time.Now().UTC()
 	raw, err := os.ReadFile(filepath.Join("..", "pkg", "policybundle", "testdata", "catalog-v2-bundle.json"))
 	if err != nil {
