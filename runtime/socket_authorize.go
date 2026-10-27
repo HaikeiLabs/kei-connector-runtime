@@ -174,13 +174,11 @@ type LocalPDP struct {
 	identity  atomic.Pointer[Identity]
 	emit      EmitAuditFunc
 	keychain  SessionKeychain
-	preflight *preflightService
 
 	// creds is the legacy default session's credential store; each named
 	// session has its own in sessionCreds (id -> *credrelease.Store).
 	creds              *credrelease.Store
 	sessionCreds       sync.Map
-	invoker            http.Handler
 	runner             http.Handler
 	toolRegistrar      ToolRegistrar
 	modelConfigHandler http.Handler
@@ -198,7 +196,7 @@ type LocalPDP struct {
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
-	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, preflight: newPreflightService(), stopSweep: make(chan struct{})}
+	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, stopSweep: make(chan struct{})}
 	if cfg != nil && cfg.ControlPlaneURL() != "" {
 		l.toolRegistrar = runtimeToolRegistrar{client: &runtimeClient{baseURL: strings.TrimRight(cfg.ControlPlaneURL(), "/"), client: &http.Client{Timeout: 15 * time.Second}}}
 	}
@@ -437,13 +435,6 @@ func (l *LocalPDP) sessionEnded(id string) {
 	}
 }
 
-// SetConnectorInvoker serves POST /v1/connectors:invoke with h (HAI-346 L3b):
-// governed connector API calls made on behalf of tool calls and skills, run
-// in this daemon with the session-held credential (it is never returned),
-// behind the socket's config and runtime-token checks. Without one the route
-// is not served.
-func (l *LocalPDP) SetConnectorInvoker(h http.Handler) { l.invoker = h }
-
 // SetCommandRunner serves POST /v1/commands:run with h (HAI-346 L3c): native
 // CLI tools for Unix/local-process harnesses (Claude Code, Codex, opencode via
 // `kei-proxy run -- <cmd>`), spawned by this daemon with the session-held
@@ -585,9 +576,6 @@ func (l *LocalPDP) BundleDigest() string {
 // credential. The serve daemon calls it on exit.
 func (l *LocalPDP) Close() {
 	l.closeOnce.Do(func() { close(l.stopSweep) })
-	if l.preflight != nil {
-		l.preflight.store.Invalidate()
-	}
 	l.flushCredentials()
 }
 
@@ -603,9 +591,6 @@ func (l *LocalPDP) flushCredentials() {
 }
 
 func (l *LocalPDP) SetIdentity(identity *Identity) {
-	if l.preflight != nil {
-		l.preflight.store.Invalidate()
-	}
 	if identity == nil || identity.WorkspaceID == nil {
 		return
 	}
@@ -619,9 +604,6 @@ func (l *LocalPDP) SetIdentity(identity *Identity) {
 }
 
 func (l *LocalPDP) AfterSync(err error) {
-	if l.preflight != nil {
-		l.preflight.store.Invalidate()
-	}
 	e := l.evaluator.Load()
 	if errors.Is(err, ErrInstallationRevoked) {
 		l.ownerMu.Lock()
@@ -673,9 +655,6 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/authorize" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/session" && (r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodGet):
 		case r.URL.Path == "/v1/policy-bundle/status" && r.Method == http.MethodGet:
-		case r.URL.Path == "/v1/preflight" && r.Method == http.MethodPost && l.preflight != nil:
-		case r.URL.Path == "/v1/consume" && r.Method == http.MethodPost && l.preflight != nil:
-		case r.URL.Path == "/v1/connectors:invoke" && r.Method == http.MethodPost && l.invoker != nil:
 		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		case r.URL.Path == "/v1/credentials:release" && r.Method == http.MethodPost && l.creds != nil:
 		case r.URL.Path == "/v1/tools:register" && r.Method == http.MethodPost:
@@ -689,7 +668,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			return
 		}
 		authenticated := checkAuth(r)
-		routeAllowsOwner := r.Method == http.MethodPost && (r.URL.Path == "/v1/authorize" || r.URL.Path == "/v1/preflight" || r.URL.Path == "/v1/consume" || r.URL.Path == "/v1/connectors:invoke" || r.URL.Path == "/v1/credentials:release")
+		routeAllowsOwner := r.Method == http.MethodPost && (r.URL.Path == "/v1/authorize" || r.URL.Path == "/v1/credentials:release")
 		l.ownerMu.RLock()
 		ownerID, ownerEnabled, ownerUnavailable := l.ownerID, l.tokenlessOwnerSession, l.ownerUnavailable
 		l.ownerMu.RUnlock()
@@ -713,20 +692,10 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.handleAuthorize(w, r, authenticated)
 		case r.URL.Path == "/v1/policy-bundle/status":
 			l.handlePolicyBundleStatus(w)
-		case r.URL.Path == "/v1/preflight":
-			l.handlePreflight(w, r)
-		case r.URL.Path == "/v1/consume":
-			l.handleConsume(w, r)
-		// The two credentialed routes. Both run inside this serve daemon
-		// with the session-held credentials, which never leave it:
-		//   - connectors:invoke runs governed connector API calls on behalf
-		//     of tool calls and skills (any harness, via `kei-proxy
-		//     connector invoke` or this socket directly);
-		//   - commands:run spawns native CLI tools (gh, git, ...) for
-		//     Unix/local-process harnesses such as Claude Code, Codex and
-		//     opencode, via `kei-proxy run -- <cmd>`.
-		case r.URL.Path == "/v1/connectors:invoke":
-			l.invoker.ServeHTTP(w, r)
+		// The credentialed route runs inside this serve daemon with the
+		// session-held credentials, which never leave it: commands:run spawns
+		// native CLI tools (gh, git, ...) for Unix/local-process harnesses
+		// such as Claude Code, Codex and opencode, via `kei-proxy run -- <cmd>`.
 		case r.URL.Path == "/v1/commands:run":
 			l.runner.ServeHTTP(w, r)
 		case r.URL.Path == "/v1/tools:register":
@@ -810,9 +779,6 @@ func (l *LocalPDP) handleToolRegistration(w http.ResponseWriter, r *http.Request
 // new named session and answers 201 with its id; a kei.session/v1 body
 // replaces the legacy default session (deprecated) and answers 204.
 func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
-	if l.preflight != nil {
-		l.preflight.store.Invalidate()
-	}
 	body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSocketRequest))
 	if readErr != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request body is invalid")
@@ -998,111 +964,6 @@ func resolveBundleSubject(e *pdp.Evaluator, source, externalID string) pdp.Subje
 		sub.Token = id.SubjectToken
 	}
 	return sub
-}
-
-type socketPreflightRequest struct {
-	Schema          string          `json:"schema"`
-	Tool            string          `json:"tool"`
-	SessionID       string          `json:"session_id"`
-	AgentID         string          `json:"agent_id,omitempty"`
-	Arguments       json.RawMessage `json:"arguments"`
-	Context         json.RawMessage `json:"context"`
-	ParentSpan      string          `json:"parent_span,omitempty"`
-	DelegationDepth int             `json:"delegation_depth,omitempty"`
-}
-
-type socketPreflightResponse struct {
-	Schema    string    `json:"schema"`
-	Handle    string    `json:"handle"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-type socketConsumeOperation struct {
-	ID                 string `json:"id"`
-	ConnectorID        string `json:"connector_id"`
-	Capability         string `json:"capability"`
-	Action             string `json:"action"`
-	Resource           string `json:"resource,omitempty"`
-	ResourceType       string `json:"resource_type,omitempty"`
-	ResourceID         string `json:"resource_id,omitempty"`
-	ResourceParent     string `json:"resource_parent,omitempty"`
-	ResourceParentType string `json:"resource_parent_type,omitempty"`
-	InputDigest        string `json:"input_digest"`
-}
-
-type socketConsumeRequest struct {
-	Schema          string                 `json:"schema"`
-	Handle          string                 `json:"handle"`
-	SessionID       string                 `json:"session_id"`
-	Tool            string                 `json:"tool"`
-	Arguments       json.RawMessage        `json:"arguments"`
-	Context         json.RawMessage        `json:"context"`
-	AgentID         string                 `json:"agent_id,omitempty"`
-	Operation       socketConsumeOperation `json:"operation"`
-	ParentSpan      string                 `json:"parent_span,omitempty"`
-	DelegationDepth int                    `json:"delegation_depth,omitempty"`
-}
-
-func (l *LocalPDP) handlePreflight(w http.ResponseWriter, r *http.Request) {
-	var req socketPreflightRequest
-	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.preflight-request/v1" || req.Tool == "" || !jsonJSONObject(req.Arguments) || (len(req.Context) > 0 && !jsonJSONObject(req.Context)) {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
-		return
-	}
-	boundSession := session.FromRequest(r)
-	if req.SessionID == "" {
-		req.SessionID = boundSession
-	}
-	if req.SessionID == "" || boundSession != req.SessionID {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must contain a tool and one JSON object of arguments")
-		return
-	}
-	if l.trustedAgentID() == "" {
-		writeRuntimeError(w, http.StatusForbidden, "agent_not_assigned", "the trusted default agent is unavailable")
-		return
-	}
-	if req.AgentID != "" && req.AgentID != l.trustedAgentID() {
-		writeRuntimeError(w, http.StatusForbidden, "agent_mismatch", "the request agent is not this installation's default agent")
-		return
-	}
-	grant, err := l.PreflightV2(r.Context(), req.SessionID, req.Tool, req.AgentID, req.Arguments, req.Context, req.ParentSpan, req.DelegationDepth, 10*time.Second)
-	if err != nil {
-		writeRuntimeError(w, http.StatusForbidden, "preflight_denied", "the complete operation plan was not authorized")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(socketPreflightResponse{Schema: "kei.preflight-response/v1", Handle: grant.Handle, ExpiresAt: grant.ExpiresAt})
-}
-
-func (l *LocalPDP) handleConsume(w http.ResponseWriter, r *http.Request) {
-	var req socketConsumeRequest
-	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != "kei.consume-request/v1" || req.Handle == "" || req.Tool == "" || req.Operation.ID == "" || req.Operation.ConnectorID == "" || req.Operation.Capability == "" || req.Operation.Action == "" || req.Operation.InputDigest == "" {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
-		return
-	}
-	boundSession := session.FromRequest(r)
-	if req.SessionID == "" {
-		req.SessionID = boundSession
-	}
-	if req.SessionID == "" || boundSession != req.SessionID {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must identify a preflight handle and exact operation")
-		return
-	}
-	if l.trustedAgentID() == "" {
-		writeRuntimeError(w, http.StatusForbidden, "agent_not_assigned", "the trusted default agent is unavailable")
-		return
-	}
-	if req.AgentID != "" && req.AgentID != l.trustedAgentID() {
-		writeRuntimeError(w, http.StatusForbidden, "agent_mismatch", "the request agent is not this installation's default agent")
-		return
-	}
-	op := Operation{ID: req.Operation.ID, ConnectorID: req.Operation.ConnectorID, Capability: req.Operation.Capability, Action: req.Operation.Action, Resource: req.Operation.Resource, ResourceType: req.Operation.ResourceType, ResourceID: req.Operation.ResourceID, ResourceParent: req.Operation.ResourceParent, ResourceParentType: req.Operation.ResourceParentType, InputDigest: req.Operation.InputDigest}
-	if err := l.ConsumeV2(r.Context(), req.Handle, req.SessionID, req.Tool, req.AgentID, req.Arguments, req.Context, op, req.ParentSpan, req.DelegationDepth); err != nil {
-		writeRuntimeError(w, http.StatusForbidden, "authorization_invalid", "the operation authorization is invalid or expired")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 type socketSessionResponse struct {
@@ -1596,11 +1457,6 @@ func validArgumentDigest(value string) bool {
 		}
 	}
 	return true
-}
-
-func jsonJSONObject(raw json.RawMessage) bool {
-	var object map[string]json.RawMessage
-	return len(raw) > 0 && json.Unmarshal(raw, &object) == nil && object != nil
 }
 
 func decodeSocketJSON(w http.ResponseWriter, r *http.Request, dst any) error {

@@ -117,7 +117,6 @@ var socketRouteMatrix = []struct{ method, path, body string }{
 	{http.MethodGet, "/v1/session/credentials", ""},
 	{http.MethodGet, "/v1/credentials", ""},
 	{http.MethodGet, "/v1/credentials/github", ""},
-	{http.MethodPost, "/v1/connectors:invoke", `{"tool":"github"}`},
 	{http.MethodPost, "/v1/commands:run", `{"argv":["gh"]}`},
 	{http.MethodGet, "/healthz", ""},
 	{http.MethodGet, "/readyz", ""},
