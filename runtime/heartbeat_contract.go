@@ -82,6 +82,19 @@ type HeartbeatReport struct {
 	Counters         *HeartbeatCounter          `json:"counters,omitempty"`
 	ToolSyncStatus   string                     `json:"tool_sync_status,omitempty"`
 	PolicyBundle     *policybundlehealth.Health `json:"policy_bundle,omitempty"`
+
+	// ConnectorActivations names connectors whose external credential_ref this
+	// runtime resolved through credential sync; the catalog moves a pending
+	// external-ref connector to active when it hears about it here. Kei-managed
+	// credentials are activated by their delivery acknowledgment instead, so
+	// they never appear in this report.
+	ConnectorActivations []ConnectorActivation `json:"connector_activations,omitempty"`
+}
+
+// ConnectorActivation names one connector by its id. It carries no reference
+// or secret material.
+type ConnectorActivation struct {
+	ConnectorID string `json:"connector_id"`
 }
 
 type HeartbeatCounter struct {

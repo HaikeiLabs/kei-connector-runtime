@@ -288,6 +288,15 @@ type HeartbeatLoop struct {
 
 	AppendLifecycle func(LifecycleEvent) error
 	PolicyBundle    func() *policybundlehealth.Health
+
+	// ConnectorActivations supplies the connector ids whose external
+	// credential_ref this runtime has resolved through credential sync. The
+	// loop reports the ids still owed a report on the next beat, keeps them
+	// queued across failed beats, and stops re-reporting an id once a beat
+	// carrying it succeeds. It is nil when the loop has nothing to report.
+	ConnectorActivations func() ([]string, error)
+
+	reportedActivations map[string]bool
 }
 
 func (l *HeartbeatLoop) retryDelay() time.Duration {
@@ -347,6 +356,9 @@ func (l *HeartbeatLoop) send(ctx context.Context) *HeartbeatFailure {
 	if l.PolicyBundle != nil {
 		report.PolicyBundle = l.PolicyBundle()
 	}
+	if activations := l.pendingActivations(); len(activations) > 0 {
+		report.ConnectorActivations = activations
+	}
 	if l.Versioned {
 		report.Seq = l.seq
 		report.Counters = &HeartbeatCounter{BeatsFailedSinceOK: l.failedSinceOK}
@@ -354,7 +366,51 @@ func (l *HeartbeatLoop) send(ctx context.Context) *HeartbeatFailure {
 	if err := l.Client.Heartbeat(ctx, l.Token, report); err != nil {
 		return ClassifyHeartbeatError(err)
 	}
+	l.markActivationsReported(report.ConnectorActivations)
 	return nil
+}
+
+// pendingActivations resolves the connector ids still owed a heartbeat
+// activation report. A supplier error never blocks the beat: the ids are
+// skipped this beat and picked up again on the next one.
+func (l *HeartbeatLoop) pendingActivations() []ConnectorActivation {
+	if l.ConnectorActivations == nil {
+		return nil
+	}
+	ids, err := l.ConnectorActivations()
+	if err != nil {
+		if l.Warn != nil {
+			fmt.Fprintf(l.Warn, "runtime heartbeat: skipping connector activation report: %v\n", err)
+		}
+		return nil
+	}
+	pending := make([]ConnectorActivation, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || l.reportedActivations[id] {
+			continue
+		}
+		pending = append(pending, ConnectorActivation{ConnectorID: id})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	return pending
+}
+
+// markActivationsReported records the ids carried by a beat the catalog
+// accepted, so the loop stops re-reporting them in this process. A restart
+// may re-report an id the catalog has already activated, which is a no-op
+// there.
+func (l *HeartbeatLoop) markActivationsReported(activations []ConnectorActivation) {
+	if len(activations) == 0 {
+		return
+	}
+	if l.reportedActivations == nil {
+		l.reportedActivations = make(map[string]bool, len(activations))
+	}
+	for _, activation := range activations {
+		l.reportedActivations[activation.ConnectorID] = true
+	}
 }
 
 func (l *HeartbeatLoop) Record(failure *HeartbeatFailure, next time.Duration) {
