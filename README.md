@@ -572,6 +572,17 @@ readiness only. The installation, org, and workspace come only from the token
 via `whoami`. The heartbeat body never carries identity, credentials, provider
 payloads, or results.
 
+The body may additionally carry `connector_activations`: the connector ids
+whose **external** `credential_ref` credential sync actually resolved in this
+runtime's state directory (the connector reference index is written only after
+the secret was stored in the tenant backend and validated). Kei-managed
+references (`kei://connectors/...`) never appear — a connector using one is
+activated by its delivery acknowledgment instead. Ids are sent only on the
+beat after they resolve, retried on the next beat if that heartbeat fails, and
+not repeated once a beat carrying them succeeds; a restart may re-report an id
+(already-active connectors are a no-op in the catalog). Only the connector id
+is sent — never the reference or secret material.
+
 A transient catalog failure (unreachable, timeout, 5xx) is retried once within
 the tick and then the loop continues; it no longer exits the process. A `429`
 stretches the next tick to its `Retry-After`, capped at five intervals. Ticks

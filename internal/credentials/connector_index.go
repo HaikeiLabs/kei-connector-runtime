@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
@@ -109,6 +111,49 @@ func ReadConnectorReference(path, connectorID, field string) (ConnectorReference
 // sync writes in stateDir.
 func ConnectorIndexPath(stateDir string) string {
 	return filepath.Join(stateDir, "connector-credentials.json")
+}
+
+// keiManagedRefPrefix marks a kei-managed credential reference
+// (kei://connectors/<id>/<field>). Connectors resolved through such a
+// reference are activated by their delivery acknowledgment, never by the
+// heartbeat.
+const keiManagedRefPrefix = "kei://connectors/"
+
+// ResolvedExternalConnectorIDs returns the distinct connector ids whose
+// external credential_ref this runtime has actually resolved through
+// credential sync: the connector reference index records a delivery only
+// after the secret was written to the tenant store and validated. Entries
+// whose resolved reference is kei-managed are excluded, so a reported id
+// always names an external credential_ref. A missing index means nothing has
+// resolved yet and yields no ids and no error; an unreadable or unsafe index
+// fails closed with an error. Ids are sorted for stable reporting.
+func ResolvedExternalConnectorIDs(path string) ([]string, error) {
+	if _, err := os.Lstat(filepath.Dir(path)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+	}
+	index, err := readConnectorReferenceIndex(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	seen := make(map[string]bool, len(index.Entries))
+	ids := make([]string, 0, len(index.Entries))
+	for _, entry := range index.Entries {
+		if entry.SecretRef == "" || strings.HasPrefix(entry.SecretRef, keiManagedRefPrefix) || seen[entry.ConnectorID] {
+			continue
+		}
+		if _, err := uuid.Parse(entry.ConnectorID); err != nil {
+			continue
+		}
+		seen[entry.ConnectorID] = true
+		ids = append(ids, entry.ConnectorID)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 func connectorReferenceKey(connectorID, field string) string { return connectorID + "/" + field }
