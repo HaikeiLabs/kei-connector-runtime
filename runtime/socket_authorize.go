@@ -988,7 +988,11 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
 	d = pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
 	auditTrustedAgent = req.Tool == "shell"
-	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
+	if sessionID == "" {
+		d = pdp.Decision{ReasonCode: "session_required", DenySource: "identity", Reason: "a named session is required"}
+		return d, auditTrustedAgent, false, nil
+	}
+	if !l.Sessions.Exists(sessionID) {
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
 		return d, auditTrustedAgent, false, nil
 	}

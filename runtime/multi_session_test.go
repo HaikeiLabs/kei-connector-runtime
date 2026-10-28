@@ -334,9 +334,10 @@ func TestLegacyDefaultSession(t *testing.T) {
 	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("legacy PUT = %d %s", rec.Code, rec.Body.String())
 	}
+	alice := createSession(t, h, "ext-alice")
 	bob := createSession(t, h, "ext-bob")
-	if d, _ := authorizeIn(t, h, ""); d != "permit" {
-		t.Errorf("default session (alice): %s, want permit", d)
+	if d, _ := authorizeIn(t, h, alice); d != "permit" {
+		t.Errorf("named session (alice): %s, want permit", d)
 	}
 	if d, _ := authorizeIn(t, h, bob); d != "deny" {
 		t.Errorf("named session (bob): %s, want deny", d)
@@ -348,12 +349,13 @@ func TestLegacyDefaultSession(t *testing.T) {
 	if tok, err := credentialIn(l, pdp.DefaultSession, "u-alice"); err != nil || tok != "gh-st-alice" {
 		t.Errorf("default credential: %q %v", tok, err)
 	}
-	// A legacy PUT replaces only the default session.
+	// A legacy PUT replaces only the default session; named authorization is
+	// unaffected.
 	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-bob"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("second legacy PUT = %d", rec.Code)
 	}
-	if d, _ := authorizeIn(t, h, ""); d != "deny" {
-		t.Errorf("default session after replacement: %s, want deny (bob)", d)
+	if d, _ := authorizeIn(t, h, alice); d != "permit" {
+		t.Errorf("named session after default replacement: %s, want permit (alice)", d)
 	}
 	if tok, err := credentialIn(l, bob, "u-bob"); err != nil || tok != "gh-st-bob" {
 		t.Errorf("named session after a legacy PUT: %q %v", tok, err)
@@ -370,8 +372,7 @@ func TestLegacyDefaultSession(t *testing.T) {
 	}
 }
 
-// TestMultiSessionAuditCarriesSessionID: decision events name the session;
-// default-session events have no session_id.
+// TestMultiSessionAuditCarriesSessionID: decision events name the session.
 func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	var mu sync.Mutex
 	var events []map[string]any
@@ -384,8 +385,9 @@ func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	}
 	_, h := multiSessionPDP(t, &perSubjectI11{}, emit)
 	alice := createSession(t, h, "ext-alice")
+	bob := createSession(t, h, "ext-bob")
 	authorizeIn(t, h, alice)
-	authorizeIn(t, h, "")
+	authorizeIn(t, h, bob)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(events) != 2 {
@@ -394,8 +396,8 @@ func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	if events[0]["session_id"] != alice || events[0]["invoking_subject"] != "user:u-alice" {
 		t.Errorf("named-session event = %v", events[0])
 	}
-	if _, ok := events[1]["session_id"]; ok {
-		t.Errorf("default-session event has a session_id: %v", events[1])
+	if events[1]["session_id"] != bob || events[1]["invoking_subject"] != "user:u-bob" {
+		t.Errorf("named-session event = %v", events[1])
 	}
 }
 
