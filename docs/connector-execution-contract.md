@@ -5,8 +5,15 @@ runtime no longer executes provider calls: `kei-proxy connector invoke`, the
 `POST /v1/connectors:invoke` socket route and the daemon executor were removed
 in 2026-10-26 (runtime), and the catalog-side invoke path
 (`POST /api/v1/data-connectors/invoke`, `internal/connectorinvoke`) is being
-removed separately (HAI-724). This document is retained for historical
-reference and for the credential-release sections the runtime still uses.
+removed separately (HAI-724). On 2026-10-27 the runtime's native connector
+executors and the `http_api` invoker were deleted outright: every
+`internal/connector/<provider>` package, `internal/connector/httpapi`,
+`internal/connector/input`, `internal/connector/skillsrepo`,
+`internal/connector/connectortest`, and the root `internal/connector` package
+gone; only `internal/connector/invoke` (the decision types shared with
+`internal/run`) and `internal/connector/credentials` remain. This document is
+retained for historical reference and for the credential-release sections the
+runtime still uses.
 
 Status: **Accepted**. Decisions D1–D5 were settled by the user on 2026-09-28
 (see [Decisions](#decisions)). Implementation order: `kei-connector-contracts`
@@ -561,14 +568,14 @@ Redaction per capability:
   Investor is `{id, name, firm, email, stage, created_at, updated_at}`; any
   other field the Worker returns is dropped.
 
-`http_api` (D4) is the existing `ExecuteHTTP` path
-(`internal/connector/httpapi`): one
+`http_api` (D4) was the existing `ExecuteHTTP` path
+(`internal/connector/httpapi`, deleted in HAI-724): one
 allow-listed base URL per connector, a shared-secret key injected into the
 configured header or query parameter, SSRF checks on the resolved addresses,
-a same-host redirect policy, a timeout, and a response-size limit. It returns
-redacted bytes rather than a typed struct, so it is the one capability whose
-result is not re-encoded. The connector's `redaction` rules are its
-allowlist. MarketingSite's `/api/leads` (key only) is reached through
+a same-host redirect policy, a timeout, and a response-size limit. It returned
+redacted bytes rather than a typed struct, so it was the one capability whose
+result was not re-encoded. The connector's `redaction` rules were its
+allowlist. MarketingSite's `/api/leads` (key only) was reached through
 `http_api`, not through `crm`.
 
 **The http_api resource is the request.** Its resource is the exact request
@@ -676,7 +683,8 @@ package imports `.../providers`.
 
 ### Runtime layout
 
-In `kei-connector-runtime`, connector code lives under `internal/connector`:
+Until HAI-724 deleted them (2026-10-27), in `kei-connector-runtime` connector
+code lived under `internal/connector`:
 `invoke` (the command, the catalog call, execution dispatch, and audit),
 `input` (input parsing and per-capability validation), `credentials` (the two
 credential paths), and one package per connector: `gmail`, `googledrive`,
@@ -687,12 +695,14 @@ in-memory one), `crm` (the MarketingSite Worker client and the D3
 assertion signing), `httpapi` (the governed HTTP executor), and
 `skillsrepo` (the contract's skills repository client and GitHub backend,
 plus the archive digest and size check). Each connector
-package wraps its `kei-connector-contracts/providers` client and applies that
+package wrapped its `kei-connector-contracts/providers` client and applied that
 connector's redaction.
 
-Every adapter is compiled into every `kei-proxy` binary. That is known tech
-debt (HAI-320): see [tech-debt.md](tech-debt.md) for the measurement, the
-options, and the interim rule (no heavy SDKs in adapters; use `net/http`).
+Every one of those packages is now deleted; the runtime binary contains no
+adapter or executor code. Only `invoke` (the decision types shared with
+`internal/run`) and `credentials` remain. The former "every adapter is
+compiled into every `kei-proxy` binary" debt (HAI-320) is resolved:
+see [tech-debt.md](tech-debt.md).
 
 ## 7. Errors and fail-closed rules
 

@@ -1,0 +1,1 @@
+{"tool_name":"Shell","tool_input":{"command":"git status --short"},"cwd":"/tmp/project","session_id":"cursor-session-1","tool_use_id":"tu-4","phase":"pre","native_decision":"deny"}

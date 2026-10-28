@@ -1,9 +1,11 @@
 package runtime_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -202,14 +204,10 @@ func TestMultiSessionUnknownIDFailsClosed(t *testing.T) {
 }
 
 // TestMultiSessionDeleteIsolation: DELETE ends one session and flushes only
-// its credentials; other sessions and the default session are untouched.
+// its credentials; other named sessions remain untouched.
 func TestMultiSessionDeleteIsolation(t *testing.T) {
 	l, h := multiSessionPDP(t, &perSubjectI11{}, nil)
-	l.SetKeychain(&fakeKeychain{token: "st-default", userID: "u-default"})
 	alice, bob := createSession(t, h, "ext-alice"), createSession(t, h, "ext-bob")
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("legacy PUT = %d", rec.Code)
-	}
 
 	if rec := sessionRequest(h, http.MethodDelete, "/v1/session", alice, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE alice = %d", rec.Code)
@@ -223,8 +221,8 @@ func TestMultiSessionDeleteIsolation(t *testing.T) {
 	if tok, err := credentialIn(l, bob, "u-bob"); err != nil || tok != "gh-st-bob" {
 		t.Errorf("bob's credential after alice's DELETE: %q %v", tok, err)
 	}
-	if tok, err := credentialIn(l, pdp.DefaultSession, "u-default"); err != nil || tok != "gh-st-default" {
-		t.Errorf("default credential after alice's DELETE: %q %v", tok, err)
+	if l.Sessions.Exists(pdp.DefaultSession) {
+		t.Error("empty session exists after alice's DELETE")
 	}
 	if rec := sessionRequest(h, http.MethodGet, "/v1/session", bob, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"session_id":"`+bob+`"`) {
 		t.Errorf("GET bob = %d %s", rec.Code, rec.Body.String())
@@ -327,51 +325,59 @@ func TestMultiSessionSlowSessionDoesNotBlockAnother(t *testing.T) {
 	}
 }
 
-// TestLegacyDefaultSession: requests without a session id keep the single
-// default session (kei.session/v1), unaffected by named sessions.
-func TestLegacyDefaultSession(t *testing.T) {
+// TestLegacyDefaultSessionIsNotStored verifies the removed default storage
+// cannot be populated; named sessions remain independent and live.
+func TestLegacyDefaultSessionIsNotStored(t *testing.T) {
 	l, h := multiSessionPDP(t, &perSubjectI11{}, nil)
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("legacy PUT = %d %s", rec.Code, rec.Body.String())
+	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Fatalf("legacy PUT = %d %s, want invalid_request", rec.Code, rec.Body.String())
 	}
+	if l.Sessions.Exists(pdp.DefaultSession) {
+		t.Fatal("empty session exists after legacy PUT")
+	}
+	alice := createSession(t, h, "ext-alice")
 	bob := createSession(t, h, "ext-bob")
-	if d, _ := authorizeIn(t, h, ""); d != "permit" {
-		t.Errorf("default session (alice): %s, want permit", d)
+	if d, _ := authorizeIn(t, h, alice); d != "permit" {
+		t.Errorf("named session (alice): %s, want permit", d)
 	}
 	if d, _ := authorizeIn(t, h, bob); d != "deny" {
 		t.Errorf("named session (bob): %s, want deny", d)
 	}
-	rec := getSession(t, h)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"schema":"kei.session/v1"`) || strings.Contains(rec.Body.String(), "session_id") {
-		t.Errorf("GET default = %d %s", rec.Code, rec.Body.String())
-	}
-	if tok, err := credentialIn(l, pdp.DefaultSession, "u-alice"); err != nil || tok != "gh-st-alice" {
-		t.Errorf("default credential: %q %v", tok, err)
-	}
-	// A legacy PUT replaces only the default session.
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-bob"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("second legacy PUT = %d", rec.Code)
-	}
-	if d, _ := authorizeIn(t, h, ""); d != "deny" {
-		t.Errorf("default session after replacement: %s, want deny (bob)", d)
-	}
-	if tok, err := credentialIn(l, bob, "u-bob"); err != nil || tok != "gh-st-bob" {
-		t.Errorf("named session after a legacy PUT: %q %v", tok, err)
-	}
-	// A legacy DELETE ends only the default session.
-	if rec := sessionRequest(h, http.MethodDelete, "/v1/session", "", ""); rec.Code != http.StatusNoContent {
-		t.Fatalf("legacy DELETE = %d", rec.Code)
-	}
-	if rec := getSession(t, h); rec.Code != http.StatusNotFound {
-		t.Errorf("default session after DELETE: %d", rec.Code)
-	}
-	if rec := sessionRequest(h, http.MethodGet, "/v1/session", bob, ""); rec.Code != http.StatusOK {
-		t.Errorf("named session after a legacy DELETE: %d", rec.Code)
+	if _, ok := l.Sessions.Get(pdp.DefaultSession); ok {
+		t.Fatal("empty session remains readable")
 	}
 }
 
-// TestMultiSessionAuditCarriesSessionID: decision events name the session;
-// default-session events have no session_id.
+func TestEmptySessionGetAndDeleteAreNotFound(t *testing.T) {
+	_, h := multiSessionPDP(t, &perSubjectI11{}, nil)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		rec := sessionRequest(h, method, "/v1/session", "", "")
+		var out struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		if rec.Code != http.StatusNotFound || out.Error.Code != pdp.ReasonSessionNotFound {
+			t.Errorf("%s empty session = %d %s, want 404 session_not_found", method, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestEmptySessionRoutesDoNotEmitDeprecationWarning(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	_, h := multiSessionPDP(t, &perSubjectI11{}, nil)
+	sessionRequest(h, http.MethodGet, "/v1/session", "", "")
+	sessionRequest(h, http.MethodDelete, "/v1/session", "", "")
+	if strings.Contains(logs.String(), "default_session_deprecated") {
+		t.Fatalf("empty session routes emitted deprecation warning: %s", logs.String())
+	}
+}
+
+// TestMultiSessionAuditCarriesSessionID: decision events name the session.
 func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	var mu sync.Mutex
 	var events []map[string]any
@@ -384,8 +390,9 @@ func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	}
 	_, h := multiSessionPDP(t, &perSubjectI11{}, emit)
 	alice := createSession(t, h, "ext-alice")
+	bob := createSession(t, h, "ext-bob")
 	authorizeIn(t, h, alice)
-	authorizeIn(t, h, "")
+	authorizeIn(t, h, bob)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(events) != 2 {
@@ -394,8 +401,31 @@ func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	if events[0]["session_id"] != alice || events[0]["invoking_subject"] != "user:u-alice" {
 		t.Errorf("named-session event = %v", events[0])
 	}
-	if _, ok := events[1]["session_id"]; ok {
-		t.Errorf("default-session event has a session_id: %v", events[1])
+	if events[1]["session_id"] != bob || events[1]["invoking_subject"] != "user:u-bob" {
+		t.Errorf("named-session event = %v", events[1])
+	}
+}
+
+func TestAuditAlwaysCarriesSessionID(t *testing.T) {
+	var mu sync.Mutex
+	var events []map[string]any
+	emit := func(data json.RawMessage) {
+		var event map[string]any
+		_ = json.Unmarshal(data, &event)
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}
+	_, h := multiSessionPDP(t, &perSubjectI11{}, emit)
+	authorizeIn(t, h, "")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 0 {
+		t.Fatal("authorization emitted no audit event")
+	}
+	value, exists := events[0]["session_id"]
+	if !exists || value != "" {
+		t.Fatalf("empty-session audit session_id = %#v, exists=%t; want empty string", value, exists)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/policybundlehealth"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/credentials"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/crypto"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
@@ -248,6 +249,7 @@ func runRuntimeHeartbeatJSONL(ctx context.Context, cfg Config, getenv func(strin
 // where beats and warnings go.
 func newRuntimeHeartbeatLoop(cfg Config, client keiruntime.HeartbeatClient, interval time.Duration) *keiruntime.HeartbeatLoop {
 	auditPath, auditMax := cfg.AuditPath, cfg.AuditMaxBytes
+	connectorIndexPath := credentials.ConnectorIndexPath(cfg.RuntimeStateDir)
 	return &keiruntime.HeartbeatLoop{
 		Client:   client,
 		Token:    cfg.RuntimeToken,
@@ -256,6 +258,11 @@ func newRuntimeHeartbeatLoop(cfg Config, client keiruntime.HeartbeatClient, inte
 		Jitter:   keiruntime.JitterInterval,
 		AppendLifecycle: func(e keiruntime.LifecycleEvent) error {
 			return appendLifecycleEvent(auditPath, auditMax, e)
+		},
+		// Report connectors whose external credential_ref credential sync
+		// resolved in this state directory; the catalog activates them.
+		ConnectorActivations: func() ([]string, error) {
+			return credentials.ResolvedExternalConnectorIDs(connectorIndexPath)
 		},
 	}
 }

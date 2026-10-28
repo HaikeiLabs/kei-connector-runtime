@@ -447,6 +447,7 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		shell        string
 		shellEffect  string
 		shellDst     string // shell policy destination command; defaults to "git log"
+		wireTool     string // tool name sent with shell_command; defaults to "shell"
 		wantDecision string
 		wantReason   string
 		wantPolicyID string
@@ -454,13 +455,14 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		{name: "group permit", effect: "permit", tool: "custom.read", wantDecision: "permit", wantPolicyID: "tool-policy"},
 		{name: "group deny", effect: "deny", tool: "custom.write", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "tool-policy"},
 		{name: "unmatched tool is neutral on the socket", tool: "custom.unmatched", wantDecision: "unmatched", wantReason: "no_matching_policy"},
-		{name: "unmatched pi shell command is neutral on the socket", tool: "pi.bash", shell: "git log", wantDecision: "unmatched", wantReason: "no_matching_policy"},
-		{name: "matching pi shell permit", tool: "pi.bash", shell: "git log", shellEffect: "permit", wantDecision: "permit", wantReason: "policy_permit", wantPolicyID: "shell-policy"},
-		{name: "matching pi shell deny", tool: "pi.bash", shell: "git log", shellEffect: "deny", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
-		{name: "compound pi shell command with no policies is unmatched", tool: "pi.bash", shell: "git status && whoami", wantDecision: "unmatched", wantReason: "no_matching_policy"},
-		{name: "compound pi shell command is denied by an explicit deny on one stage", tool: "pi.bash", shell: "git status && whoami", shellEffect: "deny", shellDst: "whoami", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
-		{name: "unsupported shell syntax remains denied", tool: "pi.bash", shell: "git status > out", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
-		{name: "command substitution remains denied", tool: "pi.bash", shell: "git status $(whoami)", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+		{name: "unmatched shell command is neutral on the socket", tool: "shell", shell: "git log", wantDecision: "unmatched", wantReason: "no_matching_policy"},
+		{name: "matching shell permit", tool: "shell", shell: "git log", shellEffect: "permit", wantDecision: "permit", wantReason: "policy_permit", wantPolicyID: "shell-policy"},
+		{name: "matching shell deny", tool: "shell", shell: "git log", shellEffect: "deny", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
+		{name: "compound shell command with no policies is unmatched", tool: "shell", shell: "git status && whoami", wantDecision: "unmatched", wantReason: "no_matching_policy"},
+		{name: "compound shell command is denied by an explicit deny on one stage", tool: "shell", shell: "git status && whoami", shellEffect: "deny", shellDst: "whoami", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
+		{name: "unsupported shell syntax remains denied", tool: "shell", shell: "git status > out", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+		{name: "command substitution remains denied", tool: "shell", shell: "git status $(whoami)", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+		{name: "legacy pi.bash tool name is not a shell tool", tool: "shell", wireTool: "pi.bash", shell: "git log", wantDecision: "deny", wantReason: "invalid_shell_request"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -476,7 +478,7 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 				t.Fatal(err)
 			}
 			doc["subject"] = map[string]any{"user_id": "user-alice", "email": "alice@example.test", "groups": []string{"members"}}
-			if tc.tool != "pi.bash" {
+			if tc.tool != "shell" {
 				doc["identities"] = []any{}
 			}
 			set := doc["policy_set"].(map[string]any)
@@ -517,7 +519,11 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 			}
 			body := `{"schema":"kei.authorize-request/v1","tool":"` + tool + `"}`
 			if tc.shell != "" {
-				body = `{"schema":"kei.authorize-request/v1","tool":"pi.bash","shell_command":"` + tc.shell + `","tool_args_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+				wireTool := tc.wireTool
+				if wireTool == "" {
+					wireTool = "shell"
+				}
+				body = `{"schema":"kei.authorize-request/v1","tool":"` + wireTool + `","shell_command":"` + tc.shell + `","tool_args_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
 			}
 			req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
 			h.ServeHTTP(rec, req)

@@ -169,9 +169,11 @@ func TestHarnessRegisteredKindMapping(t *testing.T) {
 		{"claude", "claude_code", true},
 		{"codex", "codex", true},
 		{"opencode", "opencode", true},
+		{"cursor", "cursor", true},
 		{"claude", "codex", false},
 		{"codex", "claude_code", false},
 		{"opencode", "claude_code", false},
+		{"cursor", "claude_code", false},
 	}
 	for _, tc := range cases {
 		harnesses := []policybundle.Harness{{AgentID: "h1", Kind: tc.bundle}}

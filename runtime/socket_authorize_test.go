@@ -76,7 +76,10 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 		RuntimeToken:           policyTestToken,
 		RuntimeControlPlaneURL: "https://kei.example",
 	}, nil)
-	_ = l.Sessions.Start(pdp.Subject{UserID: "user-abc", Email: "user@test", Status: pdp.StatusLinked, Enrollment: json.RawMessage(`"https://claim.url"`)})
+	id, err := l.Sessions.Create(pdp.Subject{UserID: "user-abc", Email: "user@test", Status: pdp.StatusLinked, Enrollment: json.RawMessage(`"https://claim.url"`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -86,6 +89,7 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 	handler := l.NewHandler(next, checkConfig, checkAuth)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/session", nil)
+	session.SetHeader(req, id)
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -102,7 +106,7 @@ func TestSocketSessionGetReturnsSubjectMinimalResponse(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &keys); err != nil {
 		t.Fatal(err)
 	}
-	if keys.Schema != "kei.session/v1" || keys.UserID != "user-abc" || keys.Status != "linked" {
+	if keys.Schema != "kei.session/v2" || keys.UserID != "user-abc" || keys.Status != "linked" {
 		t.Fatalf("response %+v", keys)
 	}
 	if keys.Email != "" {
@@ -294,6 +298,156 @@ func getSession(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
 	return rec
 }
 
+func startNamedSession(t *testing.T, h http.Handler, body string) string {
+	t.Helper()
+	rec := putSession(t, h, body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT v2 = %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Schema    string `json:"schema"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Schema != "kei.session/v2" || !strings.HasPrefix(out.SessionID, "ks_") {
+		t.Fatalf("PUT v2 response = %+v", out)
+	}
+	return out.SessionID
+}
+
+func TestSocketAuthorizeRequiresNamedSession(t *testing.T) {
+	_, h := multiSessionPDP(t, &perSubjectI11{}, nil)
+	body := `{"schema":"kei.authorize-request/v1","tool":"web_search"}`
+
+	missing := sessionRequest(h, http.MethodPost, "/v1/authorize", "", body)
+	var denied struct {
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.Unmarshal(missing.Body.Bytes(), &denied); err != nil {
+		t.Fatal(err)
+	}
+	if missing.Code != http.StatusOK || denied.ReasonCode != "session_required" {
+		t.Fatalf("authorize without session = %d %+v %s, want deny/session_required", missing.Code, denied, missing.Body.String())
+	}
+
+	alice := createSession(t, h, "ext-alice")
+	named := sessionRequest(h, http.MethodPost, "/v1/authorize", alice, body)
+	var allowed struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(named.Body.Bytes(), &allowed); err != nil {
+		t.Fatal(err)
+	}
+	if named.Code != http.StatusOK || allowed.Decision != "permit" {
+		t.Fatalf("authorize with named session = %d %+v %s, want permit", named.Code, allowed, named.Body.String())
+	}
+}
+
+func TestSocketCredentialReleaseRequiresNamedSession(t *testing.T) {
+	h := releasePDP(t)
+	body := `{"schema":"kei.credential-release-request/v1","connector":{"connector_id":"conn-github-0001","capability":"issue.get"},"resource":"repos/owner/name"}`
+
+	missing := sessionRequest(h, http.MethodPost, "/v1/credentials:release", "", body)
+	var denied struct {
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.Unmarshal(missing.Body.Bytes(), &denied); err != nil {
+		t.Fatal(err)
+	}
+	if missing.Code != http.StatusOK || denied.ReasonCode != "session_required" {
+		t.Fatalf("release without session = %d %+v %s, want deny/session_required", missing.Code, denied, missing.Body.String())
+	}
+
+	alice := createSession(t, h, "ext-alice")
+	named := sessionRequest(h, http.MethodPost, "/v1/credentials:release", alice, body)
+	var allowed struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(named.Body.Bytes(), &allowed); err != nil {
+		t.Fatal(err)
+	}
+	if named.Code != http.StatusOK || allowed.Decision != "allow" {
+		t.Fatalf("release with named session = %d %+v %s, want allow", named.Code, allowed, named.Body.String())
+	}
+}
+
+func TestTokenlessOwnerSocketAcceptsHeaderlessPiAuthorizeRequests(t *testing.T) {
+	policybundle.SetV2SchemaValidator(subjectV2SchemaValidator(t))
+	t.Cleanup(func() { policybundle.SetV2SchemaValidator(nil) })
+	now := time.Now().UTC()
+	raw, err := os.ReadFile(filepath.Join("..", "pkg", "policybundle", "testdata", "catalog-v2-bundle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle map[string]any
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	bundle["issued_at"] = now.Format(time.RFC3339Nano)
+	bundle["not_after"] = now.Add(time.Hour).Format(time.RFC3339Nano)
+	audience := bundle["audience"].(map[string]any)
+	audience["installation_id"], audience["org_id"], audience["workspace_id"] = "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001"
+	set := bundle["policy_set"].(map[string]any)
+	set["org_id"], set["workspace_id"] = "org-fixture-0001", "ws-fixture-0001"
+	set["tool_policies"], set["harness_policies"] = []any{}, []any{}
+	raw, err = json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	activateBundle(t, dir, raw)
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
+	}, nil)
+	t.Cleanup(l.Close)
+	l.SetTokenlessOwnerSession(true)
+	l.SetIdentity(&keiruntime.Identity{
+		ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "trusted-default",
+	})
+	l.AfterSync(nil)
+	h := l.NewSocketHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return false })
+
+	tests := []struct {
+		name, body, wantDecision, wantReason string
+	}{
+		{
+			name: "pi.read", wantDecision: "unmatched", wantReason: "no_matching_policy",
+			body: `{"schema":"kei.authorize-request/v1","tool":"pi.read","resource":"/workspaces/project/src/example.ts","framework":"pi","span_id":"0193f5ef-5522-7c2a-a650-ae62e8bc4319","tool_args_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+		},
+		{
+			name: "legacy pi.bash name", wantDecision: "deny", wantReason: "invalid_shell_request",
+			body: `{"schema":"kei.authorize-request/v1","tool":"pi.bash","resource":"/workspaces/project","framework":"pi","span_id":"0193f5ef-5522-7c2a-a650-ae62e8bc4319","tool_args_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","shell_command":"git log"}`,
+		},
+		{
+			name: "generic shell name", wantDecision: "unmatched", wantReason: "no_matching_policy",
+			body: `{"schema":"kei.authorize-request/v1","tool":"shell","resource":"/workspaces/project","framework":"pi","span_id":"0193f5ef-5522-7c2a-a650-ae62e8bc4319","tool_args_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","shell_command":"git log"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			if len(req.Header) != 1 || req.Header.Get(session.Header) != "" {
+				t.Fatalf("Pi request headers = %v, want Content-Type only and no %s", req.Header, session.Header)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			var response struct {
+				Decision   string `json:"decision"`
+				ReasonCode string `json:"reason_code"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != http.StatusOK || response.Decision != tc.wantDecision || response.ReasonCode != tc.wantReason {
+				t.Fatalf("headerless authorize = %d %+v %s, want %s/%s", rec.Code, response, rec.Body.String(), tc.wantDecision, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestSocketSessionStartRejectsOldFields(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{
 		RuntimeToken:           policyTestToken,
@@ -323,10 +477,25 @@ func TestSocketSessionStartRejectsOldFields(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 				t.Fatal(err)
 			}
-			if out.Error.Code != "invalid_session" {
-				t.Fatalf("error code = %s, want invalid_session", out.Error.Code)
+			if out.Error.Code != "invalid_request" {
+				t.Fatalf("error code = %s, want invalid_request", out.Error.Code)
 			}
 		})
+	}
+}
+
+func TestSocketSessionStartRejectsV1Schema(t *testing.T) {
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example"}, nil)
+	h := sessionHandler(t, l)
+	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
+	var out struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if rec.Code != http.StatusBadRequest || out.Error.Code != "invalid_request" {
+		t.Fatalf("legacy PUT = %d %s, want invalid_request", rec.Code, rec.Body.String())
 	}
 }
 
@@ -349,8 +518,8 @@ func TestSocketSessionStartRejectsMissingProvider(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Error.Code != "invalid_session" {
-		t.Fatalf("error code = %s, want invalid_session", out.Error.Code)
+	if out.Error.Code != "invalid_request" {
+		t.Fatalf("error code = %s, want invalid_request", out.Error.Code)
 	}
 }
 
@@ -362,13 +531,10 @@ func TestSocketSessionStartAcceptsCLI(t *testing.T) {
 	l.SetKeychain(&fakeKeychain{token: "cli-token-abc", userID: "u-cli-user"})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"cli"}`)
 
 	// Verify the session is linked with the right user.
-	gre := getSession(t, h)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -667,12 +833,8 @@ func TestSocketSessionStartResolvesLinkedIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-123"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -709,12 +871,8 @@ func TestSocketSessionStartResolvesNonLinkedIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-pending"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-pending"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -751,12 +909,8 @@ func TestSocketSessionStartResolvesUnknownIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-unknown"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-unknown"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -789,12 +943,8 @@ func TestSocketSessionStartWithoutBundleIsUnlinked(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-123"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -845,12 +995,8 @@ func TestSocketSessionStartResolvesExpiredIdentityAsUnlinked(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-expired"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-expired"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -930,14 +1076,13 @@ func TestShellAuthorizeUsesTrustedDefaultAgentNotRequestAgentID(t *testing.T) {
 		WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "trusted-default",
 	})
 	h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
-	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-pi"}`)
-	if putRec.Code != http.StatusNoContent {
-		t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
-	}
+	sessionID := createSession(t, h, "ext-pi")
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	body := `{"schema":"kei.authorize-request/v1","tool":"pi.bash","agent_id":"attacker-agent","framework":"pi","shell_command":"git status --short","tool_args_digest":"` + digest + `"}`
+	body := `{"schema":"kei.authorize-request/v1","tool":"shell","agent_id":"attacker-agent","framework":"pi","shell_command":"git status --short","tool_args_digest":"` + digest + `"}`
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
+	session.SetHeader(req, sessionID)
+	h.ServeHTTP(rec, req)
 	var response struct {
 		Decision string `json:"decision"`
 		PolicyID string `json:"policy_id"`
@@ -991,15 +1136,13 @@ func TestSocketSessionAuthorizeAfterBundleLinkedSession(t *testing.T) {
 	h := l.NewHandler(next, checkConfig, checkAuth)
 
 	// Start session
-	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-123"}`)
-	if putRec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
-	}
+	sessionID := createSession(t, h, "ext-123")
 
 	// Authorize
 	authRec := httptest.NewRecorder()
 	authReq := httptest.NewRequest(http.MethodPost, "/v1/authorize",
 		strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"web_search"}`))
+	session.SetHeader(authReq, sessionID)
 	h.ServeHTTP(authRec, authReq)
 
 	if authRec.Code != http.StatusOK {
@@ -1044,14 +1187,12 @@ func TestSocketSessionAuthorizeAfterBundleRevokedSession(t *testing.T) {
 	checkAuth := func(r *http.Request) bool { return true }
 	h := l.NewHandler(next, checkConfig, checkAuth)
 
-	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-revoked"}`)
-	if putRec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
-	}
+	sessionID := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-revoked"}`)
 
 	authRec := httptest.NewRecorder()
 	authReq := httptest.NewRequest(http.MethodPost, "/v1/authorize",
 		strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"web_search"}`))
+	session.SetHeader(authReq, sessionID)
 	h.ServeHTTP(authRec, authReq)
 
 	if authRec.Code != http.StatusOK {
@@ -1097,14 +1238,12 @@ func TestSocketSessionAuthorizeAfterUnlinkedSession(t *testing.T) {
 	checkAuth := func(r *http.Request) bool { return true }
 	h := l.NewHandler(next, checkConfig, checkAuth)
 
-	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-unknown"}`)
-	if putRec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", putRec.Code, putRec.Body.String())
-	}
+	sessionID := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-unknown"}`)
 
 	authRec := httptest.NewRecorder()
 	authReq := httptest.NewRequest(http.MethodPost, "/v1/authorize",
 		strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"web_search"}`))
+	session.SetHeader(authReq, sessionID)
 	h.ServeHTTP(authRec, authReq)
 
 	if authRec.Code != http.StatusOK {
@@ -1142,12 +1281,8 @@ func TestSocketSessionStartResolvesOpenWebUILinkedIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"openwebui","external_id":"550e8400-e29b-41d4-a716-446655440000"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"openwebui","external_id":"550e8400-e29b-41d4-a716-446655440000"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -1184,12 +1319,8 @@ func TestSocketSessionStartOpenWebUIUnknownIdentity(t *testing.T) {
 	})
 	h := sessionHandler(t, l)
 
-	rec := putSession(t, h, `{"schema":"kei.session/v1","source":"openwebui","external_id":"00000000-0000-0000-0000-000000000000"}`)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	gre := getSession(t, h)
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"openwebui","external_id":"00000000-0000-0000-0000-000000000000"}`)
+	gre := sessionRequest(h, http.MethodGet, "/v1/session", id, "")
 	if gre.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", gre.Code, gre.Body.String())
 	}
@@ -1225,9 +1356,14 @@ func TestSocketAuthorizeDeniesBeforeIdentityResolves(t *testing.T) {
 		return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(policyTestToken)) == 1
 	}
 	handler := l.NewHandler(next, checkConfig, checkAuth)
+	sessionID, err := l.Sessions.Create(pdp.Subject{Status: pdp.StatusUnlinked})
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"search_wiki"}`))
 	req.Header.Set("Authorization", "Bearer "+policyTestToken)
+	session.SetHeader(req, sessionID)
 	handler.ServeHTTP(rec, req)
 	var out struct {
 		Schema      string `json:"schema"`
@@ -1284,11 +1420,8 @@ func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
 	})
 	h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
 
-	// Start a session as user-alice.
-	putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`)
-	if putRec.Code != http.StatusNoContent {
-		t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
-	}
+	// Start a named session as user-alice.
+	sessionID := createSession(t, h, "ext-alice")
 
 	// Send an authorize request with a DIFFERENT agent_id. The subject
 	// must still resolve to the session user, not the request's agent_id,
@@ -1296,7 +1429,9 @@ func TestAuthorizeSubjectIsSessionUser(t *testing.T) {
 	// caller-supplied value.
 	body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"attacker-agent","on_behalf_of":"user:trigger"}`
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
+	session.SetHeader(req, sessionID)
+	h.ServeHTTP(rec, req)
 
 	var response struct {
 		Decision string `json:"decision"`
@@ -1370,15 +1505,14 @@ func TestAuthorizeDefaultEvaluatePathResolvesAgentFromTrustedIdentity(t *testing
 			WorkspaceID: strPtr("ws-fixture-0001"),
 		})
 		h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
-		putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`)
-		if putRec.Code != http.StatusNoContent {
-			t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
-		}
+		sessionID := createSession(t, h, "ext-alice")
 		// web_search is a v1 bundled tool (not a harness tool) that falls
 		// through to the default Evaluate path.
 		body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"some-agent"}`
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+		req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
+		session.SetHeader(req, sessionID)
+		h.ServeHTTP(rec, req)
 		var response struct {
 			Decision   string `json:"decision"`
 			ReasonCode string `json:"reason_code"`
@@ -1403,14 +1537,13 @@ func TestAuthorizeDefaultEvaluatePathResolvesAgentFromTrustedIdentity(t *testing
 			WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "trusted-default",
 		})
 		h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
-		putRec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`)
-		if putRec.Code != http.StatusNoContent {
-			t.Fatalf("start session: status=%d body=%s", putRec.Code, putRec.Body.String())
-		}
+		sessionID := createSession(t, h, "ext-alice")
 		// Send request with a DIFFERENT agent_id; audit must show the trusted one.
 		body := `{"schema":"kei.authorize-request/v1","tool":"web_search","agent_id":"attacker-agent"}`
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+		req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
+		session.SetHeader(req, sessionID)
+		h.ServeHTTP(rec, req)
 		var audit struct {
 			AgentID string `json:"agent_id"`
 		}
@@ -1530,7 +1663,6 @@ func TestAuthorizePathsDecideForSessionUserNotAgent(t *testing.T) {
 		decide func(*testing.T, *keiruntime.LocalPDP, http.Handler, string) subjectPathDecision
 	}{
 		{"authorize v2 harness tool", subjectV2Bundle, decideViaAuthorizeHarnessTool},
-		{"mcp route tools/call", subjectV2Bundle, decideViaMCPTool},
 		{"connector grant", subjectV1ConnectorBundle, decideViaConnectorGrant},
 	}
 	for _, path := range paths {
@@ -1573,15 +1705,6 @@ func decideViaAuthorizeHarnessTool(t *testing.T, _ *keiruntime.LocalPDP, h http.
 		t.Fatalf("authorize status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	return subjectPathDecision{allow: response.Decision == "permit"}
-}
-
-func decideViaMCPTool(t *testing.T, l *keiruntime.LocalPDP, _ http.Handler, sessionID string) subjectPathDecision {
-	t.Helper()
-	d, err := l.AuthorizeMCPTool(context.Background(), sessionID, "slack", "list_channels", subjectTestAgent, "claude_code")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return subjectPathDecision{allow: d.Allow}
 }
 
 func decideViaConnectorGrant(t *testing.T, l *keiruntime.LocalPDP, _ http.Handler, sessionID string) subjectPathDecision {

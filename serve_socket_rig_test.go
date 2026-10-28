@@ -53,6 +53,12 @@ func newSocketRig(t *testing.T) *socketRig { return newSocketRigConfig(t, nil) }
 
 // newSocketRigConfig is newSocketRig with mutate applied to the serve config.
 func newSocketRigConfig(t *testing.T, mutate func(*Config)) *socketRig {
+	return newSocketRigWithBundle(t, connectorTestBundle(t), mutate)
+}
+
+// newSocketRigWithBundle is newSocketRigConfig activating an explicit bundle,
+// so two rigs can run the byte-identical bundle.
+func newSocketRigWithBundle(t *testing.T, bundle []byte, mutate func(*Config)) *socketRig {
 	t.Helper()
 	rig := &socketRig{t: t, githubTokens: []string{credentialCanary}, githubStatus: []int{http.StatusOK}}
 	i11 := httptest.NewServer(http.HandlerFunc(rig.serveI11))
@@ -66,7 +72,7 @@ func newSocketRigConfig(t *testing.T, mutate func(*Config)) *socketRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Activate(connectorTestBundle(t), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
+	if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	rig.local, err = newServeLocalPDP(rig.cfg, serveSeams{providerTransport: roundTripFunc(rig.serveGitHub)})
@@ -168,10 +174,7 @@ func (rig *socketRig) providerPaths() []string {
 
 func (rig *socketRig) startSession(t *testing.T) {
 	t.Helper()
-	r := socketDo(t, rig.client, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"discord","external_id":"`+linkedExternalID+`"}`)
-	if r.code != http.StatusNoContent {
-		t.Fatalf("PUT /v1/session = %s", r.dump)
-	}
+	t.Setenv("KEI_SESSION_ID", rig.startNamedSession(t))
 }
 
 func connectorTestBundle(t *testing.T) []byte {
