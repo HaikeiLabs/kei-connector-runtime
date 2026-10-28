@@ -93,6 +93,9 @@ func socketDo(t *testing.T, c *http.Client, method, path, body string) socketRes
 	}
 	req.Header.Set("Authorization", "Bearer "+credTestToken)
 	req.Header.Set("Content-Type", "application/json")
+	if id := os.Getenv("KEI_SESSION_ID"); id != "" {
+		req.Header.Set("X-Kei-Session", id)
+	}
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
@@ -102,6 +105,21 @@ func socketDo(t *testing.T, c *http.Client, method, path, body string) socketRes
 	var dump bytes.Buffer
 	_ = resp.Header.Write(&dump)
 	return socketResponse{route: method + " " + path, code: resp.StatusCode, dump: fmt.Sprintf("%d\n%s\n%s", resp.StatusCode, dump.String(), b)}
+}
+
+func startServeNamedSession(t *testing.T, c *http.Client, body string) (string, socketResponse) {
+	t.Helper()
+	r := socketDo(t, c, http.MethodPut, "/v1/session", body)
+	if r.code != http.StatusCreated {
+		t.Fatalf("PUT /v1/session = %s", r.dump)
+	}
+	var out struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(r.dump[strings.Index(r.dump, "{"):]), &out); err != nil || out.SessionID == "" {
+		t.Fatalf("PUT response %s: %v", r.dump, err)
+	}
+	return out.SessionID, r
 }
 
 // socketRouteMatrix is every route the daemon serves plus the credential
@@ -166,8 +184,9 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 			_, socketHandler := newServeHandlers(cfg, local)
 			c, _ := serveSocketForTest(t, socketHandler)
 
-			put := socketDo(t, c, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"cli"}`)
-			if put.code != http.StatusNoContent {
+			id, put := startServeNamedSession(t, c, `{"schema":"kei.session/v2","source":"cli"}`)
+			t.Setenv("KEI_SESSION_ID", id)
+			if id == "" {
 				t.Fatalf("PUT /v1/session = %s", put.dump)
 			}
 			responses = append(responses, put)
@@ -179,7 +198,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 
 			// The credential is held: in-daemon use sees it.
 			held := false
-			if err := local.UseCredential(context.Background(), "", "u-canary", "github", func(token string) error {
+			if err := local.UseCredential(context.Background(), id, "u-canary", "github", func(token string) error {
 				held = token == credentialCanary
 				return nil
 			}); err != nil || !held {
@@ -187,7 +206,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 			}
 			// Callback failures and denials, including the 401 path.
 			for _, provider := range []string{"github", "linear", "slack"} {
-				err := local.UseCredential(context.Background(), "", "u-canary", provider, func(token string) error {
+				err := local.UseCredential(context.Background(), id, "u-canary", provider, func(token string) error {
 					return fmt.Errorf("provider said 401: %w", credrelease.ErrProviderUnauthorized)
 				})
 				if err == nil {
@@ -202,7 +221,7 @@ func TestServeSessionCredentialsNeverLeak(t *testing.T) {
 
 			// A failed load logs only its error class and safe request metadata.
 			keychain.token = "subject-without-credentials"
-			responses = append(responses, socketDo(t, c, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"cli"}`))
+			responses = append(responses, socketDo(t, c, http.MethodPut, "/v1/session", `{"schema":"kei.session/v2","source":"cli"}`))
 			responses = append(responses, socketDo(t, c, http.MethodDelete, "/v1/session", ""))
 			local.Close()
 		}()
@@ -253,9 +272,8 @@ func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 	_, socketHandler := newServeHandlers(cfg, local)
 	c, _ := serveSocketForTest(t, socketHandler)
 
-	if r := socketDo(t, c, http.MethodPut, "/v1/session", `{"schema":"kei.session/v1","source":"cli"}`); r.code != http.StatusNoContent {
-		t.Fatalf("PUT = %s", r.dump)
-	}
+	id, _ := startServeNamedSession(t, c, `{"schema":"kei.session/v2","source":"cli"}`)
+	t.Setenv("KEI_SESSION_ID", id)
 	for _, r := range socketRouteMatrix {
 		resp := socketDo(t, c, r.method, r.path, r.body)
 		if strings.Contains(resp.dump, credentialCanary) || strings.Contains(resp.dump, subjectCanary) {
@@ -274,7 +292,7 @@ func TestServeNoSocketRouteReturnsCredential(t *testing.T) {
 		t.Fatalf("GET /v1/session body %q: %v", body, err)
 	}
 	for key := range session {
-		if key != "schema" && key != "user_id" && key != "status" {
+		if key != "schema" && key != "user_id" && key != "status" && key != "session_id" && key != "idle_ttl_seconds" {
 			t.Errorf("GET /v1/session has field %q", key)
 		}
 	}

@@ -108,7 +108,7 @@ func TestAuthorizeShellUsesSessionMembershipAndOrderedV2Policies(t *testing.T) {
 		},
 		{
 			name:     "tool grant is not a shell grant",
-			policies: []map[string]any{shellPolicy("broad-tool", "*", "tool:pi.bash", "permit", 1000, nil)},
+			policies: []map[string]any{shellPolicy("broad-tool", "*", "tool:shell", "permit", 1000, nil)},
 			allow:    false,
 		},
 	}

@@ -14,7 +14,7 @@ import (
 )
 
 func TestHookReportGoldenFixtures(t *testing.T) {
-	for _, harness := range []string{"claude", "codex", "opencode"} {
+	for _, harness := range []string{"claude", "codex", "opencode", "cursor"} {
 		t.Run(harness, func(t *testing.T) {
 			input, err := os.ReadFile(filepath.Join("testdata", "hooks", harness+".json"))
 			if err != nil {
@@ -51,7 +51,7 @@ func TestHookReportGoldenFixtures(t *testing.T) {
 				t.Fatalf("identity/schema = %+v", got)
 			}
 			wantTool := raw.ToolName
-			if harness == "claude" || harness == "codex" || harness == "opencode" {
+			if harness == "claude" || harness == "codex" || harness == "opencode" || harness == "cursor" {
 				wantTool = "shell"
 			}
 			if got.Tool != wantTool || got.ArgsDigest != "sha256:"+hex.EncodeToString(digest[:]) {
@@ -67,6 +67,32 @@ func TestHookReportGoldenFixtures(t *testing.T) {
 	}
 }
 
+// TestReportedToolNormalizesShellNames pins the shell-tool normalization: a
+// tool literally named Bash, shell or exec_command reports as "shell" with the
+// command's argv0; other tools pass through unchanged.
+func TestReportedToolNormalizesShellNames(t *testing.T) {
+	cases := []struct {
+		name  string
+		tool  string
+		raw   string
+		want  string
+		argv0 string
+	}{
+		{"bash", "Bash", `{"command":"git status"}`, "shell", "git"},
+		{"codex", "exec_command", `{"cmd":"curl -s example.com"}`, "shell", "curl"},
+		{"cursor-shell", "Shell", `{"command":"git status"}`, "shell", "git"},
+		{"passthrough", "read_file", `{"file_path":"/tmp/x"}`, "read_file", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool, argv0 := reportedTool(tc.tool, json.RawMessage(tc.raw))
+			if tool != tc.want || argv0 != tc.argv0 {
+				t.Fatalf("reportedTool(%q) = (%q, %q), want (%q, %q)", tc.tool, tool, argv0, tc.want, tc.argv0)
+			}
+		})
+	}
+}
+
 // RenderedHookCLI is the command emitted by kei-cli internal/app/harness.go:1018
 // for a Claude Code hook install spec. It must parse as `hook <kind> --harness <id>`.
 const RenderedHookCLI = "kei-proxy hook claude --harness h-abc123"
@@ -75,7 +101,7 @@ func TestRunAcceptsRenderedContract(t *testing.T) {
 	for _, harness := range []struct {
 		kind    string
 		fixture string
-	}{{"claude", "claude.json"}, {"codex", "codex.json"}, {"opencode", "opencode.json"}} {
+	}{{"claude", "claude.json"}, {"codex", "codex.json"}, {"opencode", "opencode.json"}, {"cursor", "cursor.json"}} {
 		t.Run(harness.kind, func(t *testing.T) {
 			input, err := os.ReadFile(filepath.Join("testdata", "hooks", harness.fixture))
 			if err != nil {
@@ -154,7 +180,7 @@ func TestRunWithoutHarnessID(t *testing.T) {
 	for _, harness := range []struct {
 		kind    string
 		fixture string
-	}{{"claude", "claude.json"}, {"codex", "codex.json"}, {"opencode", "opencode.json"}} {
+	}{{"claude", "claude.json"}, {"codex", "codex.json"}, {"opencode", "opencode.json"}, {"cursor", "cursor.json"}} {
 		t.Run(harness.kind, func(t *testing.T) {
 			input, err := os.ReadFile(filepath.Join("testdata", "hooks", harness.fixture))
 			if err != nil {

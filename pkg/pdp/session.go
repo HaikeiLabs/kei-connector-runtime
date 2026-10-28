@@ -47,9 +47,7 @@ type Subject struct {
 	Token       string
 }
 
-// DefaultSession is the session id of the legacy default session: requests
-// that name no session use it. Deprecated: name a session created with
-// Create; the default session goes away after one release.
+// DefaultSession is the empty session id. It is never stored or live.
 const DefaultSession = ""
 
 // ReasonSessionNotFound is the deny reason for a session id that was never
@@ -64,19 +62,15 @@ const ReasonSessionRevalidationRequired = "session_revalidation_required"
 // revalidated. See ADR-026 G0.
 const SessionMaxAge = 8 * time.Hour
 
-// Sessions holds worker sessions in memory only: the legacy default session
-// and any number of sessions named by an opaque id (owner decision
-// 2026-10-06: many agents in parallel on one machine). Nothing is persisted;
-// a session ends with End, idle expiry, a revocation, or the process.
+// Sessions holds worker sessions in memory only. Each session has an opaque
+// named id (owner decision 2026-10-06: many agents in parallel on one machine).
+// Nothing is persisted; a session ends with EndID, idle expiry, a revocation,
+// or the process.
 //
 // Id sessions are independent: each has its own lock, and the registry is a
 // sync.Map, so concurrent calls on different sessions never wait on each
 // other. There is no session cap; the limit is the host.
 type Sessions struct {
-	// The legacy default session.
-	mu  sync.RWMutex
-	cur *Subject
-
 	byID     sync.Map // id -> *idSession
 	idleTTL  atomic.Int64
 	now      func() time.Time
@@ -105,8 +99,7 @@ func NewSessions() *Sessions {
 // SetNow replaces the time source (for tests). A nil fn panics on use.
 func (s *Sessions) SetNow(fn func() time.Time) { s.now = fn }
 
-// SetIdleTTL sets how long an id session lives without use (> 0). The
-// default session never expires.
+// SetIdleTTL sets how long a session lives without use (> 0).
 func (s *Sessions) SetIdleTTL(d time.Duration) {
 	if d > 0 {
 		s.idleTTL.Store(int64(d))
@@ -149,35 +142,21 @@ func copySubject(sub Subject) Subject {
 	return sub
 }
 
-// Start begins the legacy default session, replacing any previous one.
+// Start rejects the removed legacy default session. Callers must use Create.
 func (s *Sessions) Start(sub Subject) error {
-	sub, err := validSubject(sub)
-	if err != nil {
+	if _, err := validSubject(sub); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.cur = &sub
-	s.mu.Unlock()
-	return nil
+	return errors.New("pdp: default sessions are no longer supported; use Create")
 }
 
-// End ends the legacy default session; later calls without a session id
-// have no session subject.
-func (s *Sessions) End() {
-	s.mu.Lock()
-	s.cur = nil
-	s.mu.Unlock()
-}
+// End is retained for compatibility and does nothing because no default
+// session can be stored. Named sessions end with EndID.
+func (s *Sessions) End() {}
 
-// Current returns a copy of the legacy default session's subject.
-func (s *Sessions) Current() (Subject, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.cur == nil {
-		return Subject{}, false
-	}
-	return copySubject(*s.cur), true
-}
+// Current is retained for compatibility and always reports no default
+// session.
+func (s *Sessions) Current() (Subject, bool) { return Subject{}, false }
 
 // Create starts a new session for sub and returns its id: "ks_" and 32
 // random bytes, base64url. Sessions created this way are independent of each
@@ -207,12 +186,9 @@ func (s *Sessions) create(sub Subject, pinned bool) (string, error) {
 }
 
 // Get returns a copy of the subject of session id and marks the session used.
-// DefaultSession reads the default session. An unknown, ended or idle-expired
-// id is not found; an expired one ends here.
+// An empty, unknown, ended or idle-expired id is not found; an expired one
+// ends here.
 func (s *Sessions) Get(id string) (Subject, bool) {
-	if id == DefaultSession {
-		return s.Current()
-	}
 	e, ok := s.live(id)
 	if !ok {
 		return Subject{}, false
@@ -225,10 +201,6 @@ func (s *Sessions) Get(id string) (Subject, bool) {
 
 // Exists reports whether session id is live, without marking it used.
 func (s *Sessions) Exists(id string) bool {
-	if id == DefaultSession {
-		_, ok := s.Current()
-		return ok
-	}
 	_, ok := s.live(id)
 	return ok
 }
@@ -263,14 +235,8 @@ func (s *Sessions) maxAgeExpired(e *idSession, now time.Time) bool {
 	return !e.pinned && now.Sub(time.Unix(0, e.startedAt)) >= SessionMaxAge
 }
 
-// EndID ends session id (DefaultSession ends the default session) and
-// reports whether it was live.
+// EndID ends session id and reports whether it was live.
 func (s *Sessions) EndID(id string) bool {
-	if id == DefaultSession {
-		_, ok := s.Current()
-		s.End()
-		return ok
-	}
 	v, ok := s.byID.Load(id)
 	if !ok {
 		return false
@@ -336,18 +302,11 @@ func (s *Sessions) Len() int {
 	return n
 }
 
-// revokeIf revokes every session (default and id) whose subject matches: the
-// identity is kept only so later calls deny subject_revoked until the
-// session ends. It returns the revoked session ids (DefaultSession for the
-// default session).
+// revokeIf revokes every session whose subject matches: the identity is kept
+// only so later calls deny subject_revoked until the session ends. It returns
+// the revoked session ids.
 func (s *Sessions) revokeIf(match func(Subject) bool) []string {
 	var revoked []string
-	s.mu.Lock()
-	if s.cur != nil && match(*s.cur) {
-		s.cur = &Subject{SubjectKind: s.cur.SubjectKind, UserID: s.cur.UserID, Status: StatusRevoked}
-		revoked = append(revoked, DefaultSession)
-	}
-	s.mu.Unlock()
 	s.byID.Range(func(k, v any) bool {
 		e := v.(*idSession)
 		e.mu.Lock()

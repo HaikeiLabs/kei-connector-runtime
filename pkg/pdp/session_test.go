@@ -32,10 +32,7 @@ func TestSessionsCreateGetEnd(t *testing.T) {
 	if a == b || !strings.HasPrefix(a, "ks_") || len(a) != 3+43 {
 		t.Fatalf("ids %q %q: want distinct ks_ + 43 base64url characters", a, b)
 	}
-	if err := s.Start(Subject{UserID: "u-default", Status: StatusLinked}); err != nil {
-		t.Fatal(err)
-	}
-	for id, want := range map[string]string{a: "u-alice", b: "u-bob", DefaultSession: "u-default"} {
+	for id, want := range map[string]string{a: "u-alice", b: "u-bob"} {
 		if sub, ok := s.Get(id); !ok || sub.UserID != want {
 			t.Errorf("Get(%q) = %+v %v, want %s", id, sub, ok, want)
 		}
@@ -53,9 +50,6 @@ func TestSessionsCreateGetEnd(t *testing.T) {
 	if sub, ok := s.Get(b); !ok || sub.UserID != "u-bob" {
 		t.Error("ending one session ended another")
 	}
-	if sub, ok := s.Current(); !ok || sub.UserID != "u-default" {
-		t.Error("ending a named session ended the default session")
-	}
 	if _, ok := s.Get("ks_never-created"); ok {
 		t.Error("an unknown id is readable")
 	}
@@ -66,9 +60,21 @@ func TestSessionsCreateGetEnd(t *testing.T) {
 	}
 }
 
+func TestSessionsDoNotStoreEmptyDefaultSession(t *testing.T) {
+	s := NewSessions()
+	if err := s.Start(Subject{UserID: "u-default", Status: StatusLinked}); err == nil {
+		t.Fatal("Start accepted an empty/default session")
+	}
+	if _, ok := s.Get(DefaultSession); ok || s.Exists(DefaultSession) {
+		t.Fatal("the empty session is still stored or live")
+	}
+	if s.EndID(DefaultSession) {
+		t.Fatal("EndID reported an empty session as live")
+	}
+}
+
 // TestSessionsIdleTTL: a named session ends after the idle TTL without use;
-// each use restarts the clock; Sweep ends idle ones; the default session
-// never expires.
+// each use restarts the clock and Sweep ends idle ones.
 func TestSessionsIdleTTL(t *testing.T) {
 	s := NewSessions()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
@@ -79,7 +85,6 @@ func TestSessionsIdleTTL(t *testing.T) {
 
 	used, _ := s.Create(Subject{UserID: "u-1", Status: StatusLinked})
 	idle, _ := s.Create(Subject{UserID: "u-2", Status: StatusLinked})
-	_ = s.Start(Subject{UserID: "u-default", Status: StatusLinked})
 
 	now = now.Add(50 * time.Second)
 	if _, ok := s.Get(used); !ok {
@@ -98,9 +103,6 @@ func TestSessionsIdleTTL(t *testing.T) {
 	}
 	if ended.Load() != 2 {
 		t.Errorf("end hook ran %d times, want 2", ended.Load())
-	}
-	if _, ok := s.Current(); !ok {
-		t.Error("the default session expired")
 	}
 }
 
@@ -137,8 +139,7 @@ func TestSessionsConcurrent(t *testing.T) {
 }
 
 // TestEvaluatePerSession: a decision uses only the named session's subject;
-// an unknown or ended id denies session_not_found, and requests without an id
-// use the default session.
+// an unknown, ended, or empty session denies session_not_found.
 func TestEvaluatePerSession(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	sessions := NewSessions()
@@ -160,8 +161,8 @@ func TestEvaluatePerSession(t *testing.T) {
 	if got := reason(unlinked); got != "subject_unlinked" {
 		t.Errorf("unlinked session: reason %q, want subject_unlinked", got)
 	}
-	if got := reason(DefaultSession); got != "subject_unlinked" {
-		t.Errorf("no default session: reason %q, want subject_unlinked", got)
+	if got := reason(""); got != ReasonSessionNotFound {
+		t.Errorf("empty session: reason %q, want %s", got, ReasonSessionNotFound)
 	}
 	if got := reason("ks_unknown"); got != ReasonSessionNotFound {
 		t.Errorf("unknown id: reason %q, want %s", got, ReasonSessionNotFound)
@@ -189,7 +190,6 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), sessions)
 	alice, _ := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
 	bob, _ := sessions.Create(Subject{UserID: "u-bob", Status: StatusLinked})
-	_ = sessions.Start(Subject{UserID: "u-bob", Status: StatusLinked})
 
 	e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships {
 		return fakeMemberships{"u-alice": {granted: false}, "u-bob": {granted: true}}
@@ -199,7 +199,7 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 	if len(revoked) != 1 || revoked[0] != alice {
 		t.Fatalf("revoked %v, want only alice's session %s", revoked, alice)
 	}
-	for id, want := range map[string]Status{alice: StatusRevoked, bob: StatusLinked, DefaultSession: StatusLinked} {
+	for id, want := range map[string]Status{alice: StatusRevoked, bob: StatusLinked} {
 		if sub, _ := sessions.Get(id); sub.Status != want {
 			t.Errorf("session %q status %s, want %s", id, sub.Status, want)
 		}
@@ -210,10 +210,28 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 	}
 
 	e.RevokeSession()
-	for _, id := range []string{bob, DefaultSession} {
-		if sub, _ := sessions.Get(id); sub.Status != StatusRevoked {
-			t.Errorf("after installation revocation session %q is %s", id, sub.Status)
-		}
+	if sub, _ := sessions.Get(bob); sub.Status != StatusRevoked {
+		t.Errorf("after installation revocation session %q is %s", bob, sub.Status)
+	}
+}
+
+func TestEmptySessionIsNotLive(t *testing.T) {
+	sessions := NewSessions()
+	e := &Evaluator{sessions: sessions}
+	if live, reason := e.sessionLive(""); live || reason != ReasonSessionNotFound {
+		t.Fatalf("sessionLive(empty) = %t, %q; want false, %q", live, reason, ReasonSessionNotFound)
+	}
+	if d, err := e.Evaluate(context.Background(), Request{Tool: "github.create_issue"}); err != nil || d.ReasonCode != ReasonSessionNotFound {
+		t.Errorf("Evaluate(empty) = %+v, %v; want %s", d, err, ReasonSessionNotFound)
+	}
+	if g, err := e.EvaluateConnector(context.Background(), Request{Connector: &ConnectorTarget{ConnectorID: "c", Capability: "x"}}); err != nil || g.ReasonCode != ReasonSessionNotFound {
+		t.Errorf("EvaluateConnector(empty) = %+v, %v; want %s", g, err, ReasonSessionNotFound)
+	}
+	if d, err := e.AuthorizeShell(context.Background(), "", "git status", "agent"); err != nil || d.ReasonCode != ReasonSessionNotFound {
+		t.Errorf("AuthorizeShell(empty) = %+v, %v; want %s", d, err, ReasonSessionNotFound)
+	}
+	if d, v2, err := e.AuthorizeV2Model(context.Background(), "", "agent", "profile"); err != nil || !v2 || d.ReasonCode != ReasonSessionNotFound {
+		t.Errorf("AuthorizeV2Model(empty) = %+v, v2=%t, %v; want %s", d, v2, err, ReasonSessionNotFound)
 	}
 }
 
@@ -232,7 +250,7 @@ func TestRevokingServicePrincipalSessionPreservesTypedSubject(t *testing.T) {
 
 // TestSessionsMaxAge: a named session is recycled after 8 hours (max age)
 // regardless of use; the next sessionLive check returns session_revalidation_required;
-// onRecycle and onEnd both fire; the default session is not affected.
+// onRecycle and onEnd both fire.
 func TestSessionsMaxAge(t *testing.T) {
 	s := NewSessions()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
@@ -246,7 +264,6 @@ func TestSessionsMaxAge(t *testing.T) {
 
 	young, _ := s.Create(Subject{UserID: "u-young", Status: StatusLinked})
 	old, _ := s.Create(Subject{UserID: "u-old", Status: StatusLinked})
-	_ = s.Start(Subject{UserID: "u-default", Status: StatusLinked})
 
 	// Both are still live before 8 h.
 	if _, ok := s.Get(young); !ok {
@@ -292,17 +309,6 @@ func TestSessionsMaxAge(t *testing.T) {
 		t.Errorf("onRecycle ran %d times, want 2", recycled.Load())
 	}
 
-	// Default session is never recycled.
-	now = now.Add(SessionMaxAge + time.Second)
-	if _, ok := s.Current(); !ok {
-		t.Error("the default session must never be recycled")
-	}
-	if ended.Load() != 2 {
-		t.Errorf("default session must not trigger onEnd")
-	}
-	if recycled.Load() != 2 {
-		t.Errorf("default session must not trigger onRecycle")
-	}
 }
 
 // TestSessionsMaxAgeRecycleReason: calling Evaluate/EvaluateConnector/

@@ -7,18 +7,23 @@ the rule to follow until then.
 ## Every connector adapter is compiled into kei-proxy
 
 Tracked as [HAI-320](https://linear.app/haikeilabs/issue/HAI-320/tech-debt-every-connector-adapter-is-compiled-into-kei-proxy-binary).
-Raised in review of the Grafana adapter (HAI-311).
+Raised in review of the Grafana adapter (HAI-311). **Resolved 2026-10-27
+(HAI-724 slice 3):** every `internal/connector/<provider>` package, the
+`httpapi` invoker, and their helpers (`input`, `skillsrepo`, `connectortest`,
+and the root `internal/connector` package) are deleted from this repo; the
+binary no longer carries any adapter. The record below is kept for the
+measurement and because the pattern could return wherever provider execution
+lands next.
 
 ### Issue
 
-Each connector adapter (`internal/connector/<provider>`) is a Go package.
-Since HAI-724 removed the runtime's connector execution (`connector invoke`,
+Each connector adapter (`internal/connector/<provider>`) was a Go package.
+After HAI-724 removed the runtime's connector execution (`connector invoke`,
 `POST /v1/connectors:invoke`, `internal/connector/invoke`'s executor wiring),
-nothing imports them; they remain only until the HAI-724 cleanup slice deletes
-them. Every
-`kei-proxy` binary therefore carries every adapter, whether or not a tenant
-uses that provider. Each new connector makes the binary larger, and it also
-widens the code every customer runs and has to trust.
+nothing imported them, and until the cleanup slice deleted them every
+`kei-proxy` binary carried every adapter, whether or not a tenant used that
+provider. Each new connector made the binary larger, and it also widened the
+code every customer runs and has to trust.
 
 ### Measurement (2026-10-01, with the discord and grafana adapters)
 
@@ -40,8 +45,8 @@ widens the code every customer runs and has to trust.
   backends' cloud SDKs (`aws-sdk-go-v2` ~0.9 MB and the Azure SDK ~0.36 MB of
   symbols). Adapters written on `net/http` add only kilobytes each.
 
-So today the cost per connector is negligible. The debt is in the pattern,
-not the current size.
+So at the time the cost per connector was negligible. The debt was in the
+pattern, not the current size.
 
 ### Risk
 
@@ -85,16 +90,7 @@ connectors, with build tags (1) or out-of-process adapters (2) for the rest.
 
 ### Interim rule
 
-Until HAI-320 is resolved:
-
-- **No heavy SDKs in adapters.** Write adapters on the standard library
-  (`net/http`, `encoding/json`) plus `kei-connector-contracts` and the
-  runtime's internal packages, as the discord, grafana, notion, and tito
-  adapters do (crm adds only the small `github.com/google/uuid`, already a
-  runtime dependency). A new third-party dependency in `internal/connector/<provider>`
-  needs a review comment that justifies it and states its size impact.
-- Check before merging a new adapter:
-  `go list -f '{{join .Imports "\n"}}' ./internal/connector/<provider>` should
-  show only stdlib, `kei-connector-contracts`,
-  `kei-connector-runtime/internal/...`, and existing small module
-  dependencies.
+Moot since the resolution above: there are no adapters left in this repo to
+review. Wherever provider execution lands next (HAI-320's options), carry the
+rule there: no heavy SDKs in adapters, and check each new adapter's imports
+before merging.

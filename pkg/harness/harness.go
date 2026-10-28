@@ -16,6 +16,7 @@ const (
 	ClaudeCode Kind = "claude_code"
 	Codex      Kind = "codex"
 	OpenCode   Kind = "opencode"
+	Cursor     Kind = "cursor"
 )
 
 // Env contains paths needed for read-only discovery and rendering. Empty paths

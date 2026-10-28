@@ -175,15 +175,12 @@ type LocalPDP struct {
 	emit      EmitAuditFunc
 	keychain  SessionKeychain
 
-	// creds is the legacy default session's credential store; each named
-	// session has its own in sessionCreds (id -> *credrelease.Store).
-	creds              *credrelease.Store
-	sessionCreds       sync.Map
-	runner             http.Handler
-	toolRegistrar      ToolRegistrar
-	modelConfigHandler http.Handler
-	// deprecated records the routes already warned about the default session.
-	deprecated            sync.Map
+	// creds creates per-session credential stores held in sessionCreds.
+	creds                 *credrelease.Store
+	sessionCreds          sync.Map
+	runner                http.Handler
+	toolRegistrar         ToolRegistrar
+	modelConfigHandler    http.Handler
 	stopSweep             chan struct{}
 	closeOnce             sync.Once
 	ownerMu               sync.RWMutex
@@ -325,16 +322,6 @@ func (l *LocalPDP) idleTTLSeconds() int64 {
 	return int64((l.Sessions.IdleTTL() + time.Second - 1) / time.Second)
 }
 
-// deprecate warns once per process per route that a request used the legacy
-// default session.
-func (l *LocalPDP) deprecate(route string) {
-	if _, warned := l.deprecated.LoadOrStore(route, struct{}{}); !warned {
-		slog.Warn("default_session_deprecated", "route", route,
-			"detail", "name a session: PUT /v1/session with "+sessionSchemaV2+", then send "+session.Header+" (or KEI_SESSION_ID)")
-	}
-
-}
-
 func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
 
 // SetCredentialStore turns on session credential release
@@ -390,7 +377,7 @@ func (l *LocalPDP) DropConnectorCredential(id, connectorID, resource string) {
 // credentialStore is session id's credential store, or nil.
 func (l *LocalPDP) credentialStore(id string) *credrelease.Store {
 	if id == pdp.DefaultSession {
-		return l.creds
+		return nil
 	}
 	if v, ok := l.sessionCreds.Load(id); ok {
 		return v.(*credrelease.Store)
@@ -401,12 +388,6 @@ func (l *LocalPDP) credentialStore(id string) *credrelease.Store {
 // flushSession zeroes session id's credentials; a named session's store is
 // also dropped.
 func (l *LocalPDP) flushSession(id string) {
-	if id == pdp.DefaultSession {
-		if l.creds != nil {
-			l.creds.Flush()
-		}
-		return
-	}
 	l.dropSessionCredentials(id)
 }
 
@@ -473,44 +454,6 @@ func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp
 	return g, id, err
 }
 
-// AuthorizeMCPTool decides an MCP tool call with the local PDP and the
-// session subject, using the v2 harness_policies set (mcp: dst pattern).
-// Before the identity resolves, every call denies policy_bundle_missing.
-// The error is non-nil only when ctx is done.
-func (l *LocalPDP) AuthorizeMCPTool(ctx context.Context, sessionID, slug, tool, agentID, harnessKind string) (pdp.Decision, error) {
-	e := l.evaluator.Load()
-	if e == nil {
-		if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
-			return pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}, nil
-		}
-		return pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}, nil
-	}
-	return e.AuthorizeV2MCP(ctx, sessionID, slug, tool, agentID, harnessKind)
-}
-
-// RouteKeySession checks that a named session may have an MCP route key
-// (ADR-036 §4.4) and returns its subject and agent: agentID, or the runtime
-// identity's agent. reason is a deny code when it may not.
-func (l *LocalPDP) RouteKeySession(sessionID, agentID string) (subject, agent, reason string) {
-	if sessionID == pdp.DefaultSession || !l.Sessions.Exists(sessionID) {
-		return "", "", pdp.ReasonSessionNotFound
-	}
-	sub, ok := l.Sessions.Get(sessionID)
-	if !ok || sub.Status != pdp.StatusLinked || sub.UserID == "" {
-		return "", "", "subject_unlinked"
-	}
-	agent = agentID
-	if agent == "" {
-		if id := l.identity.Load(); id != nil {
-			agent = id.AgentID
-		}
-	}
-	if agent == "" {
-		return "", "", "agent_not_assigned"
-	}
-	return sub.UserID, agent, ""
-}
-
 // AuditScope returns the installation's org, workspace and installation ids
 // for audit records ("" before the identity resolves).
 func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
@@ -522,54 +465,6 @@ func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
 		workspaceID = *id.WorkspaceID
 	}
 	return id.OrgID, workspaceID, id.ID
-}
-
-// mcpBundle is the verified bundle in force, or nil before the identity
-// resolves or while no valid bundle is held.
-func (l *LocalPDP) mcpBundle() *policybundle.Verified {
-	e := l.evaluator.Load()
-	if e == nil {
-		return nil
-	}
-	v, ok := e.Bundle()
-	if !ok {
-		return nil
-	}
-	return v
-}
-
-// MCPConnector returns the bundle's mcp connector descriptor for slug
-// (ADR-036 §4.3). With no valid bundle there is none.
-func (l *LocalPDP) MCPConnector(slug string) (policybundle.Connector, bool) {
-	v := l.mcpBundle()
-	if v == nil {
-		return policybundle.Connector{}, false
-	}
-	return v.MCPConnector(slug)
-}
-
-// AgentBoundToConnector reports the bundle's agent_connector_bindings entry.
-func (l *LocalPDP) AgentBoundToConnector(agentID, connectorID string) bool {
-	v := l.mcpBundle()
-	return v != nil && v.AgentBoundToConnector(agentID, connectorID)
-}
-
-// MCPHosts returns host:port of every mcp descriptor URL in the bundle.
-func (l *LocalPDP) MCPHosts() []string {
-	v := l.mcpBundle()
-	if v == nil {
-		return nil
-	}
-	return v.MCPHosts()
-}
-
-// BundleDigest identifies the bundle in force ("" without one).
-func (l *LocalPDP) BundleDigest() string {
-	v := l.mcpBundle()
-	if v == nil {
-		return ""
-	}
-	return v.Digest
 }
 
 // Close stops the session sweeper and flushes every held session
@@ -684,8 +579,6 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		} else if !authenticated && ownerUnavailable {
 			writeRuntimeError(w, http.StatusForbidden, "owner_subject_unavailable", "the installation owner subject is unavailable in the current v2 bundle")
 			return
-		} else if session.FromRequest(r) == pdp.DefaultSession && authenticated && r.Method != http.MethodPut {
-			l.deprecate(r.Method + " " + r.URL.Path)
 		}
 		switch {
 		case r.URL.Path == "/v1/authorize":
@@ -718,12 +611,6 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 // the default one) and flushes only that session's credentials.
 func (l *LocalPDP) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 	id := session.FromRequest(r)
-	if id == pdp.DefaultSession {
-		l.Sessions.End()
-		l.flushSession(pdp.DefaultSession)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	if !l.Sessions.EndID(id) {
 		writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
 		return
@@ -776,8 +663,7 @@ func (l *LocalPDP) handleToolRegistration(w http.ResponseWriter, r *http.Request
 }
 
 // handleSessionStart serves PUT /v1/session. A kei.session/v2 body creates a
-// new named session and answers 201 with its id; a kei.session/v1 body
-// replaces the legacy default session (deprecated) and answers 204.
+// new named session and answers 201 with its id.
 func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSocketRequest))
 	if readErr != nil {
@@ -787,14 +673,8 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	var req socketSessionRequest
 	err := decodeSocketJSON(w, r, &req)
-	legacy := req.Schema == sessionSchema
-	if legacy {
-		// A v1 PUT ends the default session's credentials, even one rejected below.
-		l.flushSession(pdp.DefaultSession)
-		l.deprecate("PUT /v1/session " + sessionSchema)
-	}
-	if err != nil || (!legacy && req.Schema != sessionSchemaV2) {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" (or legacy "+sessionSchema+") object with no unknown fields")
+	if err != nil || req.Schema != sessionSchemaV2 {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" object with no unknown fields")
 		return
 	}
 	var fields map[string]json.RawMessage
@@ -889,15 +769,6 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			sub = resolveBundleSubject(e, req.Source, req.ExternalID)
 		}
 	}
-	if legacy {
-		if err := l.Sessions.Start(sub); err != nil {
-			writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
-			return
-		}
-		l.loadCredentials(r.Context(), pdp.DefaultSession, sub)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	id, err := l.Sessions.Create(sub)
 	if err != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_session", err.Error())
@@ -941,11 +812,6 @@ func (l *LocalPDP) loadCredentials(ctx context.Context, id string, sub pdp.Subje
 	}
 	// A DELETE or another PUT that landed before Load began must still win.
 	// A named session's end flushes its store, which discards this load.
-	if id == pdp.DefaultSession {
-		if cur, ok := l.Sessions.Current(); !ok || cur.Status != pdp.StatusLinked || cur.UserID != sub.UserID || cur.Token != sub.Token {
-			store.Flush()
-		}
-	}
 }
 
 // resolveBundleSubject looks up (source, external_id) in the evaluator's
@@ -980,25 +846,16 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	id := session.FromRequest(r)
 	subject, ok := l.Sessions.Get(id)
 	if !ok {
-		if id != pdp.DefaultSession {
-			writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
-			return
-		}
-		writeRuntimeError(w, http.StatusNotFound, "no_session", "no active session")
+		writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
 		return
 	}
-	resp := socketSessionResponse{
-		Schema: sessionSchema,
-	}
+	resp := socketSessionResponse{Schema: sessionSchemaV2, SessionID: id, IdleTTLSeconds: l.idleTTLSeconds()}
 	if subject.SubjectKind == "service_principal" {
 		resp.ServicePrincipalID = subject.UserID
 		resp.SubjectType = subject.SubjectKind
 	} else {
 		resp.UserID = subject.UserID
 		resp.Status = string(subject.Status)
-	}
-	if id != pdp.DefaultSession {
-		resp.Schema, resp.SessionID, resp.IdleTTLSeconds = sessionSchemaV2, id, l.idleTTLSeconds()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -1073,8 +930,12 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 // request's). The error is non-nil only when ctx is done.
 func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
 	d = pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
-	auditTrustedAgent = req.Tool == "pi.bash"
-	if sessionID != pdp.DefaultSession && !l.Sessions.Exists(sessionID) {
+	auditTrustedAgent = req.Tool == "shell"
+	if sessionID == "" {
+		d = pdp.Decision{ReasonCode: "session_required", DenySource: "identity", Reason: "a named session is required"}
+		return d, auditTrustedAgent, false, nil
+	}
+	if !l.Sessions.Exists(sessionID) {
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}
 		return d, auditTrustedAgent, false, nil
 	}
@@ -1092,8 +953,8 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
 	switch {
-	// "pi.bash" is the legacy adapter tool name (released contract); it becomes a generic "shell" in a follow-up ticket.
-	case req.Tool == "pi.bash":
+	// "shell" is the generic tool name for command authorization; adapters map their own shell tool to it.
+	case req.Tool == "shell":
 		if !validArgumentDigest(req.ToolArgsDigest) {
 			d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
 		} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
@@ -1105,7 +966,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			unmatched = d.ReasonCode == "no_matching_policy"
 		}
 	case req.ShellCommand != "":
-		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for pi.bash"}
+		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for the \"shell\" tool"}
 	case req.Tool != "" && req.Connector == nil && e.IsV2UnregisteredTool(req.Tool) && l.isOwnerSession(sessionID):
 		// Unregistered tool names receive a local policy decision by name.
 		// Identity and memberships come from the verified installation-owner
@@ -1420,9 +1281,7 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 	if req.OnBehalfOf != "" {
 		e.OnBehalfOf = req.OnBehalfOf
 	}
-	if sessionID != pdp.DefaultSession {
-		e.SessionID = &sessionID
-	}
+	e.SessionID = &sessionID
 	if req.Resource != "" {
 		e.ResourcesTouched = []string{req.Resource}
 	}

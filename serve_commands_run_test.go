@@ -164,7 +164,7 @@ func TestCommandRunDenyPaths(t *testing.T) {
 
 	t.Run("no session", func(t *testing.T) {
 		code, stdout, stderr := runProxyRunCLI(t, rig.socket, map[string]string{"GH_TOKEN": githubTokenRef}, "--", helper)
-		if code != 1 || stdout != "" || !strings.Contains(stderr, "no active kei-proxy session") {
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "session_not_found") {
 			t.Fatalf("exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
 		}
 	})

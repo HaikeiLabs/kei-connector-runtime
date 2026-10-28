@@ -85,7 +85,7 @@ func harnessAuditRecordFrom(raw json.RawMessage) (harnessAuditRecord, bool) {
 		return harnessAuditRecord{}, false
 	}
 	switch rec.HarnessKind {
-	case "claude", "codex", "opencode":
+	case "claude", "codex", "opencode", "cursor":
 	default:
 		return harnessAuditRecord{}, false
 	}
