@@ -57,7 +57,7 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, cfg
 	if args[0] == "report" {
 		return ReportPermissions(args[1:], stdin, stdout, cfg)
 	}
-	if validHarnessKind(args[0]) {
+	if validHarnessKindIn(cfg.RuntimeStateDir, args[0]) {
 		return ReportPermissions(args, stdin, stdout, cfg)
 	}
 	fmt.Fprintf(stderr, "kei-proxy hook: unknown subcommand %q\n", args[0])
@@ -67,7 +67,7 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, cfg
 // ReportPermissions records the harness's native tool decision without
 // making or changing that decision. It always exits zero for a harness.
 func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Config) int {
-	if len(args) == 0 || !validHarnessKind(args[0]) {
+	if len(args) == 0 || !validHarnessKindIn(cfg.RuntimeStateDir, args[0]) {
 		return 0
 	}
 	kind := args[0]
@@ -237,7 +237,11 @@ var bundleKind = map[string]string{
 // harnessID under the bundle kind for the hook's short kind.
 func harnessRegistered(harnesses []policybundle.Harness, harnessID, kind string) bool {
 	want, ok := bundleKind[kind]
-	if !ok || harnessID == "" {
+	return ok && harnessRegisteredAs(harnesses, harnessID, want)
+}
+
+func harnessRegisteredAs(harnesses []policybundle.Harness, harnessID, want string) bool {
+	if want == "" || harnessID == "" {
 		return false
 	}
 	for _, h := range harnesses {
@@ -246,6 +250,29 @@ func harnessRegistered(harnesses []policybundle.Harness, harnessID, kind string)
 		}
 	}
 	return false
+}
+
+// registryKindForShortName maps a hook's short name to the bundle kind the
+// persisted bundle's registry declares for it. Report-only: no bundle, no
+// registry or an unreadable one report not found.
+func registryKindForShortName(stateDir, short string) (string, bool) {
+	if stateDir == "" || short == "" {
+		return "", false
+	}
+	store, err := policybundle.OpenStore(stateDir)
+	if err != nil {
+		return "", false
+	}
+	kinds, err := store.HarnessKinds(time.Now())
+	if err != nil {
+		return "", false
+	}
+	for _, k := range kinds {
+		if k.ShortName == short {
+			return k.Kind, true
+		}
+	}
+	return "", false
 }
 
 // harnessRegisteredFor reports whether the persisted policy bundle lists
@@ -263,6 +290,9 @@ func harnessRegisteredFor(stateDir, harnessID, kind string) bool {
 	harnesses, err := store.Harnesses(time.Now())
 	if err != nil {
 		return false
+	}
+	if want, ok := registryKindForShortName(stateDir, kind); ok {
+		return harnessRegisteredAs(harnesses, harnessID, want)
 	}
 	return harnessRegistered(harnesses, harnessID, kind)
 }

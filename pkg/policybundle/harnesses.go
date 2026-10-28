@@ -3,6 +3,8 @@ package policybundle
 import (
 	"errors"
 	"time"
+
+	"github.com/HaikeiLabs/kei-connector-contracts/bundle"
 )
 
 // Harnesses returns the registered harnesses from the persisted bundle when
@@ -33,4 +35,28 @@ func (s *Store) Harnesses(now time.Time) ([]Harness, error) {
 		return nil
 	})
 	return harnesses, err
+}
+
+// HarnessKinds returns the harness kind registry of the persisted bundle in
+// force, or nil when there is no such bundle or it carries no registry. It
+// follows the same rules as Harnesses: a missing, invalid, unsupported or
+// expired bundle reports empty.
+func (s *Store) HarnessKinds(now time.Time) ([]bundle.HarnessKind, error) {
+	var kinds []bundle.HarnessKind
+	err := s.withLock(func() error {
+		if len(s.state.Bundle) == 0 || (s.state.State != Active && s.state.State != Stale) {
+			return nil
+		}
+		aud := s.state.Audience
+		v, err := Validate(s.state.Bundle, aud.InstallationID, aud.OrgID, aud.WorkspaceID, s.state.Version-1, now)
+		switch {
+		case errors.Is(err, ErrBundleExpired), errors.Is(err, ErrBundleUnsupported):
+			return nil
+		case err != nil || v.Payload.BundleVersion != s.state.Version || v.Digest != s.state.Digest:
+			return nil
+		}
+		kinds = v.Payload.HarnessKinds
+		return nil
+	})
+	return kinds, err
 }
