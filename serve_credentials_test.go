@@ -93,6 +93,9 @@ func socketDo(t *testing.T, c *http.Client, method, path, body string) socketRes
 	}
 	req.Header.Set("Authorization", "Bearer "+credTestToken)
 	req.Header.Set("Content-Type", "application/json")
+	if id := os.Getenv("KEI_SESSION_ID"); id != "" {
+		req.Header.Set("X-Kei-Session", id)
+	}
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)

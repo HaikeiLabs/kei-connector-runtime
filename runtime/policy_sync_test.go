@@ -259,11 +259,16 @@ func TestPolicyBundleStateMachine(t *testing.T) {
 	dir := t.TempDir()
 	cfg := policyTestConfig(server.URL, dir)
 	identity := policyTestIdentity
-	evaluator, err := pdp.New(dir, pdp.Audience{InstallationID: identity.ID, OrgID: identity.OrgID, WorkspaceID: *identity.WorkspaceID}, nil)
+	sessions := pdp.NewSessions()
+	sessionID, err := sessions.Create(pdp.Subject{UserID: "u-fixture", Status: pdp.StatusLinked})
 	if err != nil {
 		t.Fatal(err)
 	}
-	connectorGet := pdp.Request{Connector: &pdp.ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.get"}}
+	evaluator, err := pdp.New(dir, pdp.Audience{InstallationID: identity.ID, OrgID: identity.OrgID, WorkspaceID: *identity.WorkspaceID}, sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorGet := pdp.Request{Session: sessionID, Connector: &pdp.ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.get"}}
 	expect := func(step string, allow bool, reasonCode string, version int64) {
 		t.Helper()
 		d, err := evaluator.Evaluate(context.Background(), connectorGet)
