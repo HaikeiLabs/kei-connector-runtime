@@ -1017,6 +1017,19 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			preq.AgentID = trusted
 		}
 		d, err = e.Evaluate(ctx, preq)
+		if err == nil && d.ReasonCode == "preflight_required" {
+			v2ToolRoute, isV2 := e.V2ToolRoute(req.Tool)
+			if isV2 {
+				switch v2ToolRoute {
+				case "connector_binding":
+					d.Reason = "tool is registered with a connector_binding route; complete-plan preflight is required, so /v1/authorize cannot authorize it"
+				default:
+					d.ReasonCode = "tool_not_registered"
+					d.DenySource = "registry"
+					d.Reason = "tool is not registered with a harness_executor route in the active v2 policy bundle; re-sync the harness tool manifest"
+				}
+			}
+		}
 	}
 	return d, auditTrustedAgent, unmatched, err
 }

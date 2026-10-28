@@ -39,6 +39,11 @@ default agent of the authenticated runtime identity (`whoami`), never the
 request's `agent_id`: omit it, or send that same agent. A request that names
 any other agent, including another agent assigned to the installation, is
 denied with `agent_mismatch`, and the audit event records the resolved agent.
+A v2 tool absent from the bundle's `harness_executor` routes is denied as
+`tool_not_registered`; the response and audit `policy_reason` direct the operator
+to re-sync the harness manifest. A tool registered with `connector_binding`
+remains denied on this decision-only endpoint as `preflight_required`, with an
+audit reason that identifies the connector route and complete-plan requirement.
 
 (The ADR-035 preflight/consume plan routes were removed with the connector
 invoke path in HAI-724; they are no longer served.)

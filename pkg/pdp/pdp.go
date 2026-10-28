@@ -468,8 +468,27 @@ func (e *Evaluator) BundleStatus() (policybundle.Status, error) {
 // IsV2HarnessTool reports whether name has an explicit harness_executor route
 // in the current verified v2 bundle. It performs no network request.
 func (e *Evaluator) IsV2HarnessTool(name string) bool {
+	route, isV2 := e.V2ToolRoute(name)
+	return isV2 && route == "harness_executor"
+}
+
+// V2ToolRoute reports the route kind for name in the current verified v2
+// bundle. The second result is false when no valid v2 bundle is active; an
+// empty route with true means the name is not registered. It performs no
+// network request.
+func (e *Evaluator) V2ToolRoute(name string) (route string, isV2 bool) {
 	v, _, err := e.check()
-	return err == nil && v.V2HarnessTool(name, e.now().UTC())
+	if err != nil || v.Payload.Schema != "kei.policy-bundle/v2" {
+		return "", false
+	}
+	now := e.now().UTC()
+	if v.V2HarnessTool(name, now) {
+		return "harness_executor", true
+	}
+	if _, ok := v.V2ConnectorTool(name, now); ok {
+		return "connector_binding", true
+	}
+	return "", true
 }
 
 // Bundle returns the verified bundle in force, or false when none is valid.
