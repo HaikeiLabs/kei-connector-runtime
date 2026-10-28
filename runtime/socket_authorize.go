@@ -176,11 +176,11 @@ type LocalPDP struct {
 	keychain  SessionKeychain
 
 	// creds creates per-session credential stores held in sessionCreds.
-	creds              *credrelease.Store
-	sessionCreds       sync.Map
-	runner             http.Handler
-	toolRegistrar      ToolRegistrar
-	modelConfigHandler http.Handler
+	creds                 *credrelease.Store
+	sessionCreds          sync.Map
+	runner                http.Handler
+	toolRegistrar         ToolRegistrar
+	modelConfigHandler    http.Handler
 	stopSweep             chan struct{}
 	closeOnce             sync.Once
 	ownerMu               sync.RWMutex
