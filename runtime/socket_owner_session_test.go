@@ -304,6 +304,70 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 	}
 }
 
+func TestSocketAuthorizeV2RouteDenialsExplainTheirRegistrationInKeiAudit(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	var auditEvent json.RawMessage
+	local := NewLocalPDP(cfg, func(event json.RawMessage) {
+		auditEvent = append(json.RawMessage(nil), event...)
+	})
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
+	local.SetIdentity(identity)
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(v2PreflightBundle(t, now), identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil || sessionResponse.SessionID == "" {
+		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+	}
+
+	call := func(tool string) socketAuthorizeResponse {
+		t.Helper()
+		body, _ := json.Marshal(socketAuthorizeRequest{Schema: authorizeRequestSchema, Tool: tool})
+		req := withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(string(body))), sessionResponse.SessionID)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var response socketAuthorizeResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &response) != nil {
+			t.Fatalf("authorize %s status=%d body=%s", tool, rec.Code, rec.Body.String())
+		}
+		return response
+	}
+	checkAudit := func(wantCode, wantReason string) {
+		t.Helper()
+		var event struct {
+			ReasonCode   string  `json:"reason_code"`
+			PolicyReason *string `json:"policy_reason"`
+		}
+		if err := json.Unmarshal(auditEvent, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.ReasonCode != wantCode || event.PolicyReason == nil || *event.PolicyReason != wantReason {
+			t.Fatalf("audit reason=%q policy_reason=%v, want %q / %q", event.ReasonCode, event.PolicyReason, wantCode, wantReason)
+		}
+	}
+
+	connector := call("github.read_repo")
+	if connector.Decision != "deny" || connector.ReasonCode != "preflight_required" || !strings.Contains(connector.Reason, "connector_binding") {
+		t.Fatalf("connector decision=%+v", connector)
+	}
+	checkAudit(connector.ReasonCode, connector.Reason)
+
+	unknown := call("utilities.oms.list_triage")
+	if unknown.Decision != "deny" || unknown.ReasonCode != "tool_not_registered" || !strings.Contains(unknown.Reason, "harness_executor") || !strings.Contains(unknown.Reason, "re-sync") {
+		t.Fatalf("unregistered harness tool decision=%+v", unknown)
+	}
+	checkAudit(unknown.ReasonCode, unknown.Reason)
+}
+
 func TestSocketAuthorizeV2HarnessToolRequiresNamedSessionAndUsesToolPolicies(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
