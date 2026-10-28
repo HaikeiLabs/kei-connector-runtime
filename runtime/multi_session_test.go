@@ -1,9 +1,11 @@
 package runtime_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -362,6 +364,19 @@ func TestEmptySessionGetAndDeleteAreNotFound(t *testing.T) {
 	}
 }
 
+func TestEmptySessionRoutesDoNotEmitDeprecationWarning(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	_, h := multiSessionPDP(t, &perSubjectI11{}, nil)
+	sessionRequest(h, http.MethodGet, "/v1/session", "", "")
+	sessionRequest(h, http.MethodDelete, "/v1/session", "", "")
+	if strings.Contains(logs.String(), "default_session_deprecated") {
+		t.Fatalf("empty session routes emitted deprecation warning: %s", logs.String())
+	}
+}
+
 // TestMultiSessionAuditCarriesSessionID: decision events name the session.
 func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	var mu sync.Mutex
@@ -388,6 +403,29 @@ func TestMultiSessionAuditCarriesSessionID(t *testing.T) {
 	}
 	if events[1]["session_id"] != bob || events[1]["invoking_subject"] != "user:u-bob" {
 		t.Errorf("named-session event = %v", events[1])
+	}
+}
+
+func TestAuditAlwaysCarriesSessionID(t *testing.T) {
+	var mu sync.Mutex
+	var events []map[string]any
+	emit := func(data json.RawMessage) {
+		var event map[string]any
+		_ = json.Unmarshal(data, &event)
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}
+	_, h := multiSessionPDP(t, &perSubjectI11{}, emit)
+	authorizeIn(t, h, "")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 0 {
+		t.Fatal("authorization emitted no audit event")
+	}
+	value, exists := events[0]["session_id"]
+	if !exists || value != "" {
+		t.Fatalf("empty-session audit session_id = %#v, exists=%t; want empty string", value, exists)
 	}
 }
 

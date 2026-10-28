@@ -1281,9 +1281,7 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 	if req.OnBehalfOf != "" {
 		e.OnBehalfOf = req.OnBehalfOf
 	}
-	if sessionID != pdp.DefaultSession {
-		e.SessionID = &sessionID
-	}
+	e.SessionID = &sessionID
 	if req.Resource != "" {
 		e.ResourcesTouched = []string{req.Resource}
 	}

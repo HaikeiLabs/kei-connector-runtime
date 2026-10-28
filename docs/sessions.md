@@ -20,6 +20,8 @@ Session failures are distinct:
 
 `pdp.DefaultSession` is the empty session ID used when a request names no session. It is never stored or live, and it has no credential store. `PUT /v1/session` rejects the legacy `kei.session/v1` schema with `invalid_request`. `GET /v1/session` and `DELETE /v1/session` without `X-Kei-Session` both return `404 session_not_found`; neither operation reads or changes a default session. The tokenless owner-session rewrite can still bind a headerless owner socket request to its verified named owner session before authorization (`runtime/socket_authorize.go:667-704`).
 
+Runtime audit events always include `session_id`; calls without a session record an empty string, while named and rewritten owner calls record the selected session ID.
+
 ## What callers should do
 
 Create a named session with `PUT /v1/session` and `kei.session/v2`, then send the returned `session_id` as `X-Kei-Session` on governed calls. If the runtime returns `session_not_found` or `session_revalidation_required`, create a fresh named session. A request without a session header has no session unless the tokenless owner-session rewrite applies.
