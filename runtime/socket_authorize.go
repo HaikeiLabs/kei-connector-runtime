@@ -626,12 +626,6 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 // the default one) and flushes only that session's credentials.
 func (l *LocalPDP) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 	id := session.FromRequest(r)
-	if id == pdp.DefaultSession {
-		l.Sessions.End()
-		l.flushSession(pdp.DefaultSession)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	if !l.Sessions.EndID(id) {
 		writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
 		return
@@ -868,25 +862,16 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	id := session.FromRequest(r)
 	subject, ok := l.Sessions.Get(id)
 	if !ok {
-		if id != pdp.DefaultSession {
-			writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
-			return
-		}
-		writeRuntimeError(w, http.StatusNotFound, "no_session", "no active session")
+		writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
 		return
 	}
-	resp := socketSessionResponse{
-		Schema: sessionSchema,
-	}
+	resp := socketSessionResponse{Schema: sessionSchemaV2, SessionID: id, IdleTTLSeconds: l.idleTTLSeconds()}
 	if subject.SubjectKind == "service_principal" {
 		resp.ServicePrincipalID = subject.UserID
 		resp.SubjectType = subject.SubjectKind
 	} else {
 		resp.UserID = subject.UserID
 		resp.Status = string(subject.Status)
-	}
-	if id != pdp.DefaultSession {
-		resp.Schema, resp.SessionID, resp.IdleTTLSeconds = sessionSchemaV2, id, l.idleTTLSeconds()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

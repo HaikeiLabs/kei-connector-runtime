@@ -201,8 +201,8 @@ func TestMultiSessionUnknownIDFailsClosed(t *testing.T) {
 	}
 }
 
-// TestMultiSessionDeleteIsolation: DELETE ends one named session and flushes
-// only its credentials; other named sessions are untouched.
+// TestMultiSessionDeleteIsolation: DELETE ends one session and flushes only
+// its credentials; other named sessions remain untouched.
 func TestMultiSessionDeleteIsolation(t *testing.T) {
 	l, h := multiSessionPDP(t, &perSubjectI11{}, nil)
 	alice, bob := createSession(t, h, "ext-alice"), createSession(t, h, "ext-bob")
@@ -218,6 +218,9 @@ func TestMultiSessionDeleteIsolation(t *testing.T) {
 	}
 	if tok, err := credentialIn(l, bob, "u-bob"); err != nil || tok != "gh-st-bob" {
 		t.Errorf("bob's credential after alice's DELETE: %q %v", tok, err)
+	}
+	if l.Sessions.Exists(pdp.DefaultSession) {
+		t.Error("empty session exists after alice's DELETE")
 	}
 	if rec := sessionRequest(h, http.MethodGet, "/v1/session", bob, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"session_id":"`+bob+`"`) {
 		t.Errorf("GET bob = %d %s", rec.Code, rec.Body.String())
@@ -330,7 +333,8 @@ func TestLegacyDefaultSessionIsNotStored(t *testing.T) {
 	if l.Sessions.Exists(pdp.DefaultSession) {
 		t.Fatal("empty session exists after legacy PUT")
 	}
-	alice, bob := createSession(t, h, "ext-alice"), createSession(t, h, "ext-bob")
+	alice := createSession(t, h, "ext-alice")
+	bob := createSession(t, h, "ext-bob")
 	if d, _ := authorizeIn(t, h, alice); d != "permit" {
 		t.Errorf("named session (alice): %s, want permit", d)
 	}
@@ -339,6 +343,22 @@ func TestLegacyDefaultSessionIsNotStored(t *testing.T) {
 	}
 	if _, ok := l.Sessions.Get(pdp.DefaultSession); ok {
 		t.Fatal("empty session remains readable")
+	}
+}
+
+func TestEmptySessionGetAndDeleteAreNotFound(t *testing.T) {
+	_, h := multiSessionPDP(t, &perSubjectI11{}, nil)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		rec := sessionRequest(h, method, "/v1/session", "", "")
+		var out struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		if rec.Code != http.StatusNotFound || out.Error.Code != pdp.ReasonSessionNotFound {
+			t.Errorf("%s empty session = %d %s, want 404 session_not_found", method, rec.Code, rec.Body.String())
+		}
 	}
 }
 
