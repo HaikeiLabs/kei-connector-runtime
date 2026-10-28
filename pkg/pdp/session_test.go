@@ -60,9 +60,21 @@ func TestSessionsCreateGetEnd(t *testing.T) {
 	}
 }
 
+func TestSessionsDoNotStoreEmptyDefaultSession(t *testing.T) {
+	s := NewSessions()
+	if err := s.Start(Subject{UserID: "u-default", Status: StatusLinked}); err == nil {
+		t.Fatal("Start accepted an empty/default session")
+	}
+	if _, ok := s.Get(DefaultSession); ok || s.Exists(DefaultSession) {
+		t.Fatal("the empty session is still stored or live")
+	}
+	if s.EndID(DefaultSession) {
+		t.Fatal("EndID reported an empty session as live")
+	}
+}
+
 // TestSessionsIdleTTL: a named session ends after the idle TTL without use;
-// each use restarts the clock; Sweep ends idle ones; the default session
-// never expires.
+// each use restarts the clock and Sweep ends idle ones.
 func TestSessionsIdleTTL(t *testing.T) {
 	s := NewSessions()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
@@ -73,7 +85,6 @@ func TestSessionsIdleTTL(t *testing.T) {
 
 	used, _ := s.Create(Subject{UserID: "u-1", Status: StatusLinked})
 	idle, _ := s.Create(Subject{UserID: "u-2", Status: StatusLinked})
-	_ = s.Start(Subject{UserID: "u-default", Status: StatusLinked})
 
 	now = now.Add(50 * time.Second)
 	if _, ok := s.Get(used); !ok {
@@ -92,9 +103,6 @@ func TestSessionsIdleTTL(t *testing.T) {
 	}
 	if ended.Load() != 2 {
 		t.Errorf("end hook ran %d times, want 2", ended.Load())
-	}
-	if _, ok := s.Current(); !ok {
-		t.Error("the default session expired")
 	}
 }
 
@@ -209,9 +217,6 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 
 func TestEmptySessionIsNotLive(t *testing.T) {
 	sessions := NewSessions()
-	if err := sessions.Start(Subject{UserID: "u-default", Status: StatusLinked}); err != nil {
-		t.Fatal(err)
-	}
 	e := &Evaluator{sessions: sessions}
 	if live, reason := e.sessionLive(""); live || reason != ReasonSessionNotFound {
 		t.Fatalf("sessionLive(empty) = %t, %q; want false, %q", live, reason, ReasonSessionNotFound)
@@ -245,7 +250,7 @@ func TestRevokingServicePrincipalSessionPreservesTypedSubject(t *testing.T) {
 
 // TestSessionsMaxAge: a named session is recycled after 8 hours (max age)
 // regardless of use; the next sessionLive check returns session_revalidation_required;
-// onRecycle and onEnd both fire; the default session is not affected.
+// onRecycle and onEnd both fire.
 func TestSessionsMaxAge(t *testing.T) {
 	s := NewSessions()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
@@ -259,7 +264,6 @@ func TestSessionsMaxAge(t *testing.T) {
 
 	young, _ := s.Create(Subject{UserID: "u-young", Status: StatusLinked})
 	old, _ := s.Create(Subject{UserID: "u-old", Status: StatusLinked})
-	_ = s.Start(Subject{UserID: "u-default", Status: StatusLinked})
 
 	// Both are still live before 8 h.
 	if _, ok := s.Get(young); !ok {
@@ -305,17 +309,6 @@ func TestSessionsMaxAge(t *testing.T) {
 		t.Errorf("onRecycle ran %d times, want 2", recycled.Load())
 	}
 
-	// Default session is never recycled.
-	now = now.Add(SessionMaxAge + time.Second)
-	if _, ok := s.Current(); !ok {
-		t.Error("the default session must never be recycled")
-	}
-	if ended.Load() != 2 {
-		t.Errorf("default session must not trigger onEnd")
-	}
-	if recycled.Load() != 2 {
-		t.Errorf("default session must not trigger onRecycle")
-	}
 }
 
 // TestSessionsMaxAgeRecycleReason: calling Evaluate/EvaluateConnector/

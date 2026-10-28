@@ -54,9 +54,9 @@ func newCredentialPDP(t *testing.T, stateDir string) (*keiruntime.LocalPDP, *ses
 }
 
 // requireHeld asserts the session holds the github credential.
-func requireHeld(t *testing.T, l *keiruntime.LocalPDP, subject string) {
+func requireHeld(t *testing.T, l *keiruntime.LocalPDP, sessionID, subject string) {
 	t.Helper()
-	err := l.UseCredential(context.Background(), "", subject, "github", func(token string) error {
+	err := l.UseCredential(context.Background(), sessionID, subject, "github", func(token string) error {
 		if token != "gh-session-token" {
 			return errors.New("unexpected credential")
 		}
@@ -68,9 +68,9 @@ func requireHeld(t *testing.T, l *keiruntime.LocalPDP, subject string) {
 }
 
 // requireFlushed asserts the session holds no credential.
-func requireFlushed(t *testing.T, l *keiruntime.LocalPDP, subject string) {
+func requireFlushed(t *testing.T, l *keiruntime.LocalPDP, sessionID, subject string) {
 	t.Helper()
-	err := l.UseCredential(context.Background(), "", subject, "github", func(string) error {
+	err := l.UseCredential(context.Background(), sessionID, subject, "github", func(string) error {
 		t.Fatal("callback ran with a flushed credential")
 		return nil
 	})
@@ -85,11 +85,9 @@ func TestSessionCredentialsFetchedOnceForLinkedCLISession(t *testing.T) {
 	l.SetKeychain(&fakeKeychain{token: "cli-subject-token", userID: "u-1"})
 	h := sessionHandler(t, l)
 
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("PUT = %d %s", rec.Code, rec.Body.String())
-	}
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"cli"}`)
 	for range 20 {
-		requireHeld(t, l, "u-1")
+		requireHeld(t, l, id, "u-1")
 	}
 	if got := f.calls(); len(got) != 1 || got[0] != "cli-subject-token" {
 		t.Fatalf("I11 calls = %v, want one with the cli token", got)
@@ -97,28 +95,17 @@ func TestSessionCredentialsFetchedOnceForLinkedCLISession(t *testing.T) {
 }
 
 func TestSessionCredentialsFlushOnEveryEndPath(t *testing.T) {
-	ends := map[string]func(t *testing.T, l *keiruntime.LocalPDP, h http.Handler){
-		"DELETE /v1/session": func(t *testing.T, _ *keiruntime.LocalPDP, h http.Handler) {
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/v1/session", nil))
+	ends := map[string]func(t *testing.T, l *keiruntime.LocalPDP, h http.Handler, id string){
+		"DELETE /v1/session": func(t *testing.T, _ *keiruntime.LocalPDP, h http.Handler, id string) {
+			rec := sessionRequest(h, http.MethodDelete, "/v1/session", id, "")
 			if rec.Code != http.StatusNoContent {
 				t.Fatalf("DELETE = %d", rec.Code)
 			}
 		},
-		"rejected new PUT": func(t *testing.T, _ *keiruntime.LocalPDP, h http.Handler) {
-			if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord"}`); rec.Code != http.StatusBadRequest {
-				t.Fatalf("PUT = %d", rec.Code)
-			}
-		},
-		"unlinked new PUT": func(t *testing.T, _ *keiruntime.LocalPDP, h http.Handler) {
-			if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"nobody"}`); rec.Code != http.StatusNoContent {
-				t.Fatalf("PUT = %d", rec.Code)
-			}
-		},
-		"daemon Close": func(_ *testing.T, l *keiruntime.LocalPDP, _ http.Handler) {
+		"daemon Close": func(_ *testing.T, l *keiruntime.LocalPDP, _ http.Handler, _ string) {
 			l.Close()
 		},
-		"installation revoked": func(_ *testing.T, l *keiruntime.LocalPDP, _ http.Handler) {
+		"installation revoked": func(_ *testing.T, l *keiruntime.LocalPDP, _ http.Handler, _ string) {
 			l.AfterSync(keiruntime.ErrInstallationRevoked)
 		},
 	}
@@ -127,12 +114,10 @@ func TestSessionCredentialsFlushOnEveryEndPath(t *testing.T) {
 			l, f := newCredentialPDP(t, t.TempDir())
 			l.SetKeychain(&fakeKeychain{token: "cli-subject-token", userID: "u-1"})
 			h := sessionHandler(t, l)
-			if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
-				t.Fatalf("PUT = %d", rec.Code)
-			}
-			requireHeld(t, l, "u-1")
-			end(t, l, h)
-			requireFlushed(t, l, "u-1")
+			id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"cli"}`)
+			requireHeld(t, l, id, "u-1")
+			end(t, l, h, id)
+			requireFlushed(t, l, id, "u-1")
 			if got := len(f.calls()); got != 1 {
 				t.Fatalf("I11 calls = %d, want 1 (no fetch after the session ended)", got)
 			}
@@ -145,10 +130,11 @@ func TestSessionCredentialsNewLinkedPUTReplacesCredentials(t *testing.T) {
 	kc := &fakeKeychain{token: "first-token", userID: "u-1"}
 	l.SetKeychain(kc)
 	h := sessionHandler(t, l)
-	putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
+	first := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"cli"}`)
 	kc.token = "second-token"
-	putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`)
-	requireHeld(t, l, "u-1")
+	second := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"cli"}`)
+	requireHeld(t, l, first, "u-1")
+	requireHeld(t, l, second, "u-1")
 	if got := f.calls(); len(got) != 2 || got[0] != "first-token" || got[1] != "second-token" {
 		t.Fatalf("I11 subject tokens = %v", got)
 	}
@@ -164,14 +150,14 @@ func TestSessionCredentialsBundleIdentityUsesItsSubjectToken(t *testing.T) {
 	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")})
 	h := sessionHandler(t, l)
 
-	putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-pending"}`)
+	pending := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-pending"}`)
 	if got := f.calls(); len(got) != 0 {
 		t.Fatalf("non-linked subject fetched credentials: %v", got)
 	}
-	requireFlushed(t, l, "u-alice")
+	requireFlushed(t, l, pending, "u-bob")
 
-	putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-linked"}`)
-	requireHeld(t, l, "u-alice")
+	linked := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-linked"}`)
+	requireHeld(t, l, linked, "u-alice")
 	if got := f.calls(); len(got) != 1 || got[0] != "es256-subject-alice" {
 		t.Fatalf("I11 subject tokens = %v", got)
 	}
@@ -185,8 +171,8 @@ func TestSessionCredentialsReconcileRevocationFlushes(t *testing.T) {
 	l, _ := newCredentialPDP(t, dir)
 	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001")})
 	h := sessionHandler(t, l)
-	putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-linked"}`)
-	requireHeld(t, l, "u-alice")
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-linked"}`)
+	requireHeld(t, l, id, "u-alice")
 
 	// The next bundle no longer grants the subject.
 	next := bundleWithIdentities(t, []policybundle.Identity{
@@ -194,7 +180,7 @@ func TestSessionCredentialsReconcileRevocationFlushes(t *testing.T) {
 	})
 	activateBundle(t, dir, bytes.Replace(next, []byte(`"bundle_version":1`), []byte(`"bundle_version":2`), 1))
 	l.AfterSync(nil)
-	requireFlushed(t, l, "u-alice")
+	requireFlushed(t, l, id, "u-alice")
 }
 
 func TestSessionCredentialsLegacyModeNeverFetches(t *testing.T) {
@@ -204,10 +190,8 @@ func TestSessionCredentialsLegacyModeNeverFetches(t *testing.T) {
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: policyTestToken, RuntimeControlPlaneURL: srv.URL}, nil)
 	l.SetKeychain(&fakeKeychain{token: "cli-subject-token", userID: "u-1"})
 	h := sessionHandler(t, l)
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"cli"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("PUT = %d", rec.Code)
-	}
-	if err := l.UseCredential(context.Background(), "", "u-1", "github", func(string) error { return nil }); err == nil {
+	id := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"cli"}`)
+	if err := l.UseCredential(context.Background(), id, "u-1", "github", func(string) error { return nil }); err == nil {
 		t.Fatal("legacy mode served a session credential")
 	}
 	if got := f.calls(); len(got) != 0 {
