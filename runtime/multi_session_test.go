@@ -324,8 +324,8 @@ func TestMultiSessionSlowSessionDoesNotBlockAnother(t *testing.T) {
 // cannot be populated; named sessions remain independent and live.
 func TestLegacyDefaultSessionIsNotStored(t *testing.T) {
 	l, h := multiSessionPDP(t, &perSubjectI11{}, nil)
-	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_session") {
-		t.Fatalf("legacy PUT = %d %s, want invalid_session", rec.Code, rec.Body.String())
+	if rec := putSession(t, h, `{"schema":"kei.session/v1","source":"discord","external_id":"ext-alice"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Fatalf("legacy PUT = %d %s, want invalid_request", rec.Code, rec.Body.String())
 	}
 	if l.Sessions.Exists(pdp.DefaultSession) {
 		t.Fatal("empty session exists after legacy PUT")
