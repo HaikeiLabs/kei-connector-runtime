@@ -948,90 +948,28 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			return pdp.Decision{ReasonCode: pdp.ReasonSubjectUnlinked, DenySource: "identity", Reason: "the principal is no longer present for this agent", BundleState: "ready"}, auditTrustedAgent, false, nil
 		}
 	}
-	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
+	target := pdp.Target{Tool: req.Tool, Action: req.Action, Resource: req.Resource}
 	if req.Connector != nil {
-		preq.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
+		target.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
 	switch {
 	// "shell" is the generic tool name for command authorization; adapters map their own shell tool to it.
 	case req.Tool == "shell":
 		if !validArgumentDigest(req.ToolArgsDigest) {
-			d = pdp.Decision{ReasonCode: pdp.ReasonInvalidToolArgsDigest, DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
-		} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
-			d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
-		} else {
-			// Never use the caller's optional AgentID; the authenticated
-			// runtime identity supplies the installation's assigned default.
-			d, err = e.AuthorizeShell(ctx, sessionID, req.ShellCommand, identity.AgentID)
-			unmatched = d.ReasonCode == "no_matching_policy"
+			return pdp.Decision{ReasonCode: pdp.ReasonInvalidToolArgsDigest, DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}, auditTrustedAgent, false, nil
 		}
+		// The caller's optional AgentID is dropped; Decide uses the
+		// authenticated runtime identity's assigned default.
+		target = pdp.Target{Shell: req.ShellCommand}
+		req.AgentID = ""
 	case req.ShellCommand != "":
-		d = pdp.Decision{ReasonCode: pdp.ReasonInvalidShellRequest, DenySource: "policy", Reason: "shell command is only valid for the \"shell\" tool"}
-	case req.Tool != "" && req.Connector == nil && e.IsV2UnregisteredTool(req.Tool) && l.isOwnerSession(sessionID):
-		// Unregistered tool names receive a local policy decision by name.
-		// Identity and memberships come from the verified installation-owner
-		// session, never the request.
-		trusted := l.trustedAgentID()
-		auditTrustedAgent = true
-		if trusted == "" {
-			d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
-			break
-		}
-		if req.AgentID != "" && req.AgentID != trusted {
-			d = pdp.Decision{ReasonCode: pdp.ReasonAgentMismatch, DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
-			break
-		}
-		preq.AgentID = trusted
-		d, err = e.AuthorizeV2UnregisteredTool(ctx, preq)
-		unmatched = d.ReasonCode == "no_matching_policy"
-	case e.IsV2HarnessTool(req.Tool):
-		// The request's AgentID is untrusted: decide for the authenticated
-		// runtime identity's default agent, and deny a request that names
-		// any other agent instead of trusting it.
-		trusted := l.trustedAgentID()
-		auditTrustedAgent = true
-		if trusted == "" {
-			d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
-			break
-		}
-		if req.AgentID != "" && req.AgentID != trusted {
-			d = pdp.Decision{ReasonCode: pdp.ReasonAgentMismatch, DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
-			break
-		}
-		preq.AgentID = trusted
-		d, err = e.AuthorizeV2HarnessTool(ctx, preq)
-	default:
-		// For v2 bundles, resolve the agent from the runtime identity.
-		// For v1 bundles, delegate agent resolution to Evaluate/bundle default.
-		if v, ok := e.Bundle(); ok && v.Payload.Schema == "kei.policy-bundle/v2" {
-			trusted := l.trustedAgentID()
-			auditTrustedAgent = true
-			if trusted == "" {
-				d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
-				break
-			}
-			if req.AgentID != "" && req.AgentID != trusted {
-				d = pdp.Decision{ReasonCode: pdp.ReasonAgentMismatch, DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
-				break
-			}
-			preq.AgentID = trusted
-		}
-		d, err = e.Evaluate(ctx, preq)
-		if err == nil && d.ReasonCode == "preflight_required" {
-			v2ToolRoute, isV2 := e.V2ToolRoute(req.Tool)
-			if isV2 {
-				switch v2ToolRoute {
-				case "connector_binding":
-					d.Reason = "tool is registered with a connector_binding route; complete-plan preflight is required, so /v1/authorize cannot authorize it"
-				default:
-					d.ReasonCode = "tool_not_registered"
-					d.DenySource = "registry"
-					d.Reason = "tool is not registered with a harness_executor route in the active v2 policy bundle; re-sync the harness tool manifest"
-				}
-			}
-		}
+		return pdp.Decision{ReasonCode: pdp.ReasonInvalidShellRequest, DenySource: "policy", Reason: "shell command is only valid for the \"shell\" tool"}, auditTrustedAgent, false, nil
 	}
-	return d, auditTrustedAgent, unmatched, err
+	res, err := e.Decide(ctx, pdp.DecideRequest{
+		Session: sessionID, Target: target, AgentID: req.AgentID,
+		TrustedAgent: l.trustedAgentID(), OwnerSession: l.isOwnerSession(sessionID),
+	})
+	return res.Decision, auditTrustedAgent || res.AuditTrustedAgent, res.Unmatched, err
 }
 
 func (l *LocalPDP) isOwnerSession(sessionID string) bool {
