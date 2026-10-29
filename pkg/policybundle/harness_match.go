@@ -1,7 +1,6 @@
 package policybundle
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/harnessmatch"
@@ -44,31 +43,10 @@ func (v *Verified) EvaluateV2MCP(slug, tool, agentID, harnessKind string, subjec
 	return v.toBundle().EvaluateV2MCP(slug, tool, agentID, harnessKind, subject, now)
 }
 
+// EvaluateHarness applies kei.harness-match/v1 to a harness tool call. It
+// delegates to the contracts evaluator, which owns the precedence (ADR-038
+// D-1 deny_overrides) and the harness condition (D-6 when {harness}), so the
+// runtime cannot drift from the bundle contract.
 func (v *Verified) EvaluateHarness(c HarnessCall) (outcome, policyID, reason string) {
-	if v != nil && v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(time.Now()) {
-		return HarnessNotRenderable, "", HarnessReasonBundleInvalid
-	}
-	var policies []harnessmatch.Policy
-	if v.Payload.Schema == "kei.policy-bundle/v2" {
-		// v2 carries harness policies under policy_set (kei#852).
-		var set v2PolicySet
-		if err := json.Unmarshal(v.Payload.PolicySet, &set); err != nil || set.HarnessMatchSemantics != "kei.harness-match/v1" {
-			return HarnessNotRenderable, "", HarnessReasonBundleInvalid
-		}
-		policies = make([]harnessmatch.Policy, len(set.HarnessPolicies))
-		for i, p := range set.HarnessPolicies {
-			policies[i] = harnessmatch.Policy{ID: p.PolicyID, Src: p.Src, Dst: p.Dst, Action: p.Action, Enabled: true, Scope: p.Scope.AgentID}
-		}
-	} else {
-		set, err := v.decodePolicySet()
-		if err != nil {
-			return HarnessNotRenderable, "", HarnessReasonBundleInvalid
-		}
-		policies = make([]harnessmatch.Policy, len(set.Policies))
-		for i, p := range set.Policies {
-			policies[i] = harnessmatch.Policy{ID: p.ID, Src: p.Src, Dst: p.Dst, Action: p.Action, Enabled: true, Scope: p.Scope.AgentID}
-		}
-	}
-	result := harnessmatch.Evaluate(c, policies)
-	return string(result.Outcome), result.PolicyID, result.Reason
+	return v.toBundle().EvaluateHarness(c)
 }

@@ -87,6 +87,15 @@ The evaluator in `kei-connector-contracts` understands both declarations. The ru
 
 The catalog protects older runtimes with a version gate: it leaves a new bundle field out unless the installation's last heartbeated `kei-proxy` version is at least the first release that accepts it, and an installation that has not reported a version gets the oldest shape. The deny-overrides gate in the catalog is `0.6.0`, the first release that accepts it, and it sits behind the `POLICY_BUNDLE_V2_DENY_OVERRIDES` fleet switch, which is off by default.
 
+## Harness condition: `when`
+
+A `kei.policy-bundle/v2` `harness_policies` row may carry an optional `when: {"harness": "<kind>"}` member (ADR-038 D-6). The rule applies only to calls made through that harness kind; a row without `when` applies to every kind. The harness is context, not identity, so it narrows a rule and never grants one.
+
+- A rule whose `when` does not match the call's harness kind does not apply, and a call whose kind is unknown never matches a `when`. A permit that never applies leaves the call to the default deny.
+- It composes with deny-overrides: a deny whose `when` matches still beats every matching permit, and a deny whose `when` does not match is not considered.
+- Only `harness_policies` rows accept it. `checks` and `tool_policies` rows are not given the harness kind, so the closed schema keeps rejecting the member there.
+- The schema is closed. A runtime that predates `when` rejects the whole bundle, so the catalog emits the member only to runtimes at or above the first release that accepts it.
+
 ## A bundle the runtime cannot parse
 
 The v1 and v2 bundle schemas are closed: an unknown field, or a value outside a pinned set, is a validation failure, not something the runtime skips. A bundle that fails validation is never activated and never replaces the active bundle, which keeps being enforced until its `not_after`. With no active bundle, every call denies.
