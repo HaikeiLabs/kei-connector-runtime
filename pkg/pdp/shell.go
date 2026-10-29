@@ -29,11 +29,11 @@ func (e *Evaluator) AuthorizeShell(ctx context.Context, sessionID, command, agen
 		return Decision{ReasonCode: ReasonSessionNotFound, DenySource: "identity", Reason: "the session subject is unavailable"}, nil
 	}
 	if agentID == "" {
-		return Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}, nil
+		return Decision{ReasonCode: ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}, nil
 	}
 	stages, ok := shellpolicy.Parse(command)
 	if !ok {
-		return Decision{ReasonCode: "unsupported_shell_syntax", DenySource: "policy", Reason: unsupportedShellReason}, nil
+		return Decision{ReasonCode: ReasonUnsupportedShellSyntax, DenySource: "policy", Reason: unsupportedShellReason}, nil
 	}
 	v, state, err := e.check()
 	if err != nil {
@@ -56,8 +56,8 @@ func (e *Evaluator) AuthorizeShell(ctx context.Context, sessionID, command, agen
 		}
 	})
 	return Decision{
-		Allow: decision.Outcome == "allow", Reason: decision.Reason, ReasonCode: decision.ReasonCode,
-		DenySource: denySource(decision.ReasonCode), PolicyID: decision.PolicyID,
+		Allow: decision.Outcome == "allow", Reason: decision.Reason, ReasonCode: ReasonCode(decision.ReasonCode),
+		DenySource: denySource(ReasonCode(decision.ReasonCode)), PolicyID: decision.PolicyID,
 		BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest,
 		PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state),
 	}, nil

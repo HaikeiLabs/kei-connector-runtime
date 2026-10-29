@@ -269,7 +269,7 @@ func TestPolicyBundleStateMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 	connectorGet := pdp.Request{Session: sessionID, Connector: &pdp.ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.get"}}
-	expect := func(step string, allow bool, reasonCode string, version int64) {
+	expect := func(step string, allow bool, reasonCode pdp.ReasonCode, version int64) {
 		t.Helper()
 		d, err := evaluator.Evaluate(context.Background(), connectorGet)
 		if err != nil {

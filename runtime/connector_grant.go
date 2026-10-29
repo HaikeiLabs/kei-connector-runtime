@@ -20,7 +20,7 @@ func (l *LocalPDP) ConnectorGrant(ctx context.Context, c invoke.DaemonCall) (inv
 	if err != nil {
 		return invoke.Grant{}, err
 	}
-	out := invoke.Grant{Allow: g.Allow, ReasonCode: g.ReasonCode, Reason: g.Reason, Enrollment: g.Enrollment, HasSession: g.HasSession, Descriptors: g.Descriptors}
+	out := invoke.Grant{Allow: g.Allow, ReasonCode: string(g.ReasonCode), Reason: g.Reason, Enrollment: g.Enrollment, HasSession: g.HasSession, Descriptors: g.Descriptors}
 	if g.HasSession && g.Subject.Status == pdp.StatusLinked {
 		out.Subject = g.Subject.UserID
 	}

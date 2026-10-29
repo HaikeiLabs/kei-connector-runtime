@@ -48,7 +48,7 @@ type Request struct {
 type Decision struct {
 	Allow          bool
 	Reason         string
-	ReasonCode     string
+	ReasonCode     ReasonCode
 	DenySource     string // runtime_state | registry | identity | policy
 	PolicyID       string
 	BundleVersion  int64
@@ -99,7 +99,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 // sessionLive reports whether the named session can be used. Empty ids are
 // never live; a named id is live only while it is in the session store. When
 // false, the returned string is the denial reason code.
-func (e *Evaluator) sessionLive(id string) (bool, string) {
+func (e *Evaluator) sessionLive(id string) (bool, ReasonCode) {
 	if id == DefaultSession {
 		return false, ReasonSessionNotFound
 	}
@@ -109,7 +109,7 @@ func (e *Evaluator) sessionLive(id string) (bool, string) {
 	return e.sessions.liveWithReason(id)
 }
 
-func sessionDenial(reasonCode ...string) Decision {
+func sessionDenial(reasonCode ...ReasonCode) Decision {
 	code := ReasonSessionNotFound
 	if len(reasonCode) > 0 && reasonCode[0] != "" {
 		code = reasonCode[0]
@@ -148,7 +148,7 @@ func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (Connect
 		return ConnectorGrant{}, err
 	}
 	if req.Connector == nil {
-		return ConnectorGrant{Decision: Decision{Reason: "connector target is required", ReasonCode: "tool_not_registered", DenySource: "registry"}}, nil
+		return ConnectorGrant{Decision: Decision{Reason: "connector target is required", ReasonCode: ReasonToolNotRegistered, DenySource: "registry"}}, nil
 	}
 	if live, reason := e.sessionLive(req.Session); !live {
 		return ConnectorGrant{Decision: sessionDenial(reason)}, nil
@@ -191,8 +191,8 @@ func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State,
 	out := Decision{
 		Allow:          d.Outcome == "allow",
 		Reason:         d.Reason,
-		ReasonCode:     d.ReasonCode,
-		DenySource:     denySource(d.ReasonCode),
+		ReasonCode:     ReasonCode(d.ReasonCode),
+		DenySource:     denySource(ReasonCode(d.ReasonCode)),
 		PolicyID:       d.PolicyID,
 		BundleVersion:  v.Payload.BundleVersion,
 		BundleDigest:   v.Digest,
@@ -256,7 +256,7 @@ func (e *Evaluator) AuthorizeV2UnregisteredTool(ctx context.Context, req Request
 		return Decision{}, err
 	}
 	if req.Session == DefaultSession {
-		return Decision{Reason: "v2 unregistered-tool authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
+		return Decision{Reason: "v2 unregistered-tool authorization requires a named session", ReasonCode: ReasonSessionRequired, DenySource: "identity"}, nil
 	}
 	if live, reason := e.sessionLive(req.Session); !live {
 		return sessionDenial(reason), nil
@@ -270,7 +270,7 @@ func (e *Evaluator) AuthorizeV2UnregisteredTool(ctx context.Context, req Request
 		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
 	}
 	d := v.EvaluateV2UnregisteredTool(req.Tool, req.AgentID, subject, e.now().UTC())
-	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: ReasonCode(d.ReasonCode), DenySource: denySource(ReasonCode(d.ReasonCode)), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
 }
 
 // IsV2UnregisteredTool reports whether name has no tool registration in the
@@ -285,7 +285,7 @@ func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, con
 		return Decision{}, err
 	}
 	if req.Session == DefaultSession {
-		return Decision{Reason: "v2 harness authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
+		return Decision{Reason: "v2 harness authorization requires a named session", ReasonCode: ReasonSessionRequired, DenySource: "identity"}, nil
 	}
 	if live, reason := e.sessionLive(req.Session); !live {
 		return sessionDenial(reason), nil
@@ -299,7 +299,7 @@ func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, con
 		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
 	}
 	d := v.EvaluateV2HarnessToolForTarget(req.Tool, req.AgentID, connectorID, capability, resource, subject, e.now().UTC())
-	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: d.ReasonCode, DenySource: denySource(d.ReasonCode), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: ReasonCode(d.ReasonCode), DenySource: denySource(ReasonCode(d.ReasonCode)), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
 }
 
 // AuthorizeV2Model decides a model call for the subject held by the request's
@@ -329,7 +329,7 @@ func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, pr
 		}
 	}
 	m := v.EvaluateV2Model(profileID, agentID, subject, e.now().UTC())
-	return Decision{Allow: m.Outcome == "allow", Reason: m.Reason, ReasonCode: m.ReasonCode, DenySource: denySource(m.ReasonCode), BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, true, nil
+	return Decision{Allow: m.Outcome == "allow", Reason: m.Reason, ReasonCode: ReasonCode(m.ReasonCode), DenySource: denySource(ReasonCode(m.ReasonCode)), BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, true, nil
 }
 
 // ReconcileSession is the compatibility wrapper for callers that ignore revoked ids.
@@ -502,14 +502,14 @@ func (e *Evaluator) check() (*policybundle.Verified, policybundle.State, error) 
 }
 
 func stateDenial(state policybundle.State) Decision {
-	code := "policy_bundle_missing"
+	code := ReasonPolicyBundleMissing
 	switch state {
 	case policybundle.Expired:
 		code = "policy_bundle_expired"
 	case policybundle.Stale:
 		code = "subject_snapshot_stale"
 	case policybundle.Invalid:
-		code = "policy_bundle_invalid"
+		code = ReasonPolicyBundleInvalid
 	case policybundle.Unsupported:
 		code = "policy_bundle_unsupported"
 	case policybundle.Revoked:
@@ -521,15 +521,15 @@ func stateDenial(state policybundle.State) Decision {
 	return Decision{Reason: "no valid local policy bundle", ReasonCode: code, DenySource: "runtime_state", BundleState: string(state)}
 }
 
-func denySource(code string) string {
+func denySource(code ReasonCode) string {
 	switch {
 	case code == "":
 		return ""
-	case strings.HasPrefix(code, "policy_bundle_"), code == "installation_revoked", code == "startup_config_invalid":
+	case strings.HasPrefix(string(code), "policy_bundle_"), code == "installation_revoked", code == "startup_config_invalid":
 		return "runtime_state"
-	case strings.HasPrefix(code, "tool_"), strings.HasPrefix(code, "agent_"), strings.HasPrefix(code, "model_"):
+	case strings.HasPrefix(string(code), "tool_"), strings.HasPrefix(string(code), "agent_"), strings.HasPrefix(string(code), "model_"):
 		return "registry"
-	case strings.HasPrefix(code, "subject_"), code == ReasonSessionNotFound, code == "session_required":
+	case strings.HasPrefix(string(code), "subject_"), code == ReasonSessionNotFound, code == ReasonSessionRequired:
 		return "identity"
 	}
 	return "policy"
