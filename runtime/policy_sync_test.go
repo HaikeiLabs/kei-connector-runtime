@@ -79,7 +79,11 @@ func (f *fakePolicyCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		w.Header().Set("Content-Type", policybundle.ContentType)
+		contentType := policybundle.ContentType
+		if bytes.Contains(f.body, []byte("kei.policy-bundle/v2")) {
+			contentType = policybundle.ContentTypeV2
+		}
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Kei-Policy-Bundle-Version", strconv.FormatInt(doc.Version, 10))
 		w.Header().Set("Cache-Control", "no-store")
@@ -104,6 +108,33 @@ func unsignedExampleBundle(t *testing.T, now time.Time) []byte {
 func bundleWithVersion(t *testing.T, now time.Time, version int64) []byte {
 	t.Helper()
 	return bytes.Replace(unsignedExampleBundle(t, now), []byte(`"bundle_version": 42`), []byte(fmt.Sprintf(`"bundle_version": %d`, version)), 1)
+}
+
+// v2StateMachineBundle is the vendored v2 example re-dated to now, addressed to
+// the fixture installation, at the given bundle version. It installs the real
+// v2 schema validator.
+func v2StateMachineBundle(t *testing.T, now time.Time, version int64) []byte {
+	t.Helper()
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	b, err := os.ReadFile(filepath.Join("..", "docs", "contracts", "examples", "policy-bundle-v2.payload.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["bundle_version"] = version
+	doc["audience"] = map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"}
+	doc["issued_at"] = now.UTC().Format(time.RFC3339)
+	doc["not_after"] = now.UTC().Add(12 * time.Hour).Format(time.RFC3339)
+	set := doc["policy_set"].(map[string]any)
+	set["org_id"], set["workspace_id"] = "org-fixture-0001", "ws-fixture-0001"
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func policyTestConfig(url, dir string) connectorruntime.Config {
@@ -288,41 +319,41 @@ func TestPolicyBundleStateMachine(t *testing.T) {
 	}
 	expect("cold start", false, "policy_bundle_missing", 0)
 
-	catalog.set(bundleWithVersion(t, now, 42), http.StatusOK, false)
+	catalog.set(v2StateMachineBundle(t, now, 42), http.StatusOK, false)
 	if err := sync(); err != nil {
 		t.Fatal(err)
 	}
-	expect("activated v42", true, "", 42)
+	expect("activated v42", false, "preflight_required", 42)
 
-	catalog.set(bundleWithVersion(t, now, 43), http.StatusOK, true)
+	catalog.set(v2StateMachineBundle(t, now, 43), http.StatusOK, true)
 	if err := sync(); err == nil {
 		t.Fatal("candidate with a digest mismatch was accepted")
 	}
-	expect("invalid candidate keeps v42", true, "", 42)
+	expect("invalid candidate keeps v42", false, "preflight_required", 42)
 
-	catalog.set(bytes.Replace(bundleWithVersion(t, now, 44), []byte(`"inst-fixture-0001"`), []byte(`"inst-other-0001"`), 1), http.StatusOK, false)
+	catalog.set(bytes.Replace(v2StateMachineBundle(t, now, 44), []byte(`"inst-fixture-0001"`), []byte(`"inst-other-0001"`), 1), http.StatusOK, false)
 	if err := sync(); err == nil {
 		t.Fatal("candidate for another installation was accepted")
 	}
-	expect("wrong audience keeps v42", true, "", 42)
+	expect("wrong audience keeps v42", false, "preflight_required", 42)
 
-	catalog.set(bundleWithVersion(t, now, 41), http.StatusOK, false)
+	catalog.set(v2StateMachineBundle(t, now, 41), http.StatusOK, false)
 	if err := sync(); err == nil {
 		t.Fatal("rollback to v41 was accepted")
 	}
-	expect("rollback keeps v42", true, "", 42)
+	expect("rollback keeps v42", false, "preflight_required", 42)
 
-	catalog.set(bundleWithVersion(t, now, 43), http.StatusOK, false)
+	catalog.set(v2StateMachineBundle(t, now, 43), http.StatusOK, false)
 	if err := sync(); err != nil {
 		t.Fatal(err)
 	}
-	expect("refresh to v43", true, "", 43)
+	expect("refresh to v43", false, "preflight_required", 43)
 
 	catalog.set(nil, http.StatusServiceUnavailable, false)
 	if err := sync(); err == nil {
 		t.Fatal("503 reported success")
 	}
-	expect("unreachable catalog keeps v43", true, "", 43)
+	expect("unreachable catalog keeps v43", false, "preflight_required", 43)
 
 	store, err := policybundle.OpenStore(dir)
 	if err != nil {

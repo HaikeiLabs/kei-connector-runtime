@@ -48,7 +48,7 @@ func multiSessionPDP(t *testing.T, f *perSubjectI11, emit keiruntime.EmitAuditFu
 		{Source: "discord", ExternalID: "ext-bob", UserID: "u-bob", Status: "linked", SubjectToken: "st-bob"},
 		{Source: "discord", ExternalID: "ext-slow", UserID: "u-slow", Status: "linked", Groups: []string{"members"}, SubjectToken: "st-slow"},
 	}
-	policy := `[{"id":"p-allow-web-search","name":"allow-web-search","src_pattern":"group:members","dst_pattern":"tool:web_search","action":"permit","priority":50,"enabled":true,"approval_required":false,"scope":{"org_id":"org-fixture-0001","workspace_id":"ws-fixture-0001","agent_id":null}}]`
+	policy := "group:members"
 	dir := t.TempDir()
 	activateBundle(t, dir, bundleWithPolicy(t, ids, policy))
 	srv := httptest.NewServer(f)

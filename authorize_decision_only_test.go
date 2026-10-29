@@ -34,7 +34,7 @@ func TestAuthorizeDecisionOnlyWhenNonDecisionComponentsAreBroken(t *testing.T) {
 	// One bundle for both rigs, so the only difference between the runs is
 	// the health of the non-decision components.
 	bundle := connectorTestBundle(t)
-	authorizeBody := `{"schema":"kei.authorize-request/v1","connector":{"connector_id":"` + githubConnectorID + `","capability":"repository.read"}}`
+	authorizeBody := `{"schema":"kei.authorize-request/v1","tool":"github.repository_read"}`
 
 	healthy := newSocketRigWithBundle(t, bundle, nil)
 	dead := httptest.NewServer(http.NotFoundHandler())
@@ -62,7 +62,7 @@ func TestAuthorizeDecisionOnlyWhenNonDecisionComponentsAreBroken(t *testing.T) {
 		t.Fatalf("the authorize decision changed when the non-decision components broke\nhealthy: %s\nbroken:  %s", healthyResp.dump, brokenResp.dump)
 	}
 
-	// The shared decision is the bundle's permit for the connector capability.
+	// The shared decision is the bundle's permit for the registered harness tool.
 	var resp struct {
 		Decision string `json:"decision"`
 		PolicyID string `json:"policy_id"`

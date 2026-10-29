@@ -11,6 +11,7 @@ import (
 
 	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
@@ -52,7 +53,7 @@ func (releaseI11) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"connector_id": releaseConnectorID, "issuer": "https://auth.example.com", "resource": body.Resource, "account_model": "per_user",
+			"connector_id": releaseConnectorID, "issuer": "https://auth.example.com", "resource": body.Resource, "account_model": "shared",
 			"credential": map[string]any{"access_token": "connector-fixture-token", "token_type": "Bearer", "expire_time": "2026-10-17T20:00:00Z"},
 		})
 	default:
@@ -60,30 +61,45 @@ func (releaseI11) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// releaseBundle is a v1 bundle: a github connector with issue.get (permitted
-// for the default agent) and issue.create (not permitted), the agent binding,
-// and one linked discord identity.
+// releaseBundle is a v2 bundle: a shared github connector with issue.get
+// (permitted for linked user u-alice through the registered github.get_issue
+// harness tool) and issue.create (declared, with no policy), and one linked
+// discord identity.
 func releaseBundle(t *testing.T) []byte {
 	t.Helper()
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
-	return []byte(fmt.Sprintf(`{
-		"schema":"kei.policy-bundle/v1",
-		"bundle_id":"release-bundle",
-		"bundle_version":1,
-		"policy_revision":1,
-		"issuer":"kei-policy-catalog",
-		"audience":{"installation_id":"inst-fixture-0001","org_id":"org-fixture-0001","workspace_id":"ws-fixture-0001"},
-		"issued_at":"%s","not_after":"%s",
-		"refresh":{"poll_interval_seconds":60,"stale_after_seconds":300},
-		"subject_resolution":{"mode":"bundle","max_cache_seconds":0},
-		"policy_set":{"schema":"kei.policy-set/v1","org_id":"org-fixture-0001","workspace_id":"ws-fixture-0001","match_semantics":"kei.match/v1","evaluation":{"order":"array_order_first_match","default":"deny"},"groups":[],"agents":[{"id":"agent-fixture-0001","is_default":true}],"tools":[{"name":"github.get_issue","service":"github","action":"github:read","connector_id":"conn-github-0001","capability":"issue.get"},{"name":"github.create_issue","service":"github","action":"github:write","connector_id":"conn-github-0001","capability":"issue.create"}],"policies":[
-			{"id":"pol-connector-get-permit","name":"connector-get-permit","src_pattern":"agent:agent-fixture-0001","dst_pattern":"capability:issue.get","action":"permit","priority":100,"enabled":true,"approval_required":false,"scope":{"org_id":"org-fixture-0001","workspace_id":"ws-fixture-0001","agent_id":"agent-fixture-0001"}}
-		],"connectors":[
-			{"id":"conn-github-0001","provider":"github","capabilities":[{"name":"issue.get","mutating":false},{"name":"issue.create","mutating":true}]}
-		]},
-		"agent_connector_bindings":[{"agent_id":"agent-fixture-0001","connector_id":"conn-github-0001","capabilities":["issue.get","issue.create"]}],
-		"identities":[{"source":"discord","external_id":"ext-alice","user_id":"u-alice","status":"linked","subject_token":"es256-subject-alice"}]
-	}`, now.Format(time.RFC3339), now.Add(12*time.Hour).Format(time.RFC3339)))
+	raw, err := json.Marshal(map[string]any{
+		"schema": "kei.policy-bundle/v2", "bundle_id": "release-bundle", "bundle_version": 1, "policy_revision": 1, "issuer": policybundle.Issuer,
+		"audience":  map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"},
+		"issued_at": now.Format(time.RFC3339Nano), "not_after": now.Add(12 * time.Hour).Format(time.RFC3339Nano),
+		"refresh": map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300}, "subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 0},
+		"policy_set": map[string]any{
+			"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2",
+			"evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
+			"tools": []any{map[string]any{
+				"name": "github.get_issue", "source": "discord", "operation_class": "read",
+				"route": map[string]any{"harness_executor": map[string]any{"executor": "discord", "registration": "github.get_issue"}},
+			}},
+			"checks": []any{},
+			"tool_policies": []any{map[string]any{
+				"policy_id": "pol-connector-get-permit", "name": "connector-get-permit", "effect": "permit", "priority": 100,
+				"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": "agent-fixture-0001"},
+				"selector": map[string]any{"source_principal": "user:u-alice", "source": "discord", "tool": "github.get_issue", "connector_id": releaseConnectorID, "capability": "issue.get", "resource_id": "*"},
+			}},
+			"harness_match_semantics": "kei.harness-match/v1", "harness_policies": []any{},
+			"connectors": []any{map[string]any{
+				"id": releaseConnectorID, "provider": "github", "credential_source": "oauth", "account_model": "shared",
+				"capabilities": []any{map[string]any{"name": "issue.get", "mutating": false}, map[string]any{"name": "issue.create", "mutating": true}},
+			}},
+		},
+		"agent_connector_bindings": []any{map[string]any{"agent_id": "agent-fixture-0001", "connector_id": releaseConnectorID, "capabilities": []string{"issue.get", "issue.create"}}},
+		"identities":               []any{map[string]any{"source": "discord", "external_id": "ext-alice", "user_id": "u-alice", "status": "linked", "subject_token": "es256-subject-alice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func releasePDP(t *testing.T) http.Handler {
@@ -110,7 +126,7 @@ func TestCredentialsReleaseRoute(t *testing.T) {
 
 	release := func(capability, resource string) *httptest.ResponseRecorder {
 		return sessionRequest(h, http.MethodPost, "/v1/credentials:release", alice,
-			fmt.Sprintf(`{"schema":"kei.credential-release-request/v1","connector":{"connector_id":"%s","capability":"%s"},"resource":"%s"}`,
+			fmt.Sprintf(`{"schema":"kei.credential-release-request/v1","tool":"github.get_issue","connector":{"connector_id":"%s","capability":"%s"},"resource":"%s"}`,
 				releaseConnectorID, capability, resource))
 	}
 

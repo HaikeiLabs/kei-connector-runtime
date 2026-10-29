@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -103,7 +104,13 @@ type runOutcome struct {
 func (rig *runDescriptorRig) run() runOutcome {
 	rig.t.Helper()
 	script := fmt.Sprintf(`touch %q; printf 'len=%%s\n' "${#API_KEY}"; printf 'raw=%%s\n' "$API_KEY"; printf 'err-raw=%%s\n' "$API_KEY" >&2`, rig.marker)
-	body, _ := json.Marshal(daemonRunRequest{Schema: daemonRunSchema, Argv: []string{"/bin/sh", "-c", script}, Env: []string{"PATH=/usr/bin:/bin", "API_KEY=" + runDescriptorRef}})
+	return rig.runWith([]string{"/bin/sh", "-c", script}, []string{"PATH=/usr/bin:/bin", "API_KEY=" + runDescriptorRef})
+}
+
+// runWith runs argv with env through the daemon route and collects the frames.
+func (rig *runDescriptorRig) runWith(argv, env []string) runOutcome {
+	rig.t.Helper()
+	body, _ := json.Marshal(daemonRunRequest{Schema: daemonRunSchema, Argv: argv, Env: env})
 	req := httptest.NewRequest(http.MethodPost, DaemonRunPath, bytes.NewReader(body))
 	session.SetHeader(req, "ks_run_378")
 	rec := httptest.NewRecorder()
@@ -209,4 +216,39 @@ func TestDaemonRunDescriptorPerUserOAuthUsesTheSessionCredential(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"decision":"allow"`) || used != "user-378/github" || rig.store.calls != 0 {
 		t.Fatalf("body %s, credential %q, store reads %d", rec.Body.String(), used, rig.store.calls)
 	}
+}
+
+// The child's environment is exactly the caller's environment with the
+// credential references resolved: nothing from the daemon's own process
+// environment reaches it. (Ported from the end-to-end root test, which can no
+// longer be permitted by a real v2 bundle.)
+func TestDaemonRunChildEnvironmentIsCallerEnvPlusRefs(t *testing.T) {
+	t.Setenv("KEI_DAEMON_ONLY_CANARY", "daemon-secret")
+	rig := newRunDescriptorRig(t)
+	out := rig.runWith([]string{"/usr/bin/env"}, []string{"PATH=/usr/bin:/bin", "EXTRA=1", "API_KEY=" + runDescriptorRef})
+	if out.done.Decision != "allow" || out.done.ExitCode != 0 {
+		t.Fatalf("done = %+v\n%s", out.done, out.raw)
+	}
+	var keys []string
+	for _, line := range strings.Split(strings.TrimSpace(out.stdout), "\n") {
+		keys = append(keys, strings.SplitN(line, "=", 2)[0])
+	}
+	sort.Strings(keys)
+	if got := strings.Join(keys, ","); got != "API_KEY,EXTRA,PATH" {
+		t.Fatalf("child environment keys = %s, want API_KEY,EXTRA,PATH\n%s", got, out.stdout)
+	}
+	if strings.Contains(out.stdout, "daemon-secret") {
+		t.Fatalf("the daemon's own environment reached the child:\n%s", out.stdout)
+	}
+	rig.assertNoLeak(out)
+}
+
+// A command that cannot be started is a typed deny, never a silent success.
+func TestDaemonRunCommandNotStartedIsATypedDeny(t *testing.T) {
+	rig := newRunDescriptorRig(t)
+	out := rig.runWith([]string{"/kei-no-such-command-hai-622"}, []string{"PATH=/usr/bin:/bin", "API_KEY=" + runDescriptorRef})
+	if out.done.Decision != "deny" || out.done.ReasonCode != "command_not_started" || out.done.ExitCode != 127 {
+		t.Fatalf("done = %+v, want deny command_not_started with exit 127", out.done)
+	}
+	rig.assertNoLeak(out)
 }

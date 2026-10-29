@@ -138,14 +138,11 @@ func TestSessionsConcurrent(t *testing.T) {
 	}
 }
 
-// TestEvaluatePerSession: a decision uses only the named session's subject;
-// an unknown, ended, or empty session denies session_not_found.
 func TestEvaluatePerSession(t *testing.T) {
-	useValidator(t, schemaValidator(t))
+	useV2Fixtures(t)
 	sessions := NewSessions()
-	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), sessions)
+	e, _, _ := newTestEvaluator(t, testNow, v2SnapshotBundle(t, testNow, 42, v2Identities()), sessions)
 	linked, _ := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
-	unlinked, _ := sessions.Create(Subject{Status: StatusUnlinked})
 
 	reason := func(id string) ReasonCode {
 		t.Helper()
@@ -155,11 +152,8 @@ func TestEvaluatePerSession(t *testing.T) {
 		}
 		return d.ReasonCode
 	}
-	if got := reason(linked); got != "" {
-		t.Errorf("linked session: reason %q, want a permit", got)
-	}
-	if got := reason(unlinked); got != "subject_unlinked" {
-		t.Errorf("unlinked session: reason %q, want subject_unlinked", got)
+	if got := reason(linked); got != "preflight_required" {
+		t.Errorf("linked session: reason %q, want preflight_required", got)
 	}
 	if got := reason(""); got != ReasonSessionNotFound {
 		t.Errorf("empty session: reason %q, want %s", got, ReasonSessionNotFound)
@@ -181,15 +175,12 @@ func TestEvaluatePerSession(t *testing.T) {
 	}
 }
 
-// TestReconcileSessionsPerSession: reconcile revokes only the sessions whose
-// subject the bundle no longer grants, and installation revocation revokes
-// them all.
 func TestReconcileSessionsPerSession(t *testing.T) {
-	useValidator(t, schemaValidator(t))
+	useV2Fixtures(t)
 	sessions := NewSessions()
-	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), sessions)
-	alice, _ := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
-	bob, _ := sessions.Create(Subject{UserID: "u-bob", Status: StatusLinked})
+	e, _, _ := newTestEvaluator(t, testNow, v2SnapshotBundle(t, testNow, 42, v2Identities()), sessions)
+	alice, _ := sessions.Create(Subject{UserID: "u-alice", Source: "discord", ExternalID: "ext-alice", Status: StatusLinked})
+	bob, _ := sessions.Create(Subject{UserID: "u-bob", Source: "discord", ExternalID: "ext-bob", Status: StatusLinked})
 
 	e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships {
 		return fakeMemberships{"u-alice": {granted: false}, "u-bob": {granted: true}}
@@ -203,10 +194,6 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 		if sub, _ := sessions.Get(id); sub.Status != want {
 			t.Errorf("session %q status %s, want %s", id, sub.Status, want)
 		}
-	}
-	d, _ := e.Evaluate(context.Background(), Request{Session: alice, Tool: "github.create_issue"})
-	if d.ReasonCode != "subject_revoked" {
-		t.Errorf("revoked session decision = %+v", d)
 	}
 
 	e.RevokeSession()
@@ -230,8 +217,8 @@ func TestEmptySessionIsNotLive(t *testing.T) {
 	if d, err := e.AuthorizeShell(context.Background(), "", "git status", "agent"); err != nil || d.ReasonCode != ReasonSessionNotFound {
 		t.Errorf("AuthorizeShell(empty) = %+v, %v; want %s", d, err, ReasonSessionNotFound)
 	}
-	if d, v2, err := e.AuthorizeV2Model(context.Background(), "", "agent", "profile"); err != nil || !v2 || d.ReasonCode != ReasonSessionNotFound {
-		t.Errorf("AuthorizeV2Model(empty) = %+v, v2=%t, %v; want %s", d, v2, err, ReasonSessionNotFound)
+	if d, err := e.AuthorizeV2Model(context.Background(), "", "agent", "profile"); err != nil || d.ReasonCode != ReasonSessionNotFound {
+		t.Errorf("AuthorizeV2Model(empty) = %+v, %v; want %s", d, err, ReasonSessionNotFound)
 	}
 }
 

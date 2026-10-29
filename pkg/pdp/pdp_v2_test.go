@@ -59,9 +59,9 @@ func TestV2SnapshotFreshAfterMaxCacheWindow(t *testing.T) {
 	if err != nil || harness.Outcome != policybundle.HarnessUnmatched {
 		t.Fatalf("harness=%+v err=%v", harness, err)
 	}
-	model, v2, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile")
-	if err != nil || !v2 || model.Allow || model.ReasonCode != "model_not_assigned" {
-		t.Fatalf("model decision=%+v v2=%v err=%v", model, v2, err)
+	model, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile")
+	if err != nil || model.Allow || model.ReasonCode != "model_not_assigned" {
+		t.Fatalf("model decision=%+v err=%v", model, err)
 	}
 	e.ReconcileSession()
 	if got, ok := sessions.Get(sessionID); !ok || got.Status != StatusLinked {
@@ -105,7 +105,10 @@ func TestV2RefreshDoesNotPreserveRemovedRemoteIdentityByUserMembership(t *testin
 	}
 }
 
-func TestAuthorizeV2ModelLeavesV1BundlesToTheLegacyPath(t *testing.T) {
+// HAI-622-F: a v1 bundle decides nothing. Every decision path denies it as
+// unsupported, with the registry-state deny source, instead of evaluating v1
+// policies or leaving the call to a legacy path.
+func TestV1BundleIsDeniedAsUnsupportedOnEveryDecisionPath(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	now := time.Now().UTC()
 	sessions := NewSessions()
@@ -114,11 +117,19 @@ func TestAuthorizeV2ModelLeavesV1BundlesToTheLegacyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	e, _, _ := newTestEvaluator(t, now, testBundle(t, now, 1, evaluatorPolicies, nil), sessions)
-	if d, v2, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile"); err != nil || v2 || d.Allow {
-		t.Fatalf("v1 bundle decision=%+v v2=%v err=%v", d, v2, err)
+	check := func(name string, d Decision, err error) {
+		t.Helper()
+		if err != nil || d.Allow || d.ReasonCode != "policy_bundle_unsupported" || d.DenySource != "runtime_state" {
+			t.Fatalf("%s: decision=%+v err=%v, want a policy_bundle_unsupported deny from runtime_state", name, d, err)
+		}
 	}
+	d, err := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "search_web", Action: "tool:search_web"})
+	check("Evaluate", d, err)
+	g, err := e.EvaluateConnector(context.Background(), Request{Session: sessionID, Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.read"}})
+	check("EvaluateConnector", g.Decision, err)
+	d, err = e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile")
+	check("AuthorizeV2Model", d, err)
 }
-
 func TestAuthorizeV2ModelDeniesWithoutABundleAndForEndedSessions(t *testing.T) {
 	now := time.Now().UTC()
 	sessions := NewSessions()
@@ -132,10 +143,10 @@ func TestAuthorizeV2ModelDeniesWithoutABundleAndForEndedSessions(t *testing.T) {
 	}
 	sessions.EndID(endedSessionID)
 	e, _, _ := newTestEvaluator(t, now, nil, sessions)
-	if d, v2, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != "policy_bundle_missing" {
-		t.Fatalf("cold decision=%+v v2=%v err=%v", d, v2, err)
+	if d, err := e.AuthorizeV2Model(context.Background(), sessionID, testAgent, "profile"); err != nil || d.Allow || d.ReasonCode != "policy_bundle_missing" {
+		t.Fatalf("cold decision=%+v err=%v", d, err)
 	}
-	if d, v2, err := e.AuthorizeV2Model(context.Background(), endedSessionID, testAgent, "profile"); err != nil || !v2 || d.Allow || d.ReasonCode != ReasonSessionNotFound {
-		t.Fatalf("ended session decision=%+v v2=%v err=%v", d, v2, err)
+	if d, err := e.AuthorizeV2Model(context.Background(), endedSessionID, testAgent, "profile"); err != nil || d.Allow || d.ReasonCode != ReasonSessionNotFound {
+		t.Fatalf("ended session decision=%+v err=%v", d, err)
 	}
 }

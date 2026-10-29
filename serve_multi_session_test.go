@@ -27,8 +27,10 @@ func (rig *socketRig) startNamedSession(t *testing.T) string {
 
 // TestDaemonNamedSessionCLIPassthrough drives the daemon's credentialed
 // route in a named session through the real CLI: run with $KEI_SESSION_ID.
-// Its audit record carries the session id; an unknown or ended id fails
-// closed before the child runs.
+// The daemon must recognise the named session (it reaches the policy decision,
+// which on a v2 bundle denies a connector reference with preflight_required),
+// while a missing, unknown or ended id fails closed with session_not_found
+// before any decision.
 func TestDaemonNamedSessionCLIPassthrough(t *testing.T) {
 	rig := newSocketRig(t)
 	id := rig.startNamedSession(t)
@@ -44,25 +46,14 @@ func TestDaemonNamedSessionCLIPassthrough(t *testing.T) {
 	code, out, errOut := runProxyRunCLI(t, rig.socket,
 		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_RUN_HELPER_EXIT": "0", "KEI_SESSION_ID": id},
 		"--", helperBinary(t))
-	if code != 0 || !strings.Contains(out, "token-sha256="+credentialCanaryDigest) {
-		t.Fatalf("run in the named session: exit %d\nstdout %s\nstderr %s", code, out, errOut)
+	if code != 1 || !strings.Contains(errOut, "preflight_required") || strings.Contains(errOut, "session_not_found") || strings.Contains(out, "token-sha256") {
+		t.Fatalf("run in the named session: exit %d, want a policy decision (preflight_required) and no child\nstdout %s\nstderr %s", code, out, errOut)
 	}
 
 	if code, _, errOut := runProxyRunCLI(t, rig.socket,
 		map[string]string{"GH_TOKEN": githubTokenRef, "KEI_RUN_HELPER_EXIT": "0", "KEI_SESSION_ID": "ks_forged"},
 		"--", helperBinary(t)); code != 1 || !strings.Contains(errOut, "session_not_found") {
 		t.Fatalf("run with an unknown session: exit %d stderr %s", code, errOut)
-	}
-
-	spool := readSpool(t, rig.cfg.AuditPath)
-	found := false
-	for _, line := range strings.Split(spool, "\n") {
-		if strings.Contains(line, `"schema":"kei.proxy-run-event/v1"`) && strings.Contains(line, `"session_id":"`+id+`"`) {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("no run audit record with the session id:\n%s", spool)
 	}
 
 	// After DELETE the id is dead on every credentialed route.

@@ -21,90 +21,6 @@ var evaluatorPolicies = []testPolicy{
 	{ID: "pol-5", Src: "*", Dst: "tool:search_web", Action: "permit"},
 }
 
-func TestEvaluate(t *testing.T) {
-	useValidator(t, schemaValidator(t))
-	onlyGetBound := []map[string]any{{"agent_id": testAgent, "connector_id": "conn-github-0001", "capabilities": []string{"issue.get"}}}
-	alice := &Subject{UserID: "u-alice", Status: StatusLinked}
-	bob := &Subject{UserID: "u-bob", Status: StatusLinked}
-	enrollment := json.RawMessage(`{"provider":"teams","url":"https://example.invalid/link"}`)
-	cases := []struct {
-		name       string
-		req        Request
-		session    *Subject
-		members    policybundle.Memberships
-		allow      bool
-		reasonCode ReasonCode
-		denySource string
-		policyID   string
-		enrollment bool
-	}{
-		{name: "agent-only permit with named session", req: Request{Tool: "search_web"}, allow: true, policyID: "pol-5"},
-		{name: "matching deny policy", req: Request{Tool: "github.delete_repo"}, reasonCode: "policy_deny", denySource: "policy", policyID: "pol-1"},
-		{name: "deny policy wins for a linked subject", req: Request{Tool: "github.delete_repo"}, session: alice, reasonCode: "policy_deny", denySource: "policy", policyID: "pol-1"},
-		{name: "default deny when nothing matches", req: Request{Tool: "github.get_issue"}, reasonCode: "no_matching_policy", denySource: "policy"},
-		{name: "unknown tool", req: Request{Tool: "shell.exec"}, reasonCode: "tool_not_registered", denySource: "registry"},
-		{name: "caller action differs from registry", req: Request{Tool: "github.get_issue", Action: "github:write"}, reasonCode: "tool_action_mismatch", denySource: "registry"},
-		{name: "agent not assigned", req: Request{Tool: "search_web", AgentID: "agent-other"}, reasonCode: "agent_not_assigned", denySource: "registry"},
-		{name: "connector capability permit", req: Request{Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.create"}}, allow: true, policyID: "pol-4"},
-		{name: "connector capability not registered", req: Request{Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.close"}}, reasonCode: "tool_not_registered", denySource: "registry"},
-		{name: "human policy with unlinked named session denies", req: Request{Tool: "github.create_issue"}, session: &Subject{Status: StatusUnlinked}, reasonCode: "subject_unlinked", denySource: "identity"},
-		{name: "linked user permit", req: Request{Tool: "github.create_issue"}, session: alice, allow: true, policyID: "pol-2"},
-		{name: "another user's policy falls through to the agent permit", req: Request{Tool: "github.create_issue"}, session: bob, allow: true, policyID: "pol-4"},
-		{name: "linked user with no matching policy", req: Request{Tool: "github.get_issue"}, session: bob, reasonCode: "no_matching_policy", denySource: "policy"},
-		{name: "group source without bundle memberships fails closed", req: Request{Tool: "search_wiki"}, session: alice, reasonCode: "subject_pending", denySource: "identity"},
-		{name: "group source with memberships permits", req: Request{Tool: "search_wiki"}, session: bob, members: fakeMemberships{"u-bob": {groups: []string{"members"}, granted: true}}, allow: true, policyID: "pol-3"},
-		{name: "subject the bundle no longer grants", req: Request{Tool: "search_web"}, session: bob, members: fakeMemberships{"u-bob": {granted: false}}, reasonCode: "subject_revoked", denySource: "identity"},
-		{name: "unlinked session gets enrollment", req: Request{Tool: "search_web"}, session: &Subject{Status: StatusUnlinked, Enrollment: enrollment}, reasonCode: "subject_unlinked", denySource: "identity", enrollment: true},
-		{name: "pending session denies before policy", req: Request{Tool: "search_web"}, session: &Subject{UserID: "u-carol", Status: StatusPending, Enrollment: enrollment}, reasonCode: "subject_pending", denySource: "identity"},
-		{name: "cross-workspace session never falls through", req: Request{Tool: "search_web"}, session: &Subject{UserID: "u-dave", Status: StatusCrossWorkspace}, reasonCode: "subject_cross_workspace", denySource: "identity"},
-	}
-	bundle := testBundle(t, testNow, 42, evaluatorPolicies, nil)
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			sessions := NewSessions()
-			subject := tc.session
-			if subject == nil {
-				subject = &Subject{UserID: "u-fixture", Status: StatusLinked}
-			}
-			sessionID, err := sessions.Create(*subject)
-			if err != nil {
-				t.Fatal(err)
-			}
-			e, _, _ := newTestEvaluator(t, testNow, bundle, sessions)
-			if tc.members != nil {
-				e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships { return tc.members }
-			}
-			req := tc.req
-			req.Session = sessionID
-			d, err := e.Evaluate(context.Background(), req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if d.Allow != tc.allow || d.ReasonCode != tc.reasonCode || d.DenySource != tc.denySource || d.PolicyID != tc.policyID {
-				t.Fatalf("decision = %+v, want allow=%v reason_code=%q deny_source=%q policy_id=%q", d, tc.allow, tc.reasonCode, tc.denySource, tc.policyID)
-			}
-			if (len(d.Enrollment) > 0) != tc.enrollment {
-				t.Fatalf("enrollment = %s, want present=%v", d.Enrollment, tc.enrollment)
-			}
-			if d.BundleVersion != 42 || d.PolicyRevision != 17 || d.BundleDigest == "" || d.BundleState != "active" {
-				t.Fatalf("decision lacks bundle provenance: %+v", d)
-			}
-		})
-	}
-	t.Run("connector capability the agent is not bound to", func(t *testing.T) {
-		sessions := NewSessions()
-		sessionID, err := sessions.Create(Subject{UserID: "u-fixture", Status: StatusLinked})
-		if err != nil {
-			t.Fatal(err)
-		}
-		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, onlyGetBound), sessions)
-		d, _ := e.Evaluate(context.Background(), Request{Session: sessionID, Connector: &ConnectorTarget{ConnectorID: "conn-github-0001", Capability: "issue.create"}})
-		if d.Allow || d.ReasonCode != "agent_not_bound_to_connector" || d.DenySource != "registry" {
-			t.Fatalf("decision = %+v", d)
-		}
-	})
-}
-
 func TestEvaluateRuntimeStateDenies(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	bundle := testBundle(t, testNow, 42, evaluatorPolicies, nil)
@@ -164,53 +80,69 @@ func TestEvaluateRespectsCanceledContext(t *testing.T) {
 	}
 }
 
+// useV2Fixtures installs the permissive v2 schema validator the v2 fixtures use.
+func useV2Fixtures(t *testing.T) {
+	t.Helper()
+	policybundle.SetV2SchemaValidator(func([]byte) error { return nil })
+	t.Cleanup(func() { policybundle.SetV2SchemaValidator(nil) })
+}
+
+// v2Identities links alice and bob in a v2 bundle's identity snapshot.
+func v2Identities() []map[string]any {
+	return []map[string]any{
+		{"source": "discord", "external_id": "ext-alice", "user_id": "u-alice", "status": "linked"},
+		{"source": "discord", "external_id": "ext-bob", "user_id": "u-bob", "status": "linked"},
+	}
+}
+
 func TestSessionLifecycle(t *testing.T) {
-	useValidator(t, schemaValidator(t))
+	useV2Fixtures(t)
 	sessions := NewSessions()
-	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), sessions)
-	revokedID, err := sessions.Create(Subject{Status: StatusRevoked, UserID: "u-alice"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A revoked session still short-circuits to deny.
-	d, _ := e.Evaluate(context.Background(), Request{Session: revokedID, Tool: "github.create_issue"})
-	if d.ReasonCode != "subject_revoked" {
-		t.Fatalf("reason code = %s, want subject_revoked", d.ReasonCode)
-	}
-	sessions.EndID(revokedID)
+	e, _, _ := newTestEvaluator(t, testNow, v2SnapshotBundle(t, testNow, 42, v2Identities()), sessions)
 	if _, err := sessions.Create(Subject{Status: StatusLinked}); err == nil {
 		t.Fatal("a linked session started without a user id")
 	}
-	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
+	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Source: "discord", ExternalID: "ext-alice", Status: StatusLinked})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := func(reasonCode ReasonCode) {
+	status := func() Status {
 		t.Helper()
-		d, _ := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "github.create_issue"})
-		if d.ReasonCode != reasonCode {
-			t.Fatalf("reason_code = %q, want %q (%+v)", d.ReasonCode, reasonCode, d)
+		sub, ok := sessions.Get(sessionID)
+		if !ok {
+			t.Fatal("session is gone")
 		}
+		return sub.Status
 	}
-	want("")
-	e.ReconcileSession() // a v1 bundle carries no memberships: nothing to revoke
-	want("")
+	e.ReconcileSession()
+	e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships {
+		return fakeMemberships{"u-alice": {granted: true}}
+	}
+	e.ReconcileSession() // the bundle still grants alice: nothing to revoke
+	if got := status(); got != StatusLinked {
+		t.Fatalf("status = %s after a reconcile that still grants alice, want linked", got)
+	}
 	e.memberships = func(*policybundle.Verified, time.Time) policybundle.Memberships {
 		return fakeMemberships{"u-alice": {granted: false}}
 	}
 	e.ReconcileSession()
 	e.memberships = policybundle.BundleMembershipsAt
-	want("subject_revoked")
+	if got := status(); got != StatusRevoked {
+		t.Fatalf("status = %s after the bundle stopped granting alice, want revoked", got)
+	}
 	sessions.EndID(sessionID)
-	want(ReasonSessionNotFound)
-	sessionID, err = sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
+	if d, _ := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "github.create_issue"}); d.ReasonCode != ReasonSessionNotFound {
+		t.Fatalf("reason_code = %q, want %q for an ended session", d.ReasonCode, ReasonSessionNotFound)
+	}
+	sessionID, err = sessions.Create(Subject{UserID: "u-alice", Source: "discord", ExternalID: "ext-alice", Status: StatusLinked})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.RevokeSession()
-	want("subject_revoked")
+	if got := status(); got != StatusRevoked {
+		t.Fatalf("status = %s after installation revocation, want revoked", got)
+	}
 }
-
 func TestReconcileBundleSessionRevokesWhenIdentitySnapshotDropsSubject(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	bundle := testBundle(t, testNow, 42, evaluatorPolicies, nil)
