@@ -11,6 +11,8 @@ type Target struct {
 	Resource  string
 	Connector *ConnectorTarget
 	Shell     string // a command line; makes this a shell target
+	// ShellKind is the harness kind whose shell this is; empty means pi.
+	ShellKind string
 }
 
 // DecideRequest is one governed call for Decide. The subject is the session's;
@@ -45,7 +47,11 @@ func (e *Evaluator) Decide(ctx context.Context, req DecideRequest) (DecideResult
 	t := req.Target
 	preq := Request{Session: req.Session, Tool: t.Tool, Action: t.Action, Resource: t.Resource, AgentID: req.AgentID, Connector: t.Connector}
 	if t.Shell != "" {
-		d, err := e.AuthorizeShell(ctx, req.Session, t.Shell, req.TrustedAgent)
+		kind := t.ShellKind
+		if kind == "" {
+			kind = "pi"
+		}
+		d, err := e.AuthorizeShellForKind(ctx, req.Session, kind, t.Shell, req.TrustedAgent)
 		return DecideResult{Decision: d, Unmatched: d.ReasonCode == ReasonNoMatchingPolicy, AuditTrustedAgent: true}, err
 	}
 	switch {

@@ -15,6 +15,13 @@ import (
 // and membership come only from the live local session and verified bundle;
 // agentID must be the daemon's trusted default assignment.
 func (e *Evaluator) AuthorizeShell(ctx context.Context, sessionID, command, agentID string) (Decision, error) {
+	return e.AuthorizeShellForKind(ctx, sessionID, "pi", command, agentID)
+}
+
+// AuthorizeShellForKind is AuthorizeShell for the harness kind whose shell the
+// local PDP decides (the bundle registry's shell_tool): harness:<kind>
+// policy sources match that kind.
+func (e *Evaluator) AuthorizeShellForKind(ctx context.Context, sessionID, kind, command, agentID string) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
@@ -45,7 +52,7 @@ func (e *Evaluator) AuthorizeShell(ctx context.Context, sessionID, command, agen
 	}
 	now := e.now().UTC()
 	decision := shellpolicy.Evaluate(stages, func(argv []string) (policybundle.Decision, shellpolicy.Verdict) {
-		d := v.EvaluateV2Shell(argv, agentID, subject, now)
+		d := v.EvaluateV2ShellForKind(kind, argv, agentID, subject, now)
 		switch {
 		case d.Outcome == "allow":
 			return d, shellpolicy.Allow
@@ -66,3 +73,20 @@ func (e *Evaluator) AuthorizeShell(ctx context.Context, sessionID, command, agen
 // unsupportedShellReason names what is supported so a denied agent can rewrite
 // the command instead of retrying it.
 const unsupportedShellReason = "use one command, or commands joined with && || ; |; redirects other than 2>&1 and /dev/null, subshells, substitutions and globs are not supported"
+
+// ShellKindForTool returns the harness kind whose shell command line the local
+// PDP decides when tool is that kind's shell tool. The generic "shell" tool is
+// always kind pi's. Any other tool is a shell tool only when the verified
+// bundle carries a harness kind registry that names it as a kind's shell_tool;
+// with no registry, or no bundle yet, the legacy pi.bash is not one.
+func (e *Evaluator) ShellKindForTool(tool string) (kind string, ok bool) {
+	if tool == "shell" {
+		return "pi", true
+	}
+	v, found := e.Bundle()
+	if !found || len(v.Payload.HarnessKinds) == 0 {
+		return "", false
+	}
+	k, ok := v.Payload.HarnessKindForShellTool(tool)
+	return k.Kind, ok
+}
