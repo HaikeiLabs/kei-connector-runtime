@@ -37,13 +37,13 @@ Before activation, the runtime checks the canonical schema, duplicate JSON keys,
 
 The runtime checks the tool and its canonical action from the verified policy bundle, not a caller-selected action. Service and connector capability metadata are also read from that bundle. A legacy `action=read, resource=web_search` request does not match the typed tool selector.
 
-Policy matching follows `kei.match/v1`. Today's released `kei-proxy` (`proxy-v0.4.0` is the newest tag) consumes policies in the catalog's array order (ADR-028: `priority DESC`, deny before permit, `id ASC`): the first matching policy decides, and no match denies. Subject memberships are never embedded in the bundle. Approval flags do not act as per-call tokens; workspace access is resolved online. The next section describes the replacement for this ordering, which is merged in the evaluator but not yet released.
+Policy matching follows `kei.match/v1`. A bundle that does not declare deny-overrides is decided in the catalog's array order (ADR-028: `priority DESC`, deny before permit, `id ASC`): the first matching policy decides, and no match denies. Subject memberships are never embedded in the bundle. Approval flags do not act as per-call tokens; workspace access is resolved online. The next section describes the replacement for this ordering, which `kei-proxy` accepts from 0.6.0.
 
 A local decision does not move provider payloads, results, or credentials to the catalog. Credential lookup/provider execution remains tenant-side and occurs only after a local allow.
 
 ## Deny-overrides evaluation
 
-This section describes behavior that is **not in a released `kei-proxy` yet**. The newest release tag is `proxy-v0.4.0`, and it still orders policies by priority as described above. Deny-overrides ships starting with the `kei-proxy` release that includes it. This page names no version number for it until that tag exists.
+Deny-overrides is accepted from **`kei-proxy` 0.6.0**: `proxy-v0.6.0` is the first release whose v2 bundle schema and evaluator accept it (checked by running its schema and evaluator tests at the tag). A release before 0.6.0, including `proxy-v0.5.0`, rejects a bundle that declares it, because its closed v2 schema pins `precedence` to the legacy list; it rejects the whole bundle, not just the field (see [A bundle the runtime cannot parse](#a-bundle-the-runtime-cannot-parse)). The catalog sends it only to an installation whose last heartbeated `kei-proxy` version is 0.6.0 or later, and only while the `POLICY_BUNDLE_V2_DENY_OVERRIDES` fleet switch is on (it is off by default); every other installation keeps the legacy ordering described above.
 
 Under deny-overrides the runtime collects every enabled policy that matches the request, then decides:
 
@@ -72,7 +72,7 @@ A member of `engineering` runs three commands:
 | `git status` | `p-permit-git` only | **allow** (decided by `p-permit-git`) | Only a permit matches. |
 | `make test` | none | **deny** (`no_matching_policy`) | No policy matches, so the call fails closed. |
 
-Under the priority ordering that releases up to `proxy-v0.4.0` use, the first row depends on the two policies' priorities: a permit with a higher priority than the deny would allow the push. That is the difference deny-overrides removes.
+Under the priority ordering that releases before 0.6.0 use, and that a bundle without `deny_overrides` still uses, the first row depends on the two policies' priorities: a permit with a higher priority than the deny would allow the push. That is the difference deny-overrides removes.
 
 ### Which bundles carry deny-overrides
 
@@ -81,11 +81,11 @@ A bundle declares it in the policy set:
 | Bundle | Where it is declared | Today's validators |
 |---|---|---|
 | `kei.policy-bundle/v1` | `policy_set.evaluation.order` is `deny_overrides` (the older value is `array_order_first_match`) | The runtime on `main` accepts only `array_order_first_match` here and rejects the rest as unsupported. |
-| `kei.policy-bundle/v2` | `deny_overrides` is an entry of `policy_set.evaluation.precedence` | The vendored `policy-set-v2.schema.json` on `main` accepts `precedence` as either `priority_desc`, `deny_before_permit`, `policy_id_asc` or exactly `deny_overrides`, and the runtime evaluates a bundle that declares it with deny-overrides. Any other `precedence` fails validation. |
+| `kei.policy-bundle/v2` | `deny_overrides` is an entry of `policy_set.evaluation.precedence` | From `kei-proxy` 0.6.0 the vendored `policy-set-v2.schema.json` accepts `precedence` as either `priority_desc`, `deny_before_permit`, `policy_id_asc` or exactly `deny_overrides`, and the runtime evaluates a bundle that declares it with deny-overrides. Any other `precedence` fails validation, and releases before 0.6.0 pin `precedence` to the legacy list and reject a bundle that declares `deny_overrides`. |
 
-The evaluator in `kei-connector-contracts` understands both declarations. The runtime on `main` accepts the v2 declaration, but not the v1 `order` value, and no `kei-proxy` release includes the v2 change yet. Until one does, a runtime must not be sent such a bundle.
+The evaluator in `kei-connector-contracts` understands both declarations. The runtime accepts the v2 declaration from 0.6.0 but not the v1 `order` value. A runtime older than 0.6.0 must not be sent a bundle that declares it.
 
-The catalog protects older runtimes with a version gate: it leaves a new bundle field out unless the installation's last heartbeated `kei-proxy` version is at least the first release that accepts it, and an installation that has not reported a version gets the oldest shape. The deny-overrides gate is in review in the catalog and uses a placeholder minimum version; it will be set to the release that ships the schema change.
+The catalog protects older runtimes with a version gate: it leaves a new bundle field out unless the installation's last heartbeated `kei-proxy` version is at least the first release that accepts it, and an installation that has not reported a version gets the oldest shape. The deny-overrides gate in the catalog is `0.6.0`, the first release that accepts it, and it sits behind the `POLICY_BUNDLE_V2_DENY_OVERRIDES` fleet switch, which is off by default.
 
 ## A bundle the runtime cannot parse
 
@@ -114,4 +114,4 @@ The v2 bundle may carry `harness_kinds`, a registry of the harness kinds that `h
 
 With no registry, only the built-in kinds are valid and behavior is unchanged. With a registry, the runtime validates every `harnesses[].kind` against it, and a kind it does not list makes the bundle unsupported.
 
-Support for the field is merged in `kei-proxy` source but is **not in a released `kei-proxy`**: `proxy-v0.4.0` predates it and rejects a bundle that carries it. The catalog emits the field only behind a fleet switch that is off by default and a minimum-version gate; the version in that gate is a placeholder until the release that ships the support is cut. Do not enable the switch before that release is running on the installations that fetch bundles.
+The runtime accepts the field from **`kei-proxy` 0.5.0** (`proxy-v0.5.0`); `proxy-v0.4.0` and earlier reject a bundle that carries it, the whole bundle, not just the field. The catalog side is not merged yet: the catalog does not emit `harness_kinds` today. When it does, it will be only behind a fleet switch that is off by default and a minimum-version gate. Do not enable that switch before every installation that fetches bundles runs 0.5.0 or later.
