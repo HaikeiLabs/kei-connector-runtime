@@ -54,6 +54,7 @@ func TestBuildDecisionEventInvokingSubjectFallback(t *testing.T) {
 		{name: "explicit caller", invokingSubject: "human:42", user: "user:7", want: "human:42"},
 		{name: "omitted caller", user: "user:7", want: "user:7"},
 		{name: "empty caller", invokingSubject: "", user: "user:7", want: "user:7"},
+		{name: "no subject at all", invokingSubject: "", user: "", want: "unauthenticated"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
