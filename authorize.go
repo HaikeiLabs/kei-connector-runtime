@@ -149,7 +149,24 @@ func runAuthorize(args []string) int {
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, reason, err)
 	}
 	if activeBundle.Payload.Schema == "kei.policy-bundle/v2" {
-		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "preflight_required", errors.New("v2 connector calls are not supported by one-shot authorize"))
+		// A v2 decision needs a subject, which only a daemon session holds.
+		out, err := authorizeViaDaemon(context.Background(), runtimeSocketPathFromEnv(), cfg.RuntimeToken, *sessionID, daemonAuthorizeCall{
+			Tool: *tool, Action: *action, Resource: *resource, AgentID: *agentID,
+			SpanID: *spanID, ParentSpan: *parentSpan, DelegationDepth: *delegationDepth,
+			Framework: *framework, ToolArgsDigest: *toolArgsDigest,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: a v2 policy bundle is decided by kei-proxy serve: %v\n", err)
+			return authorizeExitError
+		}
+		if err := keiruntime.WriteJSON(os.Stdout, out); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return authorizeExitError
+		}
+		if out.Decision == "deny" {
+			return authorizeExitDeny
+		}
+		return authorizeExitPermit
 	}
 	invokingSubject := *invokingSubjectFlag
 	if invokingSubject == "" && cfg.IsRuntime() {
