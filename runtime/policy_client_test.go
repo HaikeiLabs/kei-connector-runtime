@@ -174,7 +174,7 @@ func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		w.Header().Set("Content-Type", policybundle.ContentType)
+		w.Header().Set("Content-Type", policybundle.ContentTypeV2)
 		_, _ = w.Write(raw)
 	}))
 	defer server.Close()
@@ -193,7 +193,7 @@ func TestSyncPolicyBundleValidatesVersionOnNotModifiedResponse(t *testing.T) {
 }
 
 func TestSyncPolicyBundleFailsClosedOnIntegrityHeaderMismatch(t *testing.T) {
-	for _, tc := range []struct{ name, contentType, etag, version string }{{"etag", "application/vnd.kei.policy-bundle.v1+json", `"sha256:wrong"`, "42"}, {"version", "application/vnd.kei.policy-bundle.v1+json", "", "43"}, {"media type", "application/json", "", "42"}, {"schema-media mismatch", policybundle.ContentTypeV2, "", "42"}} {
+	for _, tc := range []struct{ name, contentType, etag, version string }{{"etag", policybundle.ContentTypeV2, `"sha256:wrong"`, "42"}, {"version", policybundle.ContentTypeV2, "", "43"}, {"media type", "application/json", "", "42"}, {"v1 media type", policybundle.ContentType, "", "42"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now().UTC()
 			raw := unsignedExampleBundle(t, now)

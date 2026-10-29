@@ -27,9 +27,8 @@ var (
 	namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,47}$`)
 )
 
-// ContentType is the media type for a v1 policy bundle: the legacy model the
-// catalog still folds its v2 policy set into, and the one the runtime still
-// accepts. Kept for callers that check the v1 constant.
+// ContentType is the media type of the removed v1 policy bundle. The runtime
+// rejects a response that carries it; the constant stays so callers can name it.
 const ContentType = bundle.ContentType
 
 // ContentTypeV2 is the media type for the current v2 policy bundle.
@@ -131,10 +130,9 @@ func (v *Verified) toBundle() *bundle.Verified {
 // HTTPS runtime-control-plane connection. The digest binds the exact received
 // bytes to the catalog ETag and persisted state; it is not a signature.
 //
-// The function is kept local because it decodes into the local Payload type,
-// which carries the runtime-specific AccessGrants field. The shared
-// structural validation is delegated to bundle.Validate; the local function
-// then decodes the extra field from the same bytes.
+// Only kei.policy-bundle/v2 is accepted (see ValidateV2). A
+// kei.policy-bundle/v1 bundle is rejected as unsupported with an error that
+// names the upgrade; any other schema is rejected as unsupported.
 func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, highestVersion int64, now time.Time) (*Verified, error) {
 	if len(bundleBytes) == 0 {
 		return nil, errors.New("empty policy bundle")
@@ -151,65 +149,13 @@ func Validate(bundleBytes []byte, installationID, orgID, workspaceID string, hig
 	if identity.Schema == "kei.policy-bundle/v2" {
 		return ValidateV2(bundleBytes, installationID, orgID, workspaceID, highestVersion, now)
 	}
-	if identity.Schema != "kei.policy-bundle/v1" {
-		return nil, ErrBundleUnsupported
+	if identity.Schema == "kei.policy-bundle/v1" {
+		return nil, fmt.Errorf("%w: kei.policy-bundle/v1 is no longer supported; upgrade the catalog so it delivers a kei.policy-bundle/v2 bundle, then re-sync", ErrBundleUnsupported)
 	}
-	if err := validatePayloadSchema(bundleBytes); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "additional properties") {
-			return nil, fmt.Errorf("%w: closed schema rejected unknown field", ErrBundleUnsupported)
-		}
-		return nil, fmt.Errorf("invalid policy bundle schema: %w", err)
-	}
-	var payload Payload
-	if err := strictJSON(bundleBytes, &payload); err != nil {
-		return nil, fmt.Errorf("decode policy bundle: %w", err)
-	}
-	if payload.Issuer != Issuer || payload.BundleID == "" || payload.BundleVersion < 1 || payload.PolicyRevision < 1 {
-		return nil, errors.New("invalid policy bundle identity")
-	}
-	if payload.Audience.InstallationID != installationID || payload.Audience.OrgID != orgID || payload.Audience.WorkspaceID != workspaceID {
-		return nil, errors.New("policy bundle audience mismatch")
-	}
-	if payload.BundleVersion <= highestVersion {
-		return nil, errors.New("policy bundle version rollback or replay")
-	}
-	if payload.IssuedAt.After(now.Add(MaxIssuedAtClockSkew)) {
-		return nil, errors.New("policy bundle issued too far in the future")
-	}
-	if !now.Before(payload.NotAfter) {
-		return nil, ErrBundleExpired
-	}
-	if payload.NotAfter.After(payload.IssuedAt.Add(24*time.Hour)) || !payload.NotAfter.After(payload.IssuedAt) {
-		return nil, errors.New("invalid policy bundle validity window")
-	}
-	switch payload.SubjectResolution.Mode {
-	case "online":
-	case "bundle":
-	default:
-		return nil, ErrBundleUnsupported
-	}
-	if err := validatePolicyDialect(payload.PolicySet); err != nil {
-		return nil, err
-	}
-	if err := validateHarnesses(payload.Payload); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrBundleUnsupported, err)
-	}
-	digest := sha256.Sum256(bundleBytes)
-	return &Verified{Payload: payload, PayloadBytes: append([]byte(nil), bundleBytes...), Digest: fmt.Sprintf("sha256:%x", digest)}, nil
+	return nil, ErrBundleUnsupported
 }
 
-var (
-	schemaValidator   func([]byte) error
-	schemaValidatorV2 func([]byte) error
-)
-
-// SetSchemaValidator installs the v1 bundle JSON Schema validator. It
-// delegates to the shared contracts package so both this package and
-// bundle.Validate use the same validator.
-func SetSchemaValidator(v func([]byte) error) {
-	schemaValidator = v
-	bundle.SetSchemaValidator(v)
-}
+var schemaValidatorV2 func([]byte) error
 
 // SetV2SchemaValidator installs the v2 bundle JSON Schema validator. It
 // delegates to the shared contracts package so both this package and
@@ -372,33 +318,6 @@ func validatePolicySetV2(raw json.RawMessage) error {
 				return ErrBundleUnsupported
 			}
 		}
-	}
-	return nil
-}
-
-func validatePayloadSchema(raw []byte) error {
-	if err := bundle.RejectDuplicateJSON(raw); err != nil {
-		return err
-	}
-	if schemaValidator == nil {
-		return errors.New("policy bundle schema validator is unavailable")
-	}
-	return schemaValidator(raw)
-}
-
-func validatePolicyDialect(raw json.RawMessage) error {
-	var v struct {
-		MatchSemantics string `json:"match_semantics"`
-		Evaluation     struct {
-			Order   string `json:"order"`
-			Default string `json:"default"`
-		} `json:"evaluation"`
-	}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return err
-	}
-	if v.MatchSemantics != "kei.match/v1" || v.Evaluation.Order != "array_order_first_match" || v.Evaluation.Default != "deny" {
-		return ErrBundleUnsupported
 	}
 	return nil
 }

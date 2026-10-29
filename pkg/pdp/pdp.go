@@ -170,25 +170,8 @@ func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (Connect
 	return g, nil
 }
 
-// unsupportedBundleDenial is the decision for a bundle that is not
-// kei.policy-bundle/v2. The v1 evaluator is gone, so no path decides from one.
-func unsupportedBundleDenial(v *policybundle.Verified, state policybundle.State) Decision {
-	return Decision{
-		Reason:         "this runtime decides only from a kei.policy-bundle/v2 bundle; upgrade the catalog to deliver one",
-		ReasonCode:     "policy_bundle_unsupported",
-		DenySource:     "runtime_state",
-		BundleVersion:  v.Payload.BundleVersion,
-		BundleDigest:   v.Digest,
-		PolicyRevision: v.Payload.PolicyRevision,
-		BundleState:    string(state),
-	}
-}
-
 // evaluate decides req against v and returns the session subject it used.
 func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State, req Request) (Decision, *Subject) {
-	if v.Payload.Schema != "kei.policy-bundle/v2" {
-		return unsupportedBundleDenial(v, state), nil
-	}
 	call := policybundle.Call{Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
 	if req.Connector != nil {
 		call.ConnectorID, call.Capability, call.ConnectorInvocation = req.Connector.ConnectorID, req.Connector.Capability, true
@@ -322,8 +305,8 @@ func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, con
 // AuthorizeV2Model decides a model call for the subject held by the request's
 // session (ADR-035 §6). The calling agent's model-profile assignment in the
 // bundle is the permission; nothing is resolved online. An unusable bundle
-// (missing, expired, revoked, stale) or one that is not v2 is a denial, because
-// no path may permit a model call from it.
+// (missing, expired, revoked, stale) is a denial, because no path may permit a
+// model call from it.
 func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, profileID string) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
@@ -334,9 +317,6 @@ func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, pr
 	v, state, err := e.check()
 	if err != nil {
 		return stateDenial(state), nil
-	}
-	if v.Payload.Schema != "kei.policy-bundle/v2" {
-		return unsupportedBundleDenial(v, state), nil
 	}
 	var subject *policybundle.SessionSubject
 	if e.sessions != nil {

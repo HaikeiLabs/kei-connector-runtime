@@ -179,6 +179,21 @@ func v2HarnessBundle(t *testing.T, now time.Time, status, effect string) *Verifi
 	return &Verified{Payload: payload, PayloadBytes: raw, Digest: "sha256:harness-test"}
 }
 
+// A session subject the bundle's identity snapshot does not hold is unlinked:
+// it is denied before any policy can permit the tool. (This replaces the v1
+// subject_pending case for a user missing from the bundle.)
+func TestEvaluateV2HarnessToolDeniesASubjectMissingFromTheSnapshot(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	v := v2HarnessBundle(t, now, "linked", "permit")
+	stranger := &SessionSubject{UserID: "user-stranger", Source: "discord", ExternalID: "ext-stranger", Status: SubjectLinked}
+	if d := v.EvaluateV2HarnessTool("github.review_pr", "", stranger, now); d.Outcome != "deny" || d.ReasonCode != "subject_unlinked" {
+		t.Fatalf("decision = %+v, want deny subject_unlinked", d)
+	}
+	if d := v.EvaluateV2HarnessTool("github.review_pr", "", nil, now); d.Outcome != "deny" || d.ReasonCode != "subject_unlinked" {
+		t.Fatalf("no subject: decision = %+v, want deny subject_unlinked", d)
+	}
+}
+
 func TestEvaluateV2HarnessToolRequiresFreshLinkedSessionAndPolicy(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	subject := &SessionSubject{UserID: "user-alice", Source: "discord", ExternalID: "ext-alice", Status: SubjectLinked}

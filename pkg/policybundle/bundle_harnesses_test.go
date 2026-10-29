@@ -12,10 +12,9 @@ import (
 )
 
 // realSchemaValidator compiles and returns a validator against the vendored
-// canonical schemas — the same path the real runtime init() in policy_schema.go
-// uses. This exercises validatePayloadSchema, which is the actual gate that
-// rejected production bundles (the Go struct's DisallowUnknownFields is a
-// secondary safeguard).
+// canonical v2 schemas — the same path the real runtime init() in
+// policy_schema.go uses. This is the actual gate that rejects production
+// bundles (the Go struct's DisallowUnknownFields is a secondary safeguard).
 func realSchemaValidator(t *testing.T) func([]byte) error {
 	t.Helper()
 	load := func(path string) any {
@@ -31,13 +30,13 @@ func realSchemaValidator(t *testing.T) func([]byte) error {
 	}
 	c := jsonschema.NewCompiler()
 	c.AssertFormat()
-	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v1.schema.json", load("../../docs/contracts/policy-set-v1.schema.json")); err != nil {
+	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v2.schema.json", load("../../docs/contracts/policy-set-v2.schema.json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-bundle-v1.schema.json", load("../../docs/contracts/policy-bundle-v1.schema.json")); err != nil {
+	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json", load("../../docs/contracts/policy-bundle-v2.schema.json")); err != nil {
 		t.Fatal(err)
 	}
-	s, err := c.Compile("https://schemas.haikeilabs.com/kei/policy-bundle-v1.schema.json")
+	s, err := c.Compile("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,25 +55,25 @@ func realSchemaValidator(t *testing.T) func([]byte) error {
 // one.
 func useValidator(t *testing.T, v func([]byte) error) {
 	t.Helper()
-	prev := schemaValidator
-	SetSchemaValidator(v)
-	t.Cleanup(func() { SetSchemaValidator(prev) })
+	prev := schemaValidatorV2
+	SetV2SchemaValidator(v)
+	t.Cleanup(func() { SetV2SchemaValidator(prev) })
 }
 
 // validPolicySet returns a minimal policy_set that satisfies the vendored
-// policy-set-v1.schema.json (requires schema, org_id, workspace_id).
+// policy-set-v2.schema.json.
 func validPolicySet() map[string]any {
 	return map[string]any{
-		"schema":          "kei.policy-set/v1",
-		"org_id":          "org-001",
-		"workspace_id":    "ws-001",
-		"match_semantics": "kei.match/v1",
-		"evaluation":      map[string]any{"order": "array_order_first_match", "default": "deny"},
-		"groups":          []any{},
-		"agents":          []any{},
-		"tools":           []any{},
-		"connectors":      []any{},
-		"policies":        []any{},
+		"schema":                  "kei.policy-set/v2",
+		"org_id":                  "org-001",
+		"workspace_id":            "ws-001",
+		"match_semantics":         "kei.match/v2",
+		"evaluation":              map[string]any{"precedence": []any{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
+		"tools":                   []any{},
+		"checks":                  []any{},
+		"tool_policies":           []any{},
+		"harness_policies":        []any{},
+		"harness_match_semantics": "kei.harness-match/v1",
 	}
 }
 
@@ -82,7 +81,7 @@ func validPolicySet() map[string]any {
 // policy_set without repeating boilerplate. Fields in extra override the base.
 func jsonBundle(extra map[string]any) []byte {
 	base := map[string]any{
-		"schema":                   "kei.policy-bundle/v1",
+		"schema":                   "kei.policy-bundle/v2",
 		"bundle_id":                "bundle-h001",
 		"bundle_version":           42,
 		"policy_revision":          1,
@@ -91,9 +90,10 @@ func jsonBundle(extra map[string]any) []byte {
 		"issued_at":                "2026-10-01T11:00:00Z",
 		"not_after":                "2026-10-01T23:00:00Z",
 		"refresh":                  map[string]any{"poll_interval_seconds": 300, "stale_after_seconds": 600},
-		"subject_resolution":       map[string]any{"mode": "online", "max_cache_seconds": 30},
+		"subject_resolution":       map[string]any{"mode": "bundle", "max_cache_seconds": 30},
 		"policy_set":               validPolicySet(),
 		"agent_connector_bindings": []any{},
+		"identities":               []any{},
 	}
 	for k, v := range extra {
 		base[k] = v
@@ -164,7 +164,7 @@ func TestBundleHarnessesRejectsUnknownTopLevelField(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown field, got nil")
 	}
-	if !strings.Contains(err.Error(), "closed schema rejected unknown field") {
+	if !strings.Contains(err.Error(), "closed v2 schema rejected unknown field") {
 		t.Fatalf("expected closed schema error, got %v", err)
 	}
 }
@@ -180,10 +180,10 @@ func TestBundleHarnessesRejectsInvalidKind(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid kind, got nil")
 	}
-	// The JSON schema validates the enum first, before Go-level
-	// validateHarnesses runs. Both paths reject it.
-	if !strings.Contains(err.Error(), "value must be one of") {
-		t.Fatalf("expected kind enum validation error, got %v", err)
+	// The kind is not a fixed enum in the v2 schema: Go-level validateHarnesses
+	// checks it against the bundle's registry (or the built-in kinds).
+	if !strings.Contains(err.Error(), "is not a valid harness kind") {
+		t.Fatalf("expected an invalid harness kind error, got %v", err)
 	}
 }
 
@@ -198,10 +198,9 @@ func TestBundleHarnessesRejectsKindAsAgentID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for agent_id equal to kind value, got nil")
 	}
-	// The JSON schema enforces 'not' pattern on agent_id values that match a
-	// kind enum, before Go-level validateHarnesses runs.
-	if !strings.Contains(err.Error(), "'not'") {
-		t.Fatalf("expected 'not' schema validation error, got %v", err)
+	// Go-level validateHarnesses refuses an agent_id that equals a kind value.
+	if !strings.Contains(err.Error(), "must not equal a harness kind value") {
+		t.Fatalf("expected an agent_id/kind collision error, got %v", err)
 	}
 }
 
@@ -257,11 +256,11 @@ func TestBundleHarnessesRejectsHarnessesWithoutSemantics(t *testing.T) {
 }
 
 // contractPropertyNames returns the "properties" key set from the vendored
-// policy-bundle-v1.schema.json. This is the canonical list of every field the
+// policy-bundle-v2.schema.json. This is the canonical list of every field the
 // contract permits at the bundle payload top level.
 func contractPropertyNames(t *testing.T) map[string]bool {
 	t.Helper()
-	b, err := os.ReadFile("../../docs/contracts/policy-bundle-v1.schema.json")
+	b, err := os.ReadFile("../../docs/contracts/policy-bundle-v2.schema.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,12 +315,6 @@ func TestBundleHarnessesContractParityKnownProperties(t *testing.T) {
 		}
 	}
 	for field := range goFields {
-		// subject (HAI-433), agent_model_profiles (HAI-459), access_grants
-		// (HAI-615) and harness_kinds (HAI-622) belong to v2; Payload is
-		// shared by both versions.
-		if field == "subject" || field == "agent_model_profiles" || field == "access_grants" || field == "harness_kinds" {
-			continue
-		}
 		if !schemaProps[field] {
 			t.Errorf("Go struct has field %q not in schema properties", field)
 		}

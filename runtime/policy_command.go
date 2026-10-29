@@ -13,7 +13,7 @@ import (
 )
 
 // RunPolicySync fetches the installation's bundle once over HTTPS with the
-// runtime token, validates it against kei.policy-bundle/v1 and persists it
+// runtime token, validates it against kei.policy-bundle/v2 and persists it
 // atomically (0600) in KEI_RUNTIME_STATE_DIR, then prints `policy show`.
 func RunPolicySync(ctx context.Context, args []string, stdout, stderr io.Writer, cfg PolicyConfig, identityFunc IdentityFunc, syncBundle SyncBundleFunc, checkRevocation func(error) bool, revokeState func()) int {
 	fs := flag.NewFlagSet("policy sync", flag.ContinueOnError)

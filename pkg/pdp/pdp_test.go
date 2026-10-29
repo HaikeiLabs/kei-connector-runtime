@@ -13,17 +13,9 @@ import (
 
 var testNow = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-var evaluatorPolicies = []testPolicy{
-	{ID: "pol-1", Src: "*", Dst: "github:admin", Action: "deny"},
-	{ID: "pol-2", Src: "user:u-alice", Dst: "github:write", Action: "permit"},
-	{ID: "pol-3", Src: "group:members", Dst: "tool:search_wiki", Action: "permit"},
-	{ID: "pol-4", Src: "agent:" + testAgent, Dst: "capability:issue.create", Action: "permit", AgentID: testAgent},
-	{ID: "pol-5", Src: "*", Dst: "tool:search_web", Action: "permit"},
-}
-
 func TestEvaluateRuntimeStateDenies(t *testing.T) {
-	useValidator(t, schemaValidator(t))
-	bundle := testBundle(t, testNow, 42, evaluatorPolicies, nil)
+	useV2Fixtures(t)
+	bundle := v2SnapshotBundle(t, testNow, 42, v2Identities())
 	cases := []struct {
 		name, state string
 		reasonCode  ReasonCode
@@ -71,7 +63,7 @@ func TestEvaluateRuntimeStateDenies(t *testing.T) {
 }
 
 func TestEvaluateRespectsCanceledContext(t *testing.T) {
-	useValidator(t, schemaValidator(t))
+	useV2Fixtures(t)
 	e, _, _ := newTestEvaluator(t, testNow, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -144,8 +136,8 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 func TestReconcileBundleSessionRevokesWhenIdentitySnapshotDropsSubject(t *testing.T) {
-	useValidator(t, schemaValidator(t))
-	bundle := testBundle(t, testNow, 42, evaluatorPolicies, nil)
+	useV2Fixtures(t)
+	bundle := v2SnapshotBundle(t, testNow, 42, v2Identities())
 	var doc map[string]any
 	if err := json.Unmarshal(bundle, &doc); err != nil {
 		t.Fatal(err)

@@ -419,7 +419,7 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		return reject(errors.New("policy bundle response is missing ETag or version"))
 	}
 	mediaType, mediaParams, mediaErr := mime.ParseMediaType(contentType)
-	if mediaErr != nil || (mediaType != policybundle.ContentType && mediaType != policybundle.ContentTypeV2 && mediaType != policybundle.ContentTypeV3) || len(mediaParams) != 0 {
+	if mediaErr != nil || (mediaType != policybundle.ContentTypeV2 && mediaType != policybundle.ContentTypeV3) || len(mediaParams) != 0 {
 		return reject(errors.New("policy bundle response has an invalid content type"))
 	}
 	bodyDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
@@ -427,7 +427,7 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		return reject(errors.New("catalog ETag does not match policy bundle digest"))
 	}
 
-	// Route to v3 or v1/v2 validation and activation.
+	// Route to v3 or v2 validation and activation.
 	isV3 := mediaType == policybundle.ContentTypeV3
 	if isV3 {
 		candidate, err := policybundle.ValidateV3(body, identity.ID, identity.OrgID, *identity.WorkspaceID, store.HighestVersionFor(identity.ID, identity.OrgID, *identity.WorkspaceID), now)
@@ -452,11 +452,7 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		if candidate.Digest != bodyDigest {
 			return reject(errors.New("validated policy bundle digest differs from response digest"))
 		}
-		expectedContentType := policybundle.ContentType
-		if candidate.Payload.Schema == "kei.policy-bundle/v2" {
-			expectedContentType = policybundle.ContentTypeV2
-		}
-		if mediaType != expectedContentType {
+		if mediaType != policybundle.ContentTypeV2 {
 			return reject(errors.New("policy bundle content type does not match its schema"))
 		}
 		if headerVersion != candidate.Payload.BundleVersion {

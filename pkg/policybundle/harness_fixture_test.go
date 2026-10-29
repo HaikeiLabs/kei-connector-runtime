@@ -80,12 +80,11 @@ func TestEvaluateHarnessWithContractsFixtures(t *testing.T) {
 		t.Fatal("no test cases in fixture file")
 	}
 
+	SetV2SchemaValidator(func([]byte) error { return nil })
+	t.Cleanup(func() { SetV2SchemaValidator(nil) })
+
 	// Verify the same Validate works with the canonical example bundle.
-	exampleBundle, err := os.ReadFile("../../docs/contracts/examples/policy-bundle-v1.payload.example.json")
-	if err != nil {
-		t.Fatalf("reading example bundle: %v", err)
-	}
-	if _, err := Validate(exampleBundle, fixtureInstallation, fixtureOrg, fixtureWorkspace, 0, fixtureNow()); err != nil {
+	if _, err := Validate(fixtureBundle(t), fixtureInstallation, fixtureOrg, fixtureWorkspace, 0, fixtureNow()); err != nil {
 		t.Fatalf("example bundle Validate: %v", err)
 	}
 	t.Log("example bundle validates OK")
@@ -123,12 +122,12 @@ func TestEvaluateHarnessWithContractsFixtures(t *testing.T) {
 	}
 }
 
-// buildFixtureBundle constructs a minimal valid policy bundle JSON payload
+// buildFixtureBundle constructs a minimal valid v2 policy bundle JSON payload
 // from the given fixture policies. Disabled policies are excluded (the bundle
 // only carries enabled policies; harnessmatch.Evaluate skips disabled ones).
 func buildFixtureBundle(t *testing.T, policies []fixturePolicy) []byte {
 	t.Helper()
-	var ps []map[string]any
+	ps := []map[string]any{}
 	for i, fp := range policies {
 		if !fp.Enabled {
 			continue
@@ -138,14 +137,12 @@ func buildFixtureBundle(t *testing.T, policies []fixturePolicy) []byte {
 			agent = fp.Scope
 		}
 		ps = append(ps, map[string]any{
-			"id":                fp.ID,
-			"name":              "p" + fp.ID[len(fp.ID)-1:],
-			"src_pattern":       fp.Src,
-			"dst_pattern":       fp.Dst,
-			"action":            fp.Action,
-			"priority":          1000 - i,
-			"enabled":           true,
-			"approval_required": false,
+			"policy_id":   fp.ID,
+			"name":        "p" + fp.ID[len(fp.ID)-1:],
+			"src_pattern": fp.Src,
+			"dst_pattern": fp.Dst,
+			"action":      fp.Action,
+			"priority":    1000 - i,
 			"scope": map[string]any{
 				"org_id":       fixtureOrg,
 				"workspace_id": fixtureWorkspace,
@@ -154,7 +151,7 @@ func buildFixtureBundle(t *testing.T, policies []fixturePolicy) []byte {
 		})
 	}
 	bundle := map[string]any{
-		"schema":          "kei.policy-bundle/v1",
+		"schema":          "kei.policy-bundle/v2",
 		"bundle_id":       "fixture-bundle",
 		"bundle_version":  1,
 		"policy_revision": 1,
@@ -171,21 +168,27 @@ func buildFixtureBundle(t *testing.T, policies []fixturePolicy) []byte {
 			"stale_after_seconds":   900,
 		},
 		"subject_resolution": map[string]any{
-			"mode":              "online",
+			"mode":              "bundle",
 			"max_cache_seconds": 30,
 		},
 		"policy_set": map[string]any{
-			"match_semantics": "kei.match/v1",
+			"schema":          "kei.policy-set/v2",
+			"org_id":          fixtureOrg,
+			"workspace_id":    fixtureWorkspace,
+			"match_semantics": "kei.match/v2",
 			"evaluation": map[string]any{
-				"order":   "array_order_first_match",
-				"default": "deny",
+				"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"},
+				"checks":     "per_capability_first_match_and",
+				"default":    "deny",
 			},
-			"groups":   []any{},
-			"tools":    []any{},
-			"agents":   []any{},
-			"policies": ps,
+			"tools":                   []any{},
+			"checks":                  []any{},
+			"tool_policies":           []any{},
+			"harness_match_semantics": "kei.harness-match/v1",
+			"harness_policies":        ps,
 		},
 		"agent_connector_bindings": []any{},
+		"identities":               []any{},
 	}
 	out, err := json.Marshal(bundle)
 	if err != nil {

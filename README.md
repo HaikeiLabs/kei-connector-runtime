@@ -89,9 +89,9 @@ name.
 The same binary supports two modes. **CLI commands** (`authorize`,
 `collector`, `credential`, `model`, `runtime`, `identity`) each perform one
 governed action and exit. The one-shot `authorize` command has no evaluator of
-its own: it checks the runtime and bundle state, hands a v2 bundle's decision to
-`kei-proxy serve`, and denies a `kei.policy-bundle/v1` bundle as
-`policy_bundle_unsupported`.
+its own: it checks the runtime and bundle state and hands a v2 bundle's decision
+to `kei-proxy serve`. A `kei.policy-bundle/v1` bundle is no longer accepted at
+all: the runtime rejects it as unsupported when it is fetched or loaded.
 `authorize` exits `0` on permit, `1` on deny, and `2` when an error stopped it
 before a decision (bad flags, missing token, bootstrap failure). A deny, including
 a policy-state denial such as `policy_bundle_missing`, prints its JSON decision

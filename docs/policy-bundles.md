@@ -10,7 +10,7 @@
 - [A bundle the runtime cannot parse](#a-bundle-the-runtime-cannot-parse)
 - [The harness kind registry (`harness_kinds`)](#the-harness-kind-registry-harness_kinds)
 
-`kei-proxy` enforces unsigned canonical `kei.policy-bundle/v1` JSON bundles locally. The runtime fetches the current bundle over a validated HTTPS control-plane connection using the installation runtime token. It validates the response media type and canonical closed schema before activation. The canonical schemas and policy fixtures are vendored byte-for-byte and their hashes remain pinned in tests. Kei PR #693 is merged; the updated root schema describes the raw unsigned canonical payload and removes signing-only definitions.
+`kei-proxy` enforces unsigned canonical `kei.policy-bundle/v2` JSON bundles locally. The runtime fetches the current bundle over a validated HTTPS control-plane connection using the installation runtime token. It validates the response media type and canonical closed schema before activation. The canonical v2 schemas are vendored under `docs/contracts`. A `kei.policy-bundle/v1` bundle is no longer accepted: it is rejected as unsupported with an error that names the upgrade (the catalog must deliver a `kei.policy-bundle/v2` bundle), and the runtime has no v1 evaluator.
 
 ## Bootstrap and state
 
@@ -23,7 +23,7 @@ Set `KEI_RUNTIME_TOKEN`, `KEI_RUNTIME_CONTROL_PLANE_URL`, and a writable `KEI_RU
 
 The control-plane URL must be an HTTPS origin without userinfo, path, query, or fragment. Requests use the installation bearer token, follow no redirects, and rely on Go's standard TLS certificate and hostname validation. HTTP is permitted only for loopback test/development servers; non-loopback HTTP is rejected.
 
-The bundle endpoint returns the canonical JSON body with content type `application/vnd.kei.policy-bundle.v1+json`, a strong ETag exactly `"sha256:<lowercase hex digest of exact response bytes>"`, and a monotonically increasing bundle-version header. The runtime checks the exact raw-byte digest against the ETag before schema validation, then checks the header version against the validated payload before atomically activating it. No signature, signing key, TOFU state, or signing-key endpoint is required.
+The bundle endpoint returns the canonical JSON body with content type `application/vnd.kei.policy-bundle.v2+json`, a strong ETag exactly `"sha256:<lowercase hex digest of exact response bytes>"`, and a monotonically increasing bundle-version header. The runtime checks the exact raw-byte digest against the ETag before schema validation, then checks the header version against the validated payload before atomically activating it. No signature, signing key, TOFU state, or signing-key endpoint is required.
 
 The state directory is mode `0700`; `policy/bundle.json` and `policy/state.json` are atomically written with mode `0600`, protected by a per-state-directory exclusive lock. Raw bundle bytes are persisted unchanged and revalidated before use; their stored digest must still match. A missing, malformed, expired, audience-mismatched, replayed, or unsupported bundle denies; there is no older-bundle or built-in allow fallback. The runtime does not load legacy envelopes or key files.
 
@@ -35,9 +35,9 @@ The `runtime bootstrap`, `runtime heartbeat`, and `serve` startup paths fetch an
 
 Before activation, the runtime checks the canonical schema, duplicate JSON keys, issuer, installation/org/workspace audience, policy revision, strictly increasing bundle version, issued-at time, hard expiry, validity-window limits, and supported policy match semantics. Invalid candidates do not displace an already active bundle.
 
-The runtime checks the tool and its canonical action from the verified policy bundle, not a caller-selected action. Service and connector capability metadata are also read from that bundle. A legacy `action=read, resource=web_search` request does not match the typed tool selector.
+The runtime checks the tool and its canonical action from the verified policy bundle, not a caller-selected action. Service and connector capability metadata are also read from that bundle.
 
-Policy matching follows `kei.match/v1`. A bundle that does not declare deny-overrides is decided in the catalog's array order (ADR-028: `priority DESC`, deny before permit, `id ASC`): the first matching policy decides, and no match denies. Subject memberships are never embedded in the bundle. Approval flags do not act as per-call tokens; workspace access is resolved online. The next section describes the replacement for this ordering, which `kei-proxy` accepts from 0.6.0.
+Policy matching follows `kei.match/v2`. Unless a bundle declares `deny_overrides` (next section), a v2 bundle's `evaluation.precedence` is `priority_desc`, `deny_before_permit`, `policy_id_asc`: the matching policy with the highest priority decides, a deny beats a permit of equal priority, `policy_id` ascending breaks the remaining ties, and no match denies. Subject memberships come from the bundle's identity snapshot. Approval flags do not act as per-call tokens. The next section describes the replacement for this ordering, which `kei-proxy` accepts from 0.6.0.
 
 A local decision does not move provider payloads, results, or credentials to the catalog. Credential lookup/provider execution remains tenant-side and occurs only after a local allow.
 
@@ -80,10 +80,9 @@ A bundle declares it in the policy set:
 
 | Bundle | Where it is declared | Today's validators |
 |---|---|---|
-| `kei.policy-bundle/v1` | `policy_set.evaluation.order` is `deny_overrides` (the older value is `array_order_first_match`) | The runtime on `main` accepts only `array_order_first_match` here and rejects the rest as unsupported. |
 | `kei.policy-bundle/v2` | `deny_overrides` is an entry of `policy_set.evaluation.precedence` | From `kei-proxy` 0.6.0 the vendored `policy-set-v2.schema.json` accepts `precedence` as either `priority_desc`, `deny_before_permit`, `policy_id_asc` or exactly `deny_overrides`, and the runtime evaluates a bundle that declares it with deny-overrides. Any other `precedence` fails validation, and releases before 0.6.0 pin `precedence` to the legacy list and reject a bundle that declares `deny_overrides`. |
 
-The evaluator in `kei-connector-contracts` understands both declarations. The runtime accepts the v2 declaration from 0.6.0 but not the v1 `order` value. A runtime older than 0.6.0 must not be sent a bundle that declares it.
+The evaluator in `kei-connector-contracts` understands the declaration. The runtime accepts the v2 declaration from 0.6.0; the v1 `order` value went with the v1 bundle, which the runtime rejects. A runtime older than 0.6.0 must not be sent a bundle that declares it.
 
 The catalog protects older runtimes with a version gate: it leaves a new bundle field out unless the installation's last heartbeated `kei-proxy` version is at least the first release that accepts it, and an installation that has not reported a version gets the oldest shape. The deny-overrides gate in the catalog is `0.6.0`, the first release that accepts it, and it sits behind the `POLICY_BUNDLE_V2_DENY_OVERRIDES` fleet switch, which is off by default.
 
@@ -98,7 +97,7 @@ A `kei.policy-bundle/v2` `harness_policies` row may carry an optional `when: {"h
 
 ## A bundle the runtime cannot parse
 
-The v1 and v2 bundle schemas are closed: an unknown field, or a value outside a pinned set, is a validation failure, not something the runtime skips. A bundle that fails validation is never activated and never replaces the active bundle, which keeps being enforced until its `not_after`. With no active bundle, every call denies.
+The v2 bundle schema is closed: an unknown field, or a value outside a pinned set, is a validation failure, not something the runtime skips. A bundle that fails validation is never activated and never replaces the active bundle, which keeps being enforced until its `not_after`. With no active bundle, every call denies.
 
 | Failure | Stored state | Denial reason | Effect |
 |---|---|---|---|

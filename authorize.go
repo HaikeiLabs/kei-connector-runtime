@@ -107,7 +107,7 @@ func runAuthorize(args []string) int {
 	if err != nil {
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "startup_config_invalid", err)
 	}
-	activeBundle, bundleState, err := store.Check(identity.ID, orgID, workspaceID, time.Now().UTC())
+	_, bundleState, err := store.Check(identity.ID, orgID, workspaceID, time.Now().UTC())
 	if err != nil {
 		reason := "policy_bundle_missing"
 		if bundleState == policybundle.Expired {
@@ -121,27 +121,23 @@ func runAuthorize(args []string) int {
 		}
 		return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, reason, err)
 	}
-	if activeBundle.Payload.Schema == "kei.policy-bundle/v2" {
-		// A v2 decision needs a subject, which only a daemon session holds.
-		out, err := authorizeViaDaemon(context.Background(), runtimeSocketPathFromEnv(), cfg.RuntimeToken, *sessionID, daemonAuthorizeCall{
-			Tool: *tool, Action: *action, Resource: *resource, AgentID: *agentID,
-			SpanID: *spanID, ParentSpan: *parentSpan, DelegationDepth: *delegationDepth,
-			Framework: *framework, ToolArgsDigest: *toolArgsDigest,
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: a v2 policy bundle is decided by kei-proxy serve: %v\n", err)
-			return authorizeExitError
-		}
-		if err := keiruntime.WriteJSON(os.Stdout, out); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return authorizeExitError
-		}
-		if out.Decision == "deny" {
-			return authorizeExitDeny
-		}
-		return authorizeExitPermit
+	// A bundle that passes Check is a v2 bundle (a v1 bundle is rejected as
+	// unsupported when it is fetched or loaded). A v2 decision needs a subject, which only a daemon session holds.
+	out, err := authorizeViaDaemon(context.Background(), runtimeSocketPathFromEnv(), cfg.RuntimeToken, *sessionID, daemonAuthorizeCall{
+		Tool: *tool, Action: *action, Resource: *resource, AgentID: *agentID,
+		SpanID: *spanID, ParentSpan: *parentSpan, DelegationDepth: *delegationDepth,
+		Framework: *framework, ToolArgsDigest: *toolArgsDigest,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: a v2 policy bundle is decided by kei-proxy serve: %v\n", err)
+		return authorizeExitError
 	}
-	// Only a v2 bundle is decided (through the daemon above); a v1 bundle no
-	// longer has an evaluator.
-	return keiruntime.WritePolicyStateDenial(os.Stdout, os.Stderr, "policy_bundle_unsupported", errors.New("one-shot authorize no longer decides from a kei.policy-bundle/v1 bundle; upgrade the catalog to deliver a kei.policy-bundle/v2 bundle and use kei-proxy serve"))
+	if err := keiruntime.WriteJSON(os.Stdout, out); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return authorizeExitError
+	}
+	if out.Decision == "deny" {
+		return authorizeExitDeny
+	}
+	return authorizeExitPermit
 }
