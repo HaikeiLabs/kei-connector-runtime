@@ -41,7 +41,7 @@ jobs:
   authorize_manual_release:
     name: Authorize manual release
     if: github.event_name == 'workflow_dispatch'
-    runs-on: kei-cli-release
+    runs-on: kei-proxy-release
     steps:
       - name: Require repository or organization owner
         uses: actions/github-script@v7
@@ -64,7 +64,7 @@ jobs:
     # A skipped authorization is only acceptable on tag pushes; a manual
     # dispatch must pass the owner check.
     if: always() && (needs.authorize_manual_release.result == 'success' || (github.event_name == 'push' && needs.authorize_manual_release.result == 'skipped'))
-    runs-on: kei-cli-release
+    runs-on: kei-proxy-release
     outputs:
       tag: ${{ steps.parse.outputs.tag }}
       version: ${{ steps.parse.outputs.version }}
@@ -132,7 +132,7 @@ jobs:
     # pushes. Without an explicit if:, the implicit success() sees that skip in
     # the needs chain and skips this job too, so tag pushes never released.
     if: ${{ always() && needs.validate-tag.result == 'success' }}
-    runs-on: kei-cli-release
+    runs-on: kei-proxy-release
     permissions:
       contents: write
     environment: release
