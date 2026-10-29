@@ -34,8 +34,7 @@ Sources: kei ADR-011 (data plane), ADR-012 (governance pivot), ADR-014
 (identity propagation), ADR-017 (contracts module), ADR-020 (one installation
 credential), ADR-026 (policy bundle, proposed), `docs/connector-secret-references.md`,
 `docs/oauth-connector-gaps.md`; `kei-policy-catalog` `connector_invoke.go`,
-`pkg/connectors`; `kei` `cmd/oidc-bridge/connectors`; MarketingSite
-`src/worker/routes/crm.ts`, `src/worker/kei/*`.
+`pkg/connectors`; `kei` `cmd/oidc-bridge/connectors`.
 
 ## 1. Supported connectors
 
@@ -50,13 +49,13 @@ is resolved.
 | `linear` | OAuth token proxied by the catalog (path 2) | per-user (default), shared | supported |
 | `github` | OAuth token proxied by the catalog (path 2) | per-user (default), shared | supported |
 | `tito` | shared secret (path 1) | n/a | supported |
-| `crm` | shared secret (path 1), plus a service assertion signed by the runtime's installation key (D3) | n/a | supported |
-| `http_api` | shared secret (path 1) | n/a | supported: a generic governed connector with one allow-listed base URL (D4) |
+| `http_api` | shared secret (path 1) | n/a | supported: a generic governed connector with one allow-listed base URL (D4). A CRM API is an `http_api` connector the admin names, for example `crm` |
 | `notion` | shared secret (path 1): a Notion internal integration token | n/a | supported (HAI-216); OAuth is not offered |
 | `discord` | shared secret (path 1): a Discord bot token | n/a | supported (HAI-310); OAuth is not offered |
 | `grafana` | shared secret (path 1): a Grafana service-account token, against the connector's `grafana.base_url` (`Metadata.Grafana`) | n/a | supported (HAI-311); OAuth is not offered |
 | `skills_repo` | OAuth token proxied by the catalog (path 2): the invoking user's GitHub token; or shared secret (path 1): a GitHub token with read access to the repository's contents | per-user (oauth); n/a (opaque_ref) | supported (HAI-431): reads a workspace's agent skills from a GitHub repository |
 | `s3` | n/a | n/a | **removed**: S3 is storage, not a connector. The runtime denies it; removing the provider code and the catalog CHECK value is a separate ticket. |
+| `crm` | n/a | n/a | **removed** (HAI-384): there is no dedicated CRM provider. |
 | `freshbooks`, `mercury` | n/a | n/a | not supported (present in `kei-connector-contracts`, not built) |
 
 ## 2. Invoke flow
@@ -80,7 +79,6 @@ kei-proxy (tenant runtime)
   4. resolve the credential
        path 1: secrets.Store.Get(credential_backend, credential_ref)
        path 2: use the oauth access token from step 3 (this call only)
-       crm:    also sign the service assertion with the installation key (D3)
   5. execute the provider call                   (contracts/providers client)
   6. redact the result per capability           (typed allowlist, size cap)
   7. emit the audit event                        (digests only, section 8)
@@ -188,11 +186,8 @@ exactly one, and the runtime never falls back from one path to the other.
 ### Path 1: shared secret (`credential_source = opaque_ref`)
 
 Used by: `tito` (API token), `notion` (the internal integration token),
-`crm` (the Worker's `X-KEI-API-Key`),
 `http_api` (the injected key), and Google domain-wide delegation (the
-service-account key). The runtime's CRM assertion signing key (D3) is read
-through the same store, but it belongs to the installation, not to a connector
-(section 5).
+service-account key).
 
 - The connector stores only `credential_ref`, an opaque pointer that passes
   `ValidateCredentialRef`. The catalog adds `credential_backend` (one of
@@ -490,9 +485,6 @@ Results are re-encoded from typed structs, so only listed fields can appear.
 | grafana | `alert_rule.list` | `alert_rules` | `{}` | `{rules: [{uid, title, folder_uid, rule_group, labels?, paused}], truncated}`; at most 200 rules |
 | grafana | `annotation.list` | `annotations` | `{from?, to?: epoch ms, set together, to > from, ≤30 days apart (default the last 24h), dashboard_uid?: uid, tags?: ≤10, limit?: 1..100 (default 25)}` | `[{id, dashboard_uid?, panel_id?, time, time_end?, text, tags?}]` |
 | grafana | `datasource.query` | `datasources/<uid>/query` | `{expr: string 1..4096, from?, to?: epoch ms, set together, to > from, ≤7 days apart (default the last hour), max_rows?: 1..1000 (default 100)}` | `{frames: [{name?, fields: [{name, type?, labels?}], rows}], truncated}`; at most `max_rows` rows across all frames |
-| crm | `lead.read` | `leads`, `leads/<id>`, `customers`, `customers/<id>` | `{}` | `{records: [Lead]}` or `{record: Lead}` |
-| crm | `investor.list` (HAI-210) | `investors` | `{stage?: prospect \| contacted \| meeting \| diligence \| committed \| passed, q?: ≤200 chars, limit?: 1-100 (default 20), cursor?: ≤128 chars}`, sent to the Worker as `{"data": <input>}` | `{records: [Investor], next_cursor: string \| null, has_more}` |
-| crm | `investor.read` (HAI-210) | `investors/<id>` | `{}` | `{record: Investor}` |
 | skills_repo | `skills.list` | `skills` | `{}` | `{ref, commit, skills: [{name, version?, description?, harnesses, path}]}`; at most 500 skills, read from the connector's `config` (`repo_url`, `ref`, `subdirectory`) |
 | skills_repo | `skills.fetch` | `skills/<name>` (one segment of letters, digits, `-`, `_`; anything else is `input_invalid` before any provider call) | `{}` | `{skill, commit, format: "tar+gzip", digest: "sha256:<hex>", size, archive}`; `archive` is the base64 encoded skill folder, at most 8 MiB, and must match `size` and `digest` or the call fails closed. Its result limit is the archive bound, not 1 MiB |
 | http_api | `http.get`, `http.head` | the exact request path, e.g. `/contacts/1` (no query) | `{path: string (must equal the resource exactly), query?: {name: [values]} (names must be in query_allowlist)}` | `{status_code, headers, body}`, with headers and JSON fields redacted per the connector's `redaction` rules and the body capped at `response_max_bytes` |
@@ -561,12 +553,6 @@ Redaction per capability:
   on the response. A per-query error is `provider_error`, and its text is
   never surfaced. The expression stays in the input, so the catalog and audit
   see only its digest.
-- **CRM:** a Lead is `{id, company_name, contact_name, email, role, status,
-  priority, source, tier, created_at, updated_at}`. Free text (`message`,
-  `early_access_notes`, audit answers) is dropped even if the Worker returns
-  it. An
-  Investor is `{id, name, firm, email, stage, created_at, updated_at}`; any
-  other field the Worker returns is dropped.
 
 `http_api` (D4) was the existing `ExecuteHTTP` path
 (`internal/connector/httpapi`, deleted in HAI-724): one
@@ -575,8 +561,7 @@ configured header or query parameter, SSRF checks on the resolved addresses,
 a same-host redirect policy, a timeout, and a response-size limit. It returned
 redacted bytes rather than a typed struct, so it was the one capability whose
 result was not re-encoded. The connector's `redaction` rules were its
-allowlist. MarketingSite's `/api/leads` (key only) was reached through
-`http_api`, not through `crm`.
+allowlist.
 
 **The http_api resource is the request.** Its resource is the exact request
 path, with no query string, and that is what policy authorizes. The catalog
@@ -588,74 +573,6 @@ slash, or backslash, and no scheme or host. Nothing is normalized, and any
 difference denies `input_invalid`. Without this, an allow for `/contacts/1`
 could be used to read `/contacts/999` (HAI-256). Query parameters travel
 separately in `input.query` and are limited to `query_allowlist`.
-
-### CRM service assertion (D3: signed by the runtime)
-
-The CRM Worker (`POST /api/crm/v1/invoke`) needs two credentials on every
-call:
-
-1. `X-KEI-API-Key`: the Worker's `CRM_CONNECTOR_API_KEY` (path 1, per
-   connector).
-2. `Authorization: Bearer <assertion>`: an ES256 JWT that **the runtime
-   signs** with its own per-installation key, after the catalog allows the
-   call.
-
-The assertion:
-
-- Header `{alg: ES256, typ: JWT, kid: <installation key id>}`.
-- Claims are the Worker's `claimsSchema`: `iss = kei-runtime:<installation_id>`,
-  `aud` = the connector's `assertion_audience`, `iat`, `exp = iat + 60s`
-  (inside the Worker's max age), a random `jti` (the Worker consumes it once),
-  plus tenant, workspace, subject, agent, connector (all from the
-  catalog-minted envelope, never from harness input), `provider=crm`,
-  `connector_status`, `capabilities`, `policy`, `capability`, `action`,
- `resource`, `trace_id`, and `idempotency_key`.
-- `policy.allowed_actions` and
-  `policy.allowed_resources` come from the connector's descriptor. The Worker
-  denies an empty list, so a `crm` connector must set them (section 9).
-- The runtime sends `{"data": <input.data>}` as the body. A Worker 401 or 403
-  maps to `provider_denied`.
-
-**Key provisioning (part of runtime setup, HAI-222):**
-
-- Each runtime installation has one ES256 (P-256) signing key. It is generated
-  on the tenant side during setup and stored in the tenant's secret manager.
-  Neither Kei nor the catalog ever sees the private key. The runtime reads it
-  with the same `secrets.Store`, configured by
-  `KEI_SERVICE_ASSERTION_KEY_BACKEND`, `KEI_SERVICE_ASSERTION_KEY_REF` (the
-  PEM private key), and `KEI_SERVICE_ASSERTION_KID`, formatted
-  `kei-rt-<installation_id>-<n>`.
-- Setup exports the public key as a JWK and registers it with the Worker,
-  together with the installation's `installation_id`, `tenant_id`, and
-  `workspace_id`.
-- A runtime without a signing key configured denies `crm` calls with
-  `assertion_key_unavailable`. Other providers are unaffected.
-
-**Worker change (separate MarketingSite ticket):** replace the single
-`KEI_SERVICE_ASSERTION_PUBLIC_KEY` with a key list,
-`KEI_SERVICE_ASSERTION_PUBLIC_KEYS`, as JSON or a JWKS URL:
-`{keys: [{kid, kty: "EC", crv: "P-256", x, y, alg: "ES256", installation_id,
-tenant_id, workspace_id, status: "active" | "retiring"}], revoked_kids: []}`.
-The Worker must:
-
-- require `kid` and pick the key by it; an unknown or revoked `kid` is 401;
-- require `iss == kei-runtime:<the key's installation_id>`;
-- require the claims' tenant and workspace to equal the key's, otherwise 403,
-  so one installation's key cannot assert for another tenant;
-- keep the existing `jti` replay check and the idempotency check.
-
-**Rotation:** generate a new key, add it to the Worker list as `active`,
-switch the runtime to the new ref and kid, mark the old key `retiring`, and
-remove it after the assertion max age (300s) has passed. **Revocation:** add
-the `kid` to `revoked_kids` (effective immediately), then delete the secret.
-
-**Residual risk (accepted with D3):** the Worker can no longer verify that
-the catalog allowed the call, because the runtime signs its own assertion.
-A compromised runtime holding both its signing key and the connector's API
-key can call the CRM within its own tenant and workspace without a catalog
-decision. The kid → tenant/workspace binding bounds that exposure, writes
-and the catalog's decision record (joined
-on `trace_id`) makes an unaudited call detectable.
 
 ## 6. Where the provider code lives
 
@@ -691,8 +608,7 @@ credential paths), and one package per connector: `gmail`, `googledrive`,
 `linear`, `github`, `tito`, `discord` and `grafana` (HTTP clients, called
 after the contract's `providers.Guard`), `notion` (the Notion REST backend behind the
 contract's `providers.NotionBackend` seam, since the module has only an
-in-memory one), `crm` (the MarketingSite Worker client and the D3
-assertion signing), `httpapi` (the governed HTTP executor), and
+in-memory one), `httpapi` (the governed HTTP executor), and
 `skillsrepo` (the contract's skills repository client and GitHub backend,
 plus the archive digest and size check). Each connector
 package wrapped its `kei-connector-contracts/providers` client and applied that
@@ -721,7 +637,7 @@ table omit the field.
 | `catalog_unavailable` | runtime | The catalog is unreachable, returns non-200, or returns a malformed body |
 | `policy_deny` | catalog | Structure, agent binding, or ABAC policy denies; or a per-user invoking subject is not a Kei user in the connector's workspace (no bridge call) |
 | `enrollment_required` | catalog | The chat identity is not linked (the catalog answers `decision: "enrollment_required"`); carries `enrollment` |
-| `descriptor_invalid` | both | Catalog: the descriptor fails `setup.ValidateMetadata`. Runtime: an allow without a descriptor or envelope, a descriptor that doesn't match the request or fails `setup.ValidateMetadata`, an `oauth` block on a non-OAuth connector (or none on an OAuth one), or a connector config the connector needs is missing (for example crm without `base_url`) |
+| `descriptor_invalid` | both | Catalog: the descriptor fails `setup.ValidateMetadata`. Runtime: an allow without a descriptor or envelope, a descriptor that doesn't match the request or fails `setup.ValidateMetadata`, an `oauth` block on a non-OAuth connector (or none on an OAuth one), or a connector config the connector needs is missing (for example skills_repo without `repo_url`) |
 | `insecure_transport` | both | Catalog: the caller is not TLS, so no token is fetched. Runtime: an `oauth` block arrived over plain HTTP from a non-loopback host |
 | `oauth_not_connected` | catalog | Bridge 404: no token row for the binding |
 | `oauth_reconnect_required` | catalog | Bridge 409: refresh failed, or the token expired with no refresh token (row deleted) |
@@ -733,7 +649,6 @@ table omit the field.
 | `account_model_not_supported` | runtime | `domain_delegation`: the account model is defined but not executed yet (follow-up) |
 | `credential_backend_unavailable` | runtime | No backend in the descriptor (the org has no active credential store), or the backend is not registered in this runtime (e.g. GCP today) |
 | `credential_unavailable` | runtime | Secret missing, empty, or unreadable (path 1); the reference is never echoed |
-| `assertion_key_unavailable` | runtime | A `crm` call with no installation signing key configured, or the key failed to load or parse |
 | `provider_denied` | runtime | Provider 401 or 403 |
 | `provider_not_found` | runtime | Provider 404 |
 | `provider_rate_limited` | runtime | Provider 429 |
@@ -769,7 +684,7 @@ Two records per call, both metadata only (ADR-011):
    `action`, `resource`, `credential_source`, `account_model`,
    `credential_subject` (Kei user id, or `connector:<id>`),
    `account_email_digest` (OAuth only, when the bridge supplies it),
-   `assertion_kid` (crm only), `input_digest`,
+   `input_digest`,
    `result_digest`, `result_bytes`, `result_items`, `provider_status_class`
    (`2xx`/`4xx`/`5xx`/`timeout`), `decision`, `reason_code`, `duration_ms`,
    `idempotency_key`.
@@ -806,12 +721,7 @@ authentication options and fields:
 | github | OAuth + `account_model` ∈ {per_user, shared} | none | none |
 | tito | shared secret | `account_slug` | `api_token` |
 | notion | shared secret | none | `api_token` (the internal integration token). Not in `kei.connector-setup/v1` yet: `kei-connector-contracts` has no Notion setup schema, so the catalog cannot set a Notion connector up until one is added (follow-up) |
-| crm | shared secret | `base_url` (https, the MarketingSite origin; no userinfo, query, or fragment; host must resolve to a public address), `assertion_audience` (must equal the Worker's `KEI_SERVICE_ASSERTION_AUDIENCE`), `allowed_actions` (default `["read"]`), `allowed_resources` (default `["leads", "customers"]`; add `investors` for `investor.list`/`investor.read`, and declare those capabilities only after the Worker serves them, because the assertion carries every declared capability and the Worker rejects unknown ones) | `api_key` (≥ 32 chars, the Worker's `CRM_CONNECTOR_API_KEY`) |
 | http_api | shared secret | the existing `http_api` block: `registered_base_url` (https, one host), `allowed_methods` (`GET`/`HEAD`), `allowed_path_patterns`, `query_allowlist`, `credential_injection` (`location` header or query, `name`, optional `scheme`), `timeout_ms`, `response_max_bytes`, redirect policy, `redaction` | the injected key |
-
-The CRM assertion signing key is per **installation**, not per connector, so it
-is not a connector setup field. Runtime setup (HAI-222) provisions it
-(section 5).
 
 How the values flow:
 
@@ -839,8 +749,7 @@ How the values flow:
   `GET /api/v1/data-connectors/{id}/secrets` shows only
   `{field, set, generation, delivered_at}`.
 - **Bring your own reference:** instead of a value, an operator may enter an
-  existing reference (for example `kei/prod/crm/connector-api-key`, as
-  provisioned by MarketingSite's `provision-crm-connector-key.sh`). It must
+  existing reference (for example `kei/prod/tito/api-token`). It must
   pass `ValidateCredentialRef`, and `credential sync` must check it with
   `secrets.Store.Validate` (new behavior) before the connector becomes `active`.
 - Validation errors name the field and never echo a submitted value.
@@ -848,8 +757,8 @@ How the values flow:
 ## 10. Writes
 
 The runtime executes a write only where the contract's api mode lists it
-(`access.APIWrite` in kei-connector-contracts): every CRM write, and Linear
-`issue.create` and `comment.create`. Every other write capability (Linear
+(`access.APIWrite` in kei-connector-contracts): Linear `issue.create` and
+`comment.create`. Every other write capability (Linear
 `issue.update`, GitHub mutations) is denied with `capability_not_supported`.
 Drive `share` is not in the capability registry (see the HAI-207 contract gap).
 Rules (updated per ADR-027, kei #671, merged):
@@ -956,9 +865,7 @@ and credential. With either unset, every OAuth invoke denies
 
 **Known gap: `config` is not sent yet.** `abac.data_connectors` has no `config`
 column, so the descriptor never carries `Metadata.Config`. Connectors that
-need config deny until that lands. In particular, every `crm` allow currently
-hits `connector.ErrConfig` (no `base_url` or `assertion_audience`) and denies
-`descriptor_invalid`. Tracked in HAI-254.
+need config deny until that lands. Tracked in HAI-254.
 
 The bridge changes (the `account_email` column and digest, and the
 `connector_provider` state fix) are a separate `kei` stack (HAI-242,
@@ -976,9 +883,7 @@ Settled by the user on 2026-09-28:
   follow-up.
 - **D2 (OAuth token delivery):** the catalog proxies the token from the
   bridge on an allowed invoke, for that call only (section 3, path 2).
-- **D3 (CRM assertion):** the runtime signs it with its own per-installation
-  ES256 key from the tenant secret manager; the Worker trusts a key list with
-  rotation and revocation (section 5).
+- **D3 (CRM assertion):** retired with the crm provider (HAI-384).
 - **D4 (`http_api`):** kept as a generic governed connector with one
   allow-listed base URL and a shared-secret key.
 - **D5 (account email):** stored on the bridge token row; audited as a
@@ -989,10 +894,8 @@ Settled by the user on 2026-09-28:
 | Repo | Work |
 | --- | --- |
 | `kei` (oidc-bridge) | `account_email` column (field-encrypted) populated at connect; per-tenant HMAC digest on the relay response; shared-model rows keyed `connector:<id>`; widen the unique key to `(user_id, provider, tenant_id, workspace_id)`; persist `connector_provider` in `oauth_states` (Gmail callback bug) |
-| MarketingSite | `KEI_SERVICE_ASSERTION_PUBLIC_KEYS` key list or JWKS; kid → installation/tenant/workspace binding; `iss = kei-runtime:<installation_id>`; `revoked_kids` |
 | `kei-policy-catalog` | Import `kei-connector-contracts` v0.2.0 and delete the in-tree `pkg/connectors` fork; stop allowing new `s3` connectors |
 | `kei-policy-catalog` (layer 3) | Done in HAI-241: descriptor, `account_model` column, token proxy on allow, `provider_user_id`, `reason_code`. Open: the `config` column (HAI-254) and storing `input_digest` |
 | `kei-connector-contracts` (HAI-216) | A Notion setup schema (shared secret, `api_token`); optionally move the Notion REST backend from the runtime into the module |
 | `pde-harness` (HAI-216) | `notion_search` must send `--resource search` (not `notion/workspace`) and the query as `--input '{"query": …}'`; today it passes no input |
-| Runtime setup (HAI-222) | Generate and store the per-installation assertion key; export its JWK for the Worker |
 | CLI and web UI setup | Render `kei.connector-setup/v1`; seal secret fields to the installation's credential-sync key |
