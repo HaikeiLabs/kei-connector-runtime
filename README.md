@@ -90,6 +90,12 @@ The same binary supports two modes. **CLI commands** (`authorize`,
 `collector`, `credential`, `model`, `runtime`, `identity`) each perform one
 governed action and exit; the `authorize`
 command acts as the PEP, and the PDP runs locally in the same process.
+`authorize` exits `0` on permit, `1` on deny, and `2` when an error stopped it
+before a decision (bad flags, missing token, bootstrap failure). A deny, including
+a policy-state denial such as `policy_bundle_missing`, prints its JSON decision
+and exits `1`; an error exits `2` with nothing on stdout. Earlier releases exited
+`1` for every error, so a subprocess client that treats exit `1` as the only
+failure must now also treat `2` as one (fail closed).
 **`kei-proxy serve`** is a long-running daemon that exposes a local HTTP/1.1
 API on a Unix socket (default `/run/kei-proxy/runtime.sock`, mode `0600`) and
 an optional TCP listener (`KEI_PROXY_LISTEN_ADDR`, default `:8085`). The

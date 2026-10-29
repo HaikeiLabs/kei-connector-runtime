@@ -18,8 +18,8 @@ func TestRunAuthorizeWhoAmIFailureIsFatal(t *testing.T) {
 	t.Setenv("KEI_RUNTIME_TOKEN", "kh_live_runtime_test_token_1234567890")
 	t.Setenv("KEI_RUNTIME_CONTROL_PLANE_URL", server.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", t.TempDir())
-	if code := runAuthorize([]string{"--tool", "github.create_pr", "--action", "github:write", "--resource", "acme/widgets"}); code == 0 {
-		t.Fatal("expected whoami failure to be fatal")
+	if code := runAuthorize([]string{"--tool", "github.create_pr", "--action", "github:write", "--resource", "acme/widgets"}); code != 2 {
+		t.Fatalf("whoami failure exit = %d, want 2 (error)", code)
 	}
 }
 func TestRunAuthorizeNeverCallsCatalogDecisionEndpoint(t *testing.T) {
@@ -48,8 +48,8 @@ func TestRunAuthorizeNeverCallsCatalogDecisionEndpoint(t *testing.T) {
 	t.Setenv("KEI_API_URL", catalog.URL)
 	t.Setenv("KEI_RUNTIME_STATE_DIR", t.TempDir())
 	out := captureStdout(func() {
-		if code := runAuthorize([]string{"--tool", "github.create_pr", "--action", "github:write", "--resource", "acme/widgets"}); code == 0 {
-			t.Fatal("cold runtime unexpectedly authorized")
+		if code := runAuthorize([]string{"--tool", "github.create_pr", "--action", "github:write", "--resource", "acme/widgets"}); code != 1 {
+			t.Fatalf("cold runtime exit = %d, want 1 (deny)", code)
 		}
 	})
 	var result AuthorizeOutput
