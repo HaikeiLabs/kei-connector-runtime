@@ -8,71 +8,8 @@ import (
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
 
-func TestBuildDecisionEventPreservesCanonicalContext(t *testing.T) {
-	workspaceID := "workspace-1"
-	policyID := "policy-1"
-	respWorkspaceID := "workspace-from-abac"
-
-	event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
-		SpanID:          "span-1",
-		InvokingSubject: "user-1",
-		ParentSpan:      "parent-1",
-		DelegationDepth: 2,
-		AgentID:         "agent-1",
-		AgentVersion:    "1.2.3",
-		Framework:       "agentware",
-		Tool:            "search_wiki",
-		ToolArgsDigest:  "digest-1",
-		Resources:       []string{"repo:acme/widgets"},
-		WorkspaceID:     workspaceID,
-	}, &AuthorizeResponse{
-		PolicyID:    policyID,
-		WorkspaceID: &respWorkspaceID,
-	}, AuthorizeOutput{Decision: "allow"}, "repo:acme/widgets")
-
-	if event.WorkspaceID == nil || *event.WorkspaceID != respWorkspaceID {
-		t.Fatalf("workspace_id = %v, want ABAC response value %q", event.WorkspaceID, respWorkspaceID)
-	}
-	if event.ParentSpan == nil || *event.ParentSpan != "parent-1" {
-		t.Fatalf("parent_span = %v", event.ParentSpan)
-	}
-	if event.DelegationDepth != 2 || event.AgentID != "agent-1" || event.Framework != "agentware" {
-		t.Fatalf("context not preserved: %+v", event)
-	}
-	if event.ToolName != "search_wiki" {
-		t.Fatalf("tool_name = %q, want canonical tool name search_wiki", event.ToolName)
-	}
-	if event.ToolArgsDigest == nil || *event.ToolArgsDigest != "digest-1" {
-		t.Fatalf("tool_args_digest = %v", event.ToolArgsDigest)
-	}
-}
-
-func TestBuildDecisionEventInvokingSubjectFallback(t *testing.T) {
-	for _, tc := range []struct {
-		name, invokingSubject, user, want string
-	}{
-		{name: "explicit caller", invokingSubject: "human:42", user: "user:7", want: "human:42"},
-		{name: "omitted caller", user: "user:7", want: "user:7"},
-		{name: "empty caller", invokingSubject: "", user: "user:7", want: "user:7"},
-		{name: "no subject at all", invokingSubject: "", user: "", want: "unauthenticated"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
-				InvokingSubject: tc.invokingSubject,
-				User:            tc.user,
-			}, &AuthorizeResponse{}, AuthorizeOutput{Decision: "allow"}, "")
-			if event.InvokingSubject != tc.want {
-				t.Fatalf("invoking_subject=%q, want %q", event.InvokingSubject, tc.want)
-			}
-		})
-	}
-}
-
 func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
-	event := keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{
-		SpanID: "span-1",
-		Tool:   "github.create_pr",
-	}, &AuthorizeResponse{}, AuthorizeOutput{Decision: "allow"}, "repo:acme")
+	event := keiruntime.DecisionEvent{SpanID: "span-1", ToolName: "github.create_pr", Decision: "allow"}
 
 	root := t.TempDir()
 	path := root + "/kei-proxy/audit/events.jsonl"
@@ -102,7 +39,7 @@ func TestAppendDecisionEventCreatesParentDirectories(t *testing.T) {
 }
 
 func TestAppendDecisionEventEmptyPathIsNoop(t *testing.T) {
-	if err := keiruntime.AppendDecisionEvent("", 0, keiruntime.BuildDecisionEvent(keiruntime.AuthorizeParams{}, &AuthorizeResponse{}, AuthorizeOutput{}, "")); err != nil {
+	if err := keiruntime.AppendDecisionEvent("", 0, keiruntime.DecisionEvent{}); err != nil {
 		t.Fatalf("empty path should be a no-op, got: %v", err)
 	}
 }
