@@ -54,7 +54,7 @@ func TestRuntimeDaemonReleaseWorkflowStaticValidation(t *testing.T) {
 		"proxy-v*", "workflow_dispatch:", "bump:", "default: patch", "patch", "minor", "major",
 		"authorize_manual_release:", "Require repository or organization owner",
 		"LATEST_TAG=\"$(git tag --list 'proxy-v*'", "INPUT_BUMP", "proxy-v0.0.1",
-		"proxy-v${MAJOR}.${MINOR}.${PATCH}", "runs-on: kei-proxy-release", "AWS_S3_RELEASES_BUCKET",
+		"proxy-v${MAJOR}.${MINOR}.${PATCH}", "runs-on: kei-cli-release", "AWS_S3_RELEASES_BUCKET",
 		"AWS_S3_RELEASES_REGION", "goreleaser/goreleaser-action@v6", ".goreleaser.yaml",
 		"kei-proxy/", "scripts/install.sh", "kei-proxy/install.sh", "channel=$CHANNEL",
 		"GORELEASER_SIGNING_KEY",
@@ -63,8 +63,8 @@ func TestRuntimeDaemonReleaseWorkflowStaticValidation(t *testing.T) {
 			t.Errorf("connector-runtime release workflow missing %q", want)
 		}
 	}
-	if got := strings.Count(src, "runs-on: kei-proxy-release"); got != 3 {
-		t.Errorf("expected authorization, validate-tag, and release jobs to use kei-proxy-release, found %d", got)
+	if got := strings.Count(src, "runs-on: kei-cli-release"); got != 3 {
+		t.Errorf("expected authorization, validate-tag, and release jobs to use kei-cli-release, found %d", got)
 	}
 	for _, stale := range []string{"kei-eks-deploy", "kei-ecs-deploy"} {
 		if strings.Contains(src, stale) {
