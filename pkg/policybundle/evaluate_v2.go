@@ -3,6 +3,7 @@ package policybundle
 import (
 	"encoding/json"
 	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
+	pol "github.com/HaikeiLabs/kei-connector-contracts/policy"
 	"sort"
 	"time"
 )
@@ -70,6 +71,18 @@ type v2PolicySet struct {
 	HarnessPolicies       []v2HarnessPolicy `json:"harness_policies"`
 	// Connectors is the optional descriptor section (HAI-378); see Connector.
 	Connectors []Connector `json:"connectors,omitempty"`
+}
+
+// denyOverrides reports whether the policy set declares the deny_overrides
+// evaluation id in its precedence (ADR-038 D-1). Bundles without it keep the
+// legacy priority order.
+func (s v2PolicySet) denyOverrides() bool {
+	for _, id := range s.Evaluation.Precedence {
+		if id == "deny_overrides" {
+			return true
+		}
+	}
+	return false
 }
 
 // v2HarnessPolicy is one ADR-029 harness policy row as the catalog emits it
@@ -163,7 +176,7 @@ func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 		request["resource_id"] = resource
 	}
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
-	decision := evaluateV2Check(set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	decision := evaluateV2Check(set.denyOverrides(), set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
 	// A rule that matched decided the call. Where no rule matched, a live
 	// access grant may still open it (ADR-038 §2).
 	return v.v2GrantOrRule(decision, v2ToolTarget(registered.Name), subject, groups, now)
@@ -210,7 +223,7 @@ func (v *Verified) EvaluateV2UnregisteredTool(toolName, agentID string, subject 
 	if subject.Source == "installation_owner" && v.Payload.Subject != nil && v.Payload.Subject.UserID == subject.UserID {
 		groups = v.Payload.Subject.Groups
 	}
-	decision := evaluateV2Check(set.ToolPolicies, map[string]string{"tool": toolName}, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	decision := evaluateV2Check(set.denyOverrides(), set.ToolPolicies, map[string]string{"tool": toolName}, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
 	return v.v2GrantOrRule(decision, v2ToolTarget(toolName), subject, groups, now)
 }
 
@@ -265,7 +278,7 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		if op.ResourceParent != "" {
 			request["resource_parent"] = op.ResourceParent
 		}
-		decision := evaluateV2Check(set.Checks, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+		decision := evaluateV2Check(set.denyOverrides(), set.Checks, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
 		// A rule that matched decided the operation. Where no rule matched, a
 		// live access grant may still open the tool (ADR-038 §2).
 		decision = v.v2GrantOrRule(decision, v2ToolTarget(tool.Name), subject, groups, now)
@@ -322,7 +335,11 @@ func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool 
 	return false
 }
 
-func evaluateV2Check(checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) Decision {
+// evaluateV2Check decides a request against the matching checks. Under
+// deny_overrides any matching deny wins over every matching permit, priority is
+// not read, and policy id ascending breaks ties (contracts policy.Precedence);
+// otherwise the highest priority decides, then deny before permit, then id.
+func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) Decision {
 	matching := make([]v2Check, 0, len(checks))
 	call := Call{AgentID: agentID, UserID: subject.UserID, Email: subject.Email}
 	for _, check := range checks {
@@ -344,6 +361,9 @@ func evaluateV2Check(checks []v2Check, request map[string]string, subject *Sessi
 		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no policy check matched the operation"}
 	}
 	sort.Slice(matching, func(i, j int) bool {
+		if denyOverrides {
+			return pol.Precedence(v2CheckRule(matching[i]), v2CheckRule(matching[j])) < 0
+		}
 		if matching[i].Priority != matching[j].Priority {
 			return matching[i].Priority > matching[j].Priority
 		}
@@ -357,6 +377,11 @@ func evaluateV2Check(checks []v2Check, request map[string]string, subject *Sessi
 		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}
 	}
 	return Decision{Outcome: "allow", PolicyID: winner.PolicyID}
+}
+
+// v2CheckRule is the part of a check that deny-overrides precedence reads.
+func v2CheckRule(c v2Check) pol.Rule {
+	return pol.Rule{ID: c.PolicyID, Effect: pol.Effect(c.Effect)}
 }
 
 func v2ScopeMatches(scope struct {

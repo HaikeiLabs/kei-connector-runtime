@@ -10,7 +10,7 @@
     "org_id": {"$ref": "#/$defs/id"},
     "workspace_id": {"$ref": "#/$defs/id"},
     "match_semantics": {"const": "kei.match/v2"},
-    "evaluation": {"type": "object", "additionalProperties": false, "required": ["precedence", "checks", "default"], "properties": {"precedence": {"const": ["priority_desc", "deny_before_permit", "policy_id_asc"]}, "checks": {"const": "per_capability_first_match_and"}, "default": {"const": "deny"}}},
+    "evaluation": {"type": "object", "additionalProperties": false, "required": ["precedence", "checks", "default"], "properties": {"precedence": {"enum": [["priority_desc", "deny_before_permit", "policy_id_asc"], ["deny_overrides"]]}, "checks": {"const": "per_capability_first_match_and"}, "default": {"const": "deny"}}},
     "tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}},
     "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
     "tool_policies": {"type": "array", "items": {"$ref": "#/$defs/check"}},

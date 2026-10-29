@@ -81,9 +81,9 @@ A bundle declares it in the policy set:
 | Bundle | Where it is declared | Today's validators |
 |---|---|---|
 | `kei.policy-bundle/v1` | `policy_set.evaluation.order` is `deny_overrides` (the older value is `array_order_first_match`) | The runtime on `main` accepts only `array_order_first_match` here and rejects the rest as unsupported. |
-| `kei.policy-bundle/v2` | `deny_overrides` is an entry of `policy_set.evaluation.precedence` | The vendored `policy-set-v2.schema.json` on `main` pins `precedence` to `priority_desc`, `deny_before_permit`, `policy_id_asc`, so a bundle that declares `deny_overrides` fails validation. |
+| `kei.policy-bundle/v2` | `deny_overrides` is an entry of `policy_set.evaluation.precedence` | The vendored `policy-set-v2.schema.json` on `main` accepts `precedence` as either `priority_desc`, `deny_before_permit`, `policy_id_asc` or exactly `deny_overrides`, and the runtime evaluates a bundle that declares it with deny-overrides. Any other `precedence` fails validation. |
 
-The evaluator in `kei-connector-contracts` already understands both declarations. The runtime's own validators and vendored schemas have not been widened to accept them, and no `kei-proxy` release does either. Until a release does, a runtime must not be sent such a bundle.
+The evaluator in `kei-connector-contracts` understands both declarations. The runtime on `main` accepts the v2 declaration, but not the v1 `order` value, and no `kei-proxy` release includes the v2 change yet. Until one does, a runtime must not be sent such a bundle.
 
 The catalog protects older runtimes with a version gate: it leaves a new bundle field out unless the installation's last heartbeated `kei-proxy` version is at least the first release that accepts it, and an installation that has not reported a version gets the oldest shape. The deny-overrides gate is in review in the catalog and uses a placeholder minimum version; it will be set to the release that ships the schema change.
 
