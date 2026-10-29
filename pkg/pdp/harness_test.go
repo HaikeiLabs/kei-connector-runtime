@@ -13,7 +13,7 @@ func TestEvaluateHarness(t *testing.T) {
 	// The vendored schemas predate ADR-029 (kei#682): they reject harness:
 	// sources and multi-token shell: destinations until #72 re-pins them, so
 	// these cases validate only the closed bundle shape, not the patterns.
-	useValidator(t, func([]byte) error { return nil })
+	useV2Fixtures(t)
 	policies := []testPolicy{
 		{ID: "pol-1", Src: "harness:codex", Dst: "shell:git push", Action: "deny"},
 		{ID: "pol-2", Src: "*", Dst: "shell:git", Action: "permit"},
@@ -54,7 +54,7 @@ func TestEvaluateHarness(t *testing.T) {
 		{name: "unknown harness kind", call: HarnessCall{Kind: "unknown-harness", Tool: "unknown-harness.edit"}, outcome: "not_renderable", reason: policybundle.HarnessReasonUnsupportedKind},
 		{name: "custom kind is known and evaluated via pdp", call: HarnessCall{Kind: "custom", Tool: "any_tool"}, outcome: "not_renderable", reason: policybundle.HarnessReasonEvaluateViaPDP},
 	}
-	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
+	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies), nil)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := e.EvaluateHarness(context.Background(), tc.call)
@@ -76,13 +76,13 @@ func TestEvaluateHarness(t *testing.T) {
 }
 
 func TestEvaluateHarnessReasonCodes(t *testing.T) {
-	useValidator(t, func([]byte) error { return nil })
+	useV2Fixtures(t)
 
 	t.Run("unsupported_kind", func(t *testing.T) {
 		policies := []testPolicy{
 			{ID: "pol-1", Src: "*", Dst: "*", Action: "permit"},
 		}
-		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
+		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies), nil)
 		got, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "unknown-harness"})
 		if err != nil {
 			t.Fatal(err)
@@ -96,7 +96,7 @@ func TestEvaluateHarnessReasonCodes(t *testing.T) {
 		policies := []testPolicy{
 			{ID: "pol-1", Src: "*", Dst: "*", Action: "permit"},
 		}
-		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
+		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies), nil)
 		got, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "custom", Tool: "search"})
 		if err != nil {
 			t.Fatal(err)
@@ -110,7 +110,7 @@ func TestEvaluateHarnessReasonCodes(t *testing.T) {
 		policies := []testPolicy{
 			{ID: "pol-1", Src: "*", Dst: "path:relative/path", Action: "permit"},
 		}
-		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
+		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies), nil)
 		got, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "claude_code", Path: "relative/path"})
 		if err != nil {
 			t.Fatal(err)
@@ -149,7 +149,7 @@ func TestEvaluateHarnessReasonCodes(t *testing.T) {
 		policies := []testPolicy{
 			{ID: "pol-1", Src: "user:u-alice", Dst: "skill:deploy", Action: "permit"},
 		}
-		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
+		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies), nil)
 		got, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "claude_code", Skill: "deploy"})
 		if err != nil {
 			t.Fatal(err)
@@ -163,7 +163,7 @@ func TestEvaluateHarnessReasonCodes(t *testing.T) {
 		policies := []testPolicy{
 			{ID: "pol-1", Src: "*", Dst: "path:~/code/**/src/*.go", Action: "permit"},
 		}
-		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies, nil), nil)
+		e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, policies), nil)
 		// No Home set, so the ~/ glob is not renderable.
 		got, err := e.EvaluateHarness(context.Background(), HarnessCall{Kind: "claude_code", Path: "/home/u/code/src/a.go"})
 		if err != nil {

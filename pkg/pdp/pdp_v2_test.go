@@ -3,6 +3,8 @@ package pdp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +30,6 @@ func v2SnapshotBundle(t *testing.T, now time.Time, version int64, identities []m
 }
 
 func TestV2SnapshotFreshAfterMaxCacheWindow(t *testing.T) {
-	useValidator(t, schemaValidator(t))
 	previous := policybundle.SetV2SchemaValidator
 	_ = previous
 	policybundle.SetV2SchemaValidator(func([]byte) error { return nil })
@@ -73,7 +74,6 @@ func TestV2SnapshotFreshAfterMaxCacheWindow(t *testing.T) {
 }
 
 func TestV2RefreshDoesNotPreserveRemovedRemoteIdentityByUserMembership(t *testing.T) {
-	useValidator(t, schemaValidator(t))
 	policybundle.SetV2SchemaValidator(func([]byte) error { return nil })
 	t.Cleanup(func() { policybundle.SetV2SchemaValidator(nil) })
 	now := time.Now().UTC()
@@ -105,22 +105,29 @@ func TestV2RefreshDoesNotPreserveRemovedRemoteIdentityByUserMembership(t *testin
 	}
 }
 
-// HAI-622-F: a v1 bundle decides nothing. Every decision path denies it as
-// unsupported, with the registry-state deny source, instead of evaluating v1
-// policies or leaving the call to a legacy path.
-func TestV1BundleIsDeniedAsUnsupportedOnEveryDecisionPath(t *testing.T) {
-	useValidator(t, schemaValidator(t))
+// HAI-622-F: a v1 bundle can no longer become active, so the PDP never decides
+// from one. Offering one to the store is rejected as unsupported, and every
+// decision path then denies with the cold-start state instead of evaluating v1
+// policies.
+func TestV1BundleIsRejectedAndEveryDecisionPathStaysDenyOnly(t *testing.T) {
+	useV2Fixtures(t)
 	now := time.Now().UTC()
 	sessions := NewSessions()
 	sessionID, err := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, _, _ := newTestEvaluator(t, now, testBundle(t, now, 1, evaluatorPolicies, nil), sessions)
+	e, store, _ := newTestEvaluator(t, now, nil, sessions)
+	v1 := []byte(`{"schema":"kei.policy-bundle/v1","bundle_id":"b","bundle_version":1,"policy_revision":1,"issuer":"` + policybundle.Issuer + `",` +
+		`"audience":{"installation_id":"` + testInstallation + `","org_id":"` + testOrg + `","workspace_id":"` + testWorkspace + `"},` +
+		`"issued_at":"` + now.Format(time.RFC3339) + `","not_after":"` + now.Add(time.Hour).Format(time.RFC3339) + `"}`)
+	if _, err := store.Activate(v1, testInstallation, testOrg, testWorkspace, now); !errors.Is(err, policybundle.ErrBundleUnsupported) {
+		t.Fatalf("Activate(v1) err = %v, want ErrBundleUnsupported", err)
+	}
 	check := func(name string, d Decision, err error) {
 		t.Helper()
-		if err != nil || d.Allow || d.ReasonCode != "policy_bundle_unsupported" || d.DenySource != "runtime_state" {
-			t.Fatalf("%s: decision=%+v err=%v, want a policy_bundle_unsupported deny from runtime_state", name, d, err)
+		if err != nil || d.Allow || !strings.HasPrefix(string(d.ReasonCode), "policy_bundle_") || d.DenySource != "runtime_state" || d.BundleVersion != 0 {
+			t.Fatalf("%s: decision=%+v err=%v, want a policy_bundle_* deny from runtime_state with no bundle version", name, d, err)
 		}
 	}
 	d, err := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "search_web", Action: "tool:search_web"})

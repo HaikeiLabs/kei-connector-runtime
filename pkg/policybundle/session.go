@@ -2,7 +2,6 @@ package policybundle
 
 import (
 	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
-	"strings"
 	"time"
 )
 
@@ -27,9 +26,9 @@ const (
 type SessionSubject = bundle.SessionSubject
 
 // Memberships answers which groups, org roles and workspace grant the bundle
-// holds for a user. G0 puts memberships and grants in the bundle, but the
-// kei.policy-bundle/v1 schema has no field for them yet, so a v1 bundle
-// yields no Memberships and every membership-dependent source fails closed.
+// holds for a user. Only a kei.policy-bundle/v2 bundle carries them; any other
+// bundle yields no Memberships and every membership-dependent source fails
+// closed.
 type Memberships = bundle.Memberships
 
 // BundleMemberships returns the memberships carried by the bundle, or nil
@@ -41,54 +40,42 @@ func BundleMemberships(v *Verified) Memberships {
 // BundleMembershipsAt binds identity expiry checks to the evaluator's clock so
 // snapshot freshness and expiry can be tested deterministically.
 func BundleMembershipsAt(v *Verified, now time.Time) Memberships {
-	if v == nil || v.Payload.SubjectResolution.Mode != "bundle" || len(v.Payload.Identities) == 0 || (v.Payload.Schema == "kei.policy-bundle/v2" && !v.SubjectSnapshotFresh(now)) {
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || v.Payload.SubjectResolution.Mode != "bundle" || len(v.Payload.Identities) == 0 || !v.SubjectSnapshotFresh(now) {
 		return nil
 	}
-	return &bundleMemberships{identities: v.Payload.Identities, now: now, aggregate: v.Payload.Schema == "kei.policy-bundle/v2"}
+	return &bundleMemberships{identities: v.Payload.Identities, now: now}
 }
 
 type bundleMemberships struct {
 	identities []Identity
 	now        time.Time
-	aggregate  bool
 }
 
+// Lookup aggregates every unexpired identity row the bundle holds for userID:
+// the user is granted when any row is linked, and the groups and org roles are
+// the union across rows.
 func (m *bundleMemberships) Lookup(userID string) (groups, roles []string, granted, known bool) {
-	if m.aggregate {
-		groupSet, roleSet := map[string]bool{}, map[string]bool{}
-		for _, id := range m.identities {
-			if id.UserID != userID || (!id.ExpireTime.IsZero() && !m.now.Before(id.ExpireTime)) {
-				continue
-			}
-			known = true
-			granted = granted || id.Status == SubjectLinked
-			for _, group := range id.Groups {
-				groupSet[group] = true
-			}
-			for _, role := range id.OrgRoles {
-				roleSet[role] = true
-			}
-		}
-		for group := range groupSet {
-			groups = append(groups, group)
-		}
-		for role := range roleSet {
-			roles = append(roles, role)
-		}
-		return groups, roles, granted, known
-	}
+	groupSet, roleSet := map[string]bool{}, map[string]bool{}
 	for _, id := range m.identities {
-		if id.UserID != userID {
+		if id.UserID != userID || (!id.ExpireTime.IsZero() && !m.now.Before(id.ExpireTime)) {
 			continue
 		}
-		if !id.ExpireTime.IsZero() && !m.now.Before(id.ExpireTime) {
-			return nil, nil, false, false
-		}
 		known = true
-		granted = id.Status == SubjectLinked
-		return id.Groups, id.OrgRoles, granted, known
+		granted = granted || id.Status == SubjectLinked
+		for _, group := range id.Groups {
+			groupSet[group] = true
+		}
+		for _, role := range id.OrgRoles {
+			roleSet[role] = true
+		}
 	}
-	return nil, nil, false, false
+	for group := range groupSet {
+		groups = append(groups, group)
+	}
+	for role := range roleSet {
+		roles = append(roles, role)
+	}
+	return groups, roles, granted, known
 }
 
 // LookupLinkedUser resolves a CLI session's user_id against bundle identities.
@@ -136,107 +123,17 @@ func (v *Verified) EvaluateSession(call Call, subject *SessionSubject, members M
 	return v.EvaluateSessionAt(call, subject, members, time.Now())
 }
 
-// EvaluateSessionAt adds the v2 subject snapshot freshness gate while keeping
-// v1 decision semantics unchanged.
+// EvaluateSessionAt decides a call for a v2 bundle: a stale subject snapshot
+// denies, and every connector operation otherwise needs complete-plan
+// preflight. A bundle that is not kei.policy-bundle/v2 is denied unsupported.
 func (v *Verified) EvaluateSessionAt(call Call, subject *SessionSubject, members Memberships, now time.Time) Decision {
-	if v.Payload.Schema == "kei.policy-bundle/v2" {
-		if !v.SubjectSnapshotFresh(now) {
-			return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
-		}
-		return Decision{Outcome: "deny", ReasonCode: "preflight_required", Reason: "v2 connector operations require complete-plan preflight"}
+	if v.Payload.Schema != "kei.policy-bundle/v2" {
+		return Decision{Outcome: "deny", ReasonCode: "policy_bundle_unsupported", Reason: "only a kei.policy-bundle/v2 bundle can decide; upgrade the catalog to deliver one"}
 	}
-	call.UserID, call.Email = "", ""
-	var pre Decision
-	if call.ConnectorInvocation {
-		pre = v.EvaluateConnector(call, nil)
-	} else {
-		pre = v.Evaluate(call, nil)
+	if !v.SubjectSnapshotFresh(now) {
+		return Decision{Outcome: "deny", ReasonCode: "subject_snapshot_stale", Reason: "the local subject snapshot is missing or stale"}
 	}
-	switch pre.ReasonCode {
-	case "policy_bundle_invalid", "tool_not_registered", "tool_action_mismatch", "agent_not_assigned", "agent_not_bound_to_connector":
-		return pre
-	}
-	set, err := v.decodePolicySet()
-	if err != nil {
-		return invalidDecision()
-	}
-	if call.AgentID == "" {
-		call.AgentID = defaultAgent(set)
-	}
-	var reg tool
-	for _, t := range set.Tools {
-		if (call.ConnectorInvocation && t.ConnectorID == call.ConnectorID && t.Capability == call.Capability) ||
-			(!call.ConnectorInvocation && t.Name == call.Tool) {
-			reg = t
-			break
-		}
-	}
-	if call.ConnectorInvocation {
-		call.Tool = reg.Name
-	} else {
-		if call.ConnectorID == "" {
-			call.ConnectorID = reg.ConnectorID
-		}
-		if call.Capability == "" {
-			call.Capability = reg.Capability
-		}
-	}
-	if subject != nil {
-		if d, denied := subjectGate(subject); denied {
-			return d
-		}
-		if v.Payload.Schema == "kei.policy-bundle/v2" {
-			var id Identity
-			var found bool
-			if subject.Source == "cli" && subject.ExternalID == "" {
-				id, found = v.LookupLinkedUser(subject.UserID, now)
-			} else {
-				id, found = v.LookupIdentity(subject.Source, subject.ExternalID, now)
-			}
-			if !found || id.UserID != subject.UserID {
-				return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session identity is not present in the fresh bundle snapshot"}
-			}
-			if id.Status != SubjectLinked {
-				return Decision{Outcome: "deny", ReasonCode: statusReasonCode(id.Status), Reason: "the bundle snapshot does not grant the session identity"}
-			}
-		}
-		call.UserID, call.Email = subject.UserID, subject.Email
-	}
-	var groups, roles []string
-	known := false
-	if subject != nil && members != nil {
-		var granted bool
-		groups, roles, granted, known = members.Lookup(subject.UserID)
-		if known && !granted {
-			return Decision{Outcome: "deny", ReasonCode: "subject_revoked", Reason: "the bundle no longer grants the session subject"}
-		}
-	}
-	for _, p := range set.Policies {
-		if p.Scope.AgentID != nil && *p.Scope.AgentID != call.AgentID {
-			continue
-		}
-		if !dstMatch(p.Dst, call, reg) {
-			continue
-		}
-		if requiresSubject(p.Src) && !srcMatch(p.Src, Call{AgentID: call.AgentID}, nil, nil) {
-			if subject == nil {
-				return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "a matching policy names a person and there is no session subject"}
-			}
-			if needsMemberships(p.Src) && !known {
-				return Decision{Outcome: "deny", ReasonCode: "subject_pending", Reason: "the bundle carries no memberships or grants for the session subject"}
-			}
-		}
-		if !srcMatch(p.Src, call, groups, roles) {
-			continue
-		}
-		if p.Action == "deny" {
-			return Decision{Outcome: "deny", PolicyID: p.ID, ReasonCode: "policy_deny", Reason: "policy denied"}
-		}
-		if p.Action == policyPermitAction {
-			return Decision{Outcome: "allow", PolicyID: p.ID}
-		}
-	}
-	return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no policy matched"}
+	return Decision{Outcome: "deny", ReasonCode: "preflight_required", Reason: "v2 connector operations require complete-plan preflight"}
 }
 
 func subjectGate(s *SessionSubject) (Decision, bool) {
@@ -255,13 +152,4 @@ func subjectGate(s *SessionSubject) (Decision, bool) {
 	default:
 		return Decision{Outcome: "deny", ReasonCode: "subject_unlinked", Reason: "the session subject is not linked"}, true
 	}
-}
-
-// needsMemberships reports whether a source pattern can only be decided from
-// group memberships or org roles (srcMatch also treats a bare name as a group).
-func needsMemberships(pattern string) bool {
-	if strings.HasPrefix(pattern, "group:") || strings.HasPrefix(pattern, "org:") {
-		return true
-	}
-	return !strings.Contains(pattern, ":") && !strings.HasPrefix(pattern, "*")
 }

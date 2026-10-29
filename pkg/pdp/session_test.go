@@ -302,12 +302,12 @@ func TestSessionsMaxAge(t *testing.T) {
 // AuthorizeV2Model/AuthorizeV2HarnessTool on a recycled session returns
 // session_revalidation_required exactly once, then session_not_found.
 func TestSessionsMaxAgeRecycleReason(t *testing.T) {
-	useValidator(t, schemaValidator(t))
+	useV2Fixtures(t)
 	s := NewSessions()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	s.SetNow(func() time.Time { return now })
 	s.OnEnd(func(string) {})
-	e, _, _ := newTestEvaluator(t, testNow, testBundle(t, testNow, 42, evaluatorPolicies, nil), s)
+	e, _, _ := newTestEvaluator(t, testNow, v2SnapshotBundle(t, testNow, 42, v2Identities()), s)
 
 	sid, _ := s.Create(Subject{UserID: "u-alice", Status: StatusLinked})
 	now = now.Add(SessionMaxAge + time.Second)

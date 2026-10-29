@@ -2,6 +2,7 @@ package policybundle
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 )
@@ -11,6 +12,7 @@ func TestBundleMembershipsReturnsNilForModeOnline(t *testing.T) {
 		Mode            string `json:"mode"`
 		MaxCacheSeconds int    `json:"max_cache_seconds"`
 	}{Mode: "online"}}}
+	v.Payload.Schema = "kei.policy-bundle/v2"
 	if m := BundleMemberships(v); m != nil {
 		t.Fatal("expected nil memberships for mode=online bundle")
 	}
@@ -21,6 +23,7 @@ func TestBundleMembershipsReturnsNilForEmptyIdentities(t *testing.T) {
 		Mode            string `json:"mode"`
 		MaxCacheSeconds int    `json:"max_cache_seconds"`
 	}{Mode: "bundle"}}}
+	v.Payload.Schema = "kei.policy-bundle/v2"
 	if m := BundleMemberships(v); m != nil {
 		t.Fatal("expected nil memberships when identities slice is empty")
 	}
@@ -139,6 +142,7 @@ func TestBundleMembershipsLookup(t *testing.T) {
 		Identities: identities,
 	}}
 
+	v.Payload.Schema = "kei.policy-bundle/v2"
 	m := BundleMembershipsAt(v, now)
 	if m == nil {
 		t.Fatal("expected non-nil memberships for mode=bundle with identities")
@@ -197,173 +201,41 @@ func TestLookupIdentityUsesBundleKeysAndFailsClosed(t *testing.T) {
 	}
 }
 
-func TestBundleMembershipsRegisteredWithPDPEvaluator(t *testing.T) {
-	v := &Verified{Payload: Payload{
-		SubjectResolution: struct {
-			Mode            string `json:"mode"`
-			MaxCacheSeconds int    `json:"max_cache_seconds"`
-		}{Mode: "bundle"},
-		Identities: []Identity{
-			{UserID: "u-alice", Status: SubjectLinked, Groups: []string{"members"}},
-		},
-		PolicySet: mustRawMessage(t, `{"groups":[],"agents":[],"tools":[{"name":"web_search","service":"","action":"tool:web_search"}],"policies":[{"id":"p","src_pattern":"group:members","dst_pattern":"tool:web_search","action":"permit","scope":{"agent_id":null}}]}`),
-	}}
-
-	call := Call{Tool: "web_search", Action: "tool:web_search"}
-	subject := &SessionSubject{UserID: "u-alice", Status: SubjectLinked}
-	m := BundleMemberships(v)
-	d := v.EvaluateSession(call, subject, m)
-	if d.Outcome != "allow" {
-		t.Fatalf("EvaluateSession outcome = %s, want allow (%+v)", d.Outcome, d)
+// A v2 bundle resolves subjects from its own identities snapshot; the only
+// supported subject_resolution mode is "bundle" (HAI-622-F removed the v1
+// "online" mode with the v1 bundle).
+func TestBundleValidateAcceptsBundleModeAndRejectsAnyOtherMode(t *testing.T) {
+	SetV2SchemaValidator(func([]byte) error { return nil })
+	t.Cleanup(func() { SetV2SchemaValidator(nil) })
+	now := time.Now().UTC()
+	build := func(mode string) []byte {
+		doc := v2BundleDoc(now)
+		doc["subject_resolution"] = map[string]any{"mode": mode, "max_cache_seconds": 60}
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
 	}
-}
-
-func TestBundleMembershipsLinkedViaEvaluateSessionWithBundleMode(t *testing.T) {
-	v := &Verified{Payload: Payload{
-		SubjectResolution: struct {
-			Mode            string `json:"mode"`
-			MaxCacheSeconds int    `json:"max_cache_seconds"`
-		}{Mode: "bundle"},
-		Identities: []Identity{
-			{UserID: "u-alice", Status: SubjectLinked, Groups: []string{"members"}},
-		},
-		PolicySet: mustRawMessage(t, `{"groups":[],"agents":[{"id":"a1","is_default":true}],"tools":[{"name":"web_search","service":"","action":"tool:web_search"}],"policies":[{"id":"p","src_pattern":"group:members","dst_pattern":"tool:web_search","action":"permit","scope":{"agent_id":null}}]}`),
-	}}
-
-	t.Run("linked user gets allow", func(t *testing.T) {
-		d := v.EvaluateSession(Call{Tool: "web_search", Action: "tool:web_search"}, &SessionSubject{UserID: "u-alice", Status: SubjectLinked}, BundleMemberships(v))
-		if d.Outcome != "allow" {
-			t.Fatalf("outcome = %s, want allow (%+v)", d.Outcome, d)
-		}
-	})
-
-	t.Run("revoked user gets subject_revoked", func(t *testing.T) {
-		v.Payload.Identities = []Identity{
-			{UserID: "u-alice", Status: SubjectRevoked},
-		}
-		d := v.EvaluateSession(Call{Tool: "web_search", Action: "tool:web_search"}, &SessionSubject{UserID: "u-alice", Status: SubjectLinked}, BundleMemberships(v))
-		if d.Outcome != "deny" || d.ReasonCode != "subject_revoked" {
-			t.Fatalf("outcome = %s reason_code = %s, want deny subject_revoked (%+v)", d.Outcome, d.ReasonCode, d)
-		}
-	})
-
-	t.Run("user not in bundle still gets subject_pending for group policy", func(t *testing.T) {
-		v.Payload.Identities = []Identity{
-			{UserID: "u-alice", Status: SubjectLinked, Groups: []string{"members"}},
-		}
-		d := v.EvaluateSession(Call{Tool: "web_search", Action: "tool:web_search"}, &SessionSubject{UserID: "u-other", Status: SubjectLinked}, BundleMemberships(v))
-		if d.Outcome != "deny" || d.ReasonCode != "subject_pending" {
-			t.Fatalf("outcome = %s reason_code = %s, want deny subject_pending (%+v)", d.Outcome, d.ReasonCode, d)
-		}
-	})
-}
-
-func TestBundleValidateAcceptsBundleMode(t *testing.T) {
-	raw := `{
-		"schema": "kei.policy-bundle/v1",
-		"bundle_id": "bundle-001",
-		"bundle_version": 42,
-		"policy_revision": 1,
-		"issuer": "kei-policy-catalog",
-		"audience": {"installation_id": "inst-001", "org_id": "org-001", "workspace_id": "ws-001"},
-		"issued_at": "2026-10-01T11:00:00Z",
-		"not_after": "2026-10-01T23:00:00Z",
-		"refresh": {"poll_interval_seconds": 300, "stale_after_seconds": 600},
-		"subject_resolution": {"mode": "bundle"},
-		"policy_set": {"match_semantics":"kei.match/v1","evaluation":{"order":"array_order_first_match","default":"deny"},"groups":[],"agents":[],"tools":[],"policies":[]},
-		"agent_connector_bindings": []
-	}`
-	SetSchemaValidator(func([]byte) error { return nil })
-	v, err := Validate([]byte(raw), "inst-001", "org-001", "ws-001", 41, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
+	v, err := Validate(build("bundle"), v2Installation, v2Org, v2Workspace, 1, now)
 	if err != nil {
-		t.Fatalf("Validate: %v", err)
+		t.Fatalf("Validate bundle mode: %v", err)
 	}
-	if v.Payload.SubjectResolution.Mode != "bundle" {
-		t.Fatalf("mode = %s, want bundle", v.Payload.SubjectResolution.Mode)
+	if v.Payload.SubjectResolution.Mode != "bundle" || v.Payload.SubjectResolution.MaxCacheSeconds != 60 {
+		t.Fatalf("subject_resolution = %+v", v.Payload.SubjectResolution)
 	}
-}
-
-func TestBundleValidateRejectsUnsupportedMode(t *testing.T) {
-	raw := `{
-		"schema": "kei.policy-bundle/v1",
-		"bundle_id": "bundle-001",
-		"bundle_version": 42,
-		"policy_revision": 1,
-		"issuer": "kei-policy-catalog",
-		"audience": {"installation_id": "inst-001", "org_id": "org-001", "workspace_id": "ws-001"},
-		"issued_at": "2026-10-01T11:00:00Z",
-		"not_after": "2026-10-01T23:00:00Z",
-		"refresh": {"poll_interval_seconds": 300, "stale_after_seconds": 600},
-		"subject_resolution": {"mode": "hybrid"},
-		"policy_set": {"match_semantics":"kei.match/v1","evaluation":{"order":"array_order_first_match","default":"deny"},"groups":[],"agents":[],"tools":[],"policies":[]},
-		"agent_connector_bindings": []
-	}`
-	SetSchemaValidator(func([]byte) error { return nil })
-	if _, err := Validate([]byte(raw), "inst-001", "org-001", "ws-001", 41, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)); err != ErrBundleUnsupported {
-		t.Fatalf("expected ErrBundleUnsupported, got %v", err)
+	for _, mode := range []string{"online", "hybrid"} {
+		if _, err := Validate(build(mode), v2Installation, v2Org, v2Workspace, 1, now); err != ErrBundleUnsupported {
+			t.Fatalf("mode %q: err = %v, want ErrBundleUnsupported", mode, err)
+		}
 	}
 }
 
-func TestBundleValidateAcceptsOnlineWithHighMaxCache(t *testing.T) {
-	raw := `{
-		"schema": "kei.policy-bundle/v1",
-		"bundle_id": "bundle-001",
-		"bundle_version": 42,
-		"policy_revision": 1,
-		"issuer": "kei-policy-catalog",
-		"audience": {"installation_id": "inst-001", "org_id": "org-001", "workspace_id": "ws-001"},
-		"issued_at": "2026-10-01T11:00:00Z",
-		"not_after": "2026-10-01T23:00:00Z",
-		"refresh": {"poll_interval_seconds": 300, "stale_after_seconds": 600},
-		"subject_resolution": {"mode": "online", "max_cache_seconds": 120},
-		"policy_set": {"match_semantics":"kei.match/v1","evaluation":{"order":"array_order_first_match","default":"deny"},"groups":[],"agents":[],"tools":[],"policies":[]},
-		"agent_connector_bindings": []
-	}`
-	SetSchemaValidator(func([]byte) error { return nil })
-	v, err := Validate([]byte(raw), "inst-001", "org-001", "ws-001", 41, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if v.Payload.SubjectResolution.MaxCacheSeconds != 120 {
-		t.Fatalf("unexpected max_cache_seconds: %d", v.Payload.SubjectResolution.MaxCacheSeconds)
-	}
-}
-
-func TestBundleValidateAcceptsOnlineWithLowMaxCache(t *testing.T) {
-	raw := `{
-		"schema": "kei.policy-bundle/v1",
-		"bundle_id": "bundle-001",
-		"bundle_version": 42,
-		"policy_revision": 1,
-		"issuer": "kei-policy-catalog",
-		"audience": {"installation_id": "inst-001", "org_id": "org-001", "workspace_id": "ws-001"},
-		"issued_at": "2026-10-01T11:00:00Z",
-		"not_after": "2026-10-01T23:00:00Z",
-		"refresh": {"poll_interval_seconds": 300, "stale_after_seconds": 600},
-		"subject_resolution": {"mode": "online", "max_cache_seconds": 60},
-		"policy_set": {"match_semantics":"kei.match/v1","evaluation":{"order":"array_order_first_match","default":"deny"},"groups":[],"agents":[],"tools":[],"policies":[]},
-		"agent_connector_bindings": []
-	}`
-	SetSchemaValidator(func([]byte) error { return nil })
-	v, err := Validate([]byte(raw), "inst-001", "org-001", "ws-001", 41, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if v.Payload.SubjectResolution.Mode != "online" || v.Payload.SubjectResolution.MaxCacheSeconds != 60 {
-		t.Fatalf("unexpected payload: mode=%s max_cache=%d", v.Payload.SubjectResolution.Mode, v.Payload.SubjectResolution.MaxCacheSeconds)
-	}
-}
-
+// stringSliceEqual compares two membership lists as sets of values: a v2 bundle
+// aggregates an identity's groups and roles through a map, so Lookup returns
+// them in no fixed order.
 func stringSliceEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
 }
 
 func mustRawMessage(t *testing.T, s string) json.RawMessage {

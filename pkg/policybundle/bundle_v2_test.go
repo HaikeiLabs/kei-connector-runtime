@@ -52,9 +52,6 @@ func v2SchemaValidator(t *testing.T) func([]byte) error {
 	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v2.schema.json", load("policy-set-v2.schema.json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-set-v1.schema.json", load("policy-set-v1.schema.json")); err != nil {
-		t.Fatal(err)
-	}
 	if err := c.AddResource("https://schemas.haikeilabs.com/kei/policy-bundle-v2.schema.json", load("policy-bundle-v2.schema.json")); err != nil {
 		t.Fatal(err)
 	}

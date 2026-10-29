@@ -9,15 +9,36 @@ import (
 	"time"
 )
 
-func init() { SetSchemaValidator(func([]byte) error { return nil }) }
-
+// fixtureBundle is the vendored v2 example payload, addressed to the fixture
+// installation at bundle version 42, policy revision 17, valid for 12 hours
+// from 16:00 on the fixture day.
 func fixtureBundle(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile("../../docs/contracts/examples/policy-bundle-v1.payload.example.json")
+	// Other tests reset the global validator on cleanup, so every store test
+	// installs the permissive one when it builds its bundle.
+	prev := schemaValidatorV2
+	SetV2SchemaValidator(func([]byte) error { return nil })
+	t.Cleanup(func() { SetV2SchemaValidator(prev) })
+	b, err := os.ReadFile("../../docs/contracts/examples/policy-bundle-v2.payload.example.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["bundle_version"] = 42
+	doc["policy_revision"] = 17
+	doc["audience"] = map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"}
+	doc["issued_at"] = "2026-09-28T16:00:00Z"
+	doc["not_after"] = "2026-09-29T04:00:00Z"
+	set := doc["policy_set"].(map[string]any)
+	set["org_id"], set["workspace_id"] = "org-fixture-0001", "ws-fixture-0001"
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 func fixtureNow() time.Time { return time.Date(2026, 9, 28, 17, 0, 0, 0, time.UTC) }
 func audience() (string, string, string) {
@@ -34,7 +55,7 @@ func TestStatusReportsStoredBundleSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := store.Status(fixtureNow())
-	if err != nil || status.BundleSchema != "kei.policy-bundle/v1" || status.BundleVersion != 42 {
+	if err != nil || status.BundleSchema != "kei.policy-bundle/v2" || status.BundleVersion != 42 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 }

@@ -12,20 +12,6 @@ import (
 // any test, a missing SetSchemaValidator / SetV2SchemaValidator / SetPlanValidator
 // call in policy_schema.go would leave the validator nil and these checks fail.
 
-func TestSchemaValidatorIsInstalled(t *testing.T) {
-	// bundle.SchemaValidator is unexported; we check by calling bundle.Validate
-	// on a minimal v1 bundle document. A nil validator would error with
-	// "schema validator is unavailable".
-	_, err := bundle.Validate(
-		[]byte(`{"schema":"kei.policy-bundle/v1","bundle_id":"test","bundle_version":1,"policy_revision":1,"issuer":"kei-policy-catalog","audience":{"installation_id":"i","org_id":"o","workspace_id":"w"},"issued_at":"2026-10-01T11:59:00Z","not_after":"2026-10-01T12:00:00Z","subject_resolution":{"mode":"online"},"policy_set":{"match_semantics":"kei.match/v1","evaluation":{"order":"array_order_first_match","default":"deny"}}}`),
-		"i", "o", "w", 0, mustParseTime("2026-10-01T11:59:30Z"),
-	)
-	if err != nil && contains(err.Error(), "validator is unavailable") {
-		t.Fatal("SetSchemaValidator was not called in init: schema validator is nil")
-	}
-	t.Logf("SetSchemaValidator installed (bundle.Validate returned: %v)", err)
-}
-
 func TestV2SchemaValidatorIsInstalled(t *testing.T) {
 	// Same for the v2 validator.
 	_, err := bundle.ValidateV2(
