@@ -35,11 +35,13 @@ func resolveRuntimeScope(identity *RuntimeIdentity) (orgID, workspaceID string, 
 }
 
 // Exit codes of the authorize CLI (API-012): permit, deny, or an error that
-// stopped the call before any decision was made.
+// stopped the call before any decision was made. The values are part of the CLI
+// contract (0, 1, 2) that subprocess clients branch on: keep the order, and
+// TestAuthorizeExitCodeValuesArePinned fails if it changes.
 const (
-	authorizeExitPermit = 0
-	authorizeExitDeny   = 1
-	authorizeExitError  = 2
+	authorizeExitPermit = iota
+	authorizeExitDeny
+	authorizeExitError
 )
 
 func runAuthorize(args []string) int {

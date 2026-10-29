@@ -23,3 +23,17 @@ func TestRunAuthorizeExitsTwoWhenNoDecisionWasMade(t *testing.T) {
 		}
 	})
 }
+
+// The exit codes are a public contract that subprocess clients branch on, so
+// the numbers are pinned: reordering the constants must not change them.
+func TestAuthorizeExitCodeValuesArePinned(t *testing.T) {
+	for name, tc := range map[string]struct{ got, want int }{
+		"permit": {authorizeExitPermit, 0},
+		"deny":   {authorizeExitDeny, 1},
+		"error":  {authorizeExitError, 2},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s exit code = %d, want %d", name, tc.got, tc.want)
+		}
+	}
+}
