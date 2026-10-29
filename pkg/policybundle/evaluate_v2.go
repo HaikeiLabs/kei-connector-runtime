@@ -99,6 +99,17 @@ type v2HarnessPolicy struct {
 		WorkspaceID *string `json:"workspace_id"`
 		AgentID     *string `json:"agent_id"`
 	} `json:"scope"`
+	// When narrows the policy to calls made through one harness kind
+	// (ADR-038 D-6). Absent means it applies to every kind.
+	When *struct {
+		Harness string `json:"harness"`
+	} `json:"when,omitempty"`
+}
+
+// whenHolds reports whether the policy applies to a call made through kind. A
+// condition naming a harness never holds for another or an unknown kind.
+func (p v2HarnessPolicy) whenHolds(kind string) bool {
+	return p.When == nil || p.When.Harness == kind
 }
 
 // v2SubjectDenial is the v2 session-subject gate shared by every local v2
