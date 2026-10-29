@@ -31,3 +31,5 @@ func captureStdout(f func()) string {
 	_ = r.Close()
 	return b.String()
 }
+
+func strPtr(s string) *string { return &s }
