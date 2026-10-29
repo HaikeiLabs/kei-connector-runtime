@@ -111,9 +111,9 @@ So a v2 runtime fails closed within about a minute of a sustained `409`, not
 at `not_after`. It recovers on the first successful refresh. A v1 bundle on
 disk keeps being enforced as `stale_but_valid` until `not_after`.
 
-One-shot `kei-proxy authorize` does not evaluate v2 bundles. With a v2
-bundle stored it denies with `preflight_required`; route v2 calls through
-the `serve` socket.
+One-shot `kei-proxy authorize` does not evaluate v2 bundles itself. With a v2
+bundle stored it asks the running `kei-proxy serve` to decide (pass
+`--session` or set `KEI_SESSION_ID`) and exits `2` when no daemon answers.
 
 ### Expiry fails closed
 

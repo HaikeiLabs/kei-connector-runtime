@@ -96,6 +96,9 @@ a policy-state denial such as `policy_bundle_missing`, prints its JSON decision
 and exits `1`; an error exits `2` with nothing on stdout. Earlier releases exited
 `1` for every error, so a subprocess client that treats exit `1` as the only
 failure must now also treat `2` as one (fail closed).
+With a v2 policy bundle `authorize` asks the running `kei-proxy serve` to decide
+(the subject lives in a daemon session: pass `--session` or set `KEI_SESSION_ID`);
+with no daemon it exits `2`.
 **`kei-proxy serve`** is a long-running daemon that exposes a local HTTP/1.1
 API on a Unix socket (default `/run/kei-proxy/runtime.sock`, mode `0600`) and
 an optional TCP listener (`KEI_PROXY_LISTEN_ADDR`, default `:8085`). The

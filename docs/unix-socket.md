@@ -49,7 +49,8 @@ audit reason that identifies the connector route and complete-plan requirement.
 invoke path in HAI-724; they are no longer served.)
 
 V1 socket behavior is
-unchanged, and one-shot `kei-proxy authorize` does not authorize v2.
+unchanged, and one-shot `kei-proxy authorize` forwards a v2 decision to the
+serve daemon rather than deciding it.
 
 There are three reasons for this design.
 
