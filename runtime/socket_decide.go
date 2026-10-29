@@ -17,7 +17,8 @@ import (
 // request's). The error is non-nil only when ctx is done.
 func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
 	d = pdp.Decision{ReasonCode: pdp.ReasonPolicyBundleMissing, DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
-	auditTrustedAgent = req.Tool == "shell"
+	shellKind, isShell := l.shellKindForTool(req.Tool)
+	auditTrustedAgent = isShell
 	if sessionID == "" {
 		d = pdp.Decision{ReasonCode: pdp.ReasonSessionRequired, DenySource: "identity", Reason: "a named session is required"}
 		return d, auditTrustedAgent, false, nil
@@ -40,23 +41,38 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		target.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
 	switch {
-	// "shell" is the generic tool name for command authorization; adapters map their own shell tool to it.
-	case req.Tool == "shell":
+	// A shell tool is one the bundle's harness kind registry names for a kind
+	// the local PDP decides (the generic "shell" until the bundle carries a
+	// registry).
+	case isShell:
 		if !validArgumentDigest(req.ToolArgsDigest) {
 			return pdp.Decision{ReasonCode: pdp.ReasonInvalidToolArgsDigest, DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}, auditTrustedAgent, false, nil
 		}
 		// The caller's optional AgentID is dropped; Decide uses the
 		// authenticated runtime identity's assigned default.
-		target = pdp.Target{Shell: req.ShellCommand}
+		target = pdp.Target{Shell: req.ShellCommand, ShellKind: shellKind}
 		req.AgentID = ""
 	case req.ShellCommand != "":
-		return pdp.Decision{ReasonCode: pdp.ReasonInvalidShellRequest, DenySource: "policy", Reason: "shell command is only valid for the \"shell\" tool"}, auditTrustedAgent, false, nil
+		return pdp.Decision{ReasonCode: pdp.ReasonInvalidShellRequest, DenySource: "policy", Reason: "shell command is only valid for a shell tool"}, auditTrustedAgent, false, nil
 	}
 	res, err := e.Decide(ctx, pdp.DecideRequest{
 		Session: sessionID, Target: target, AgentID: req.AgentID,
 		TrustedAgent: l.trustedAgentID(), OwnerSession: l.isOwnerSession(sessionID),
 	})
 	return res.Decision, auditTrustedAgent || res.AuditTrustedAgent, res.Unmatched, err
+}
+
+// shellKindForTool names the harness kind whose shell command line the local
+// PDP decides when tool is that kind's shell tool. Before an evaluator exists
+// the generic "shell" tool is the only one.
+func (l *LocalPDP) shellKindForTool(tool string) (string, bool) {
+	if e := l.evaluator.Load(); e != nil {
+		return e.ShellKindForTool(tool)
+	}
+	if tool == "shell" {
+		return "pi", true
+	}
+	return "", false
 }
 
 func (l *LocalPDP) isOwnerSession(sessionID string) bool {

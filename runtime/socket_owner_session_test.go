@@ -780,3 +780,69 @@ func TestSocketAuthorizeV2HarnessToolResolvesAgentFromTrustedIdentity(t *testing
 		})
 	}
 }
+
+// The shell tool the socket decides is the bundle's, not a constant: a kind the
+// registry says decides via the local PDP has its shell command line evaluated
+// like pi.bash, attributed to that kind; a kind that decides natively, or a
+// tool the registry does not list, is not a shell tool (HAI-622, D-13).
+func TestSocketAuthorizeDecidesTheShellToolTheBundleRegistryNames(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct {
+		name, tool   string
+		wantDecision string
+		wantReason   string
+		wantPolicyID string
+	}{
+		{"registry shell tool of a pdp kind", "viapdp.shell", "permit", "policy_permit", "viapdp-shell"},
+		{"pi.bash is pi, so a harness:viapdp policy does not match", "pi.bash", "unmatched", "no_matching_policy", ""},
+		{"a native kind's shell tool is not decided here", "claude_code.bash", "deny", "invalid_shell_request", ""},
+		{"a tool no kind names is not a shell tool", "nokind.shell", "deny", "invalid_shell_request", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testPolicyConfig{policyStateDir: t.TempDir()}
+			local := NewLocalPDP(cfg, nil)
+			defer local.Close()
+			local.SetTokenlessOwnerSession(true)
+			identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
+			local.SetIdentity(identity)
+			var doc map[string]any
+			if err := json.Unmarshal(v2PreflightBundle(t, now), &doc); err != nil {
+				t.Fatal(err)
+			}
+			doc["subject"] = map[string]any{"user_id": "user-alice", "email": "alice@example.test", "groups": []string{"members"}}
+			doc["harness_kinds"] = []any{
+				map[string]any{"kind": "pi", "tool_prefix": "pi.", "shell_tool": "pi.bash", "gateable": true, "decides_via": "pdp"},
+				map[string]any{"kind": "viapdp", "tool_prefix": "viapdp.", "shell_tool": "viapdp.shell", "gateable": true, "decides_via": "pdp"},
+				map[string]any{"kind": "claude_code", "tool_prefix": "claude_code.", "shell_tool": "claude_code.bash", "gateable": true, "decides_via": "native"},
+			}
+			set := doc["policy_set"].(map[string]any)
+			set["harness_policies"] = []any{map[string]any{
+				"policy_id": "viapdp-shell", "name": "viapdp shell", "src_pattern": "harness:viapdp", "dst_pattern": "shell:git log", "action": "permit", "priority": 10,
+				"scope": map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
+			}}
+			bundle, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = store.Activate(bundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+				t.Fatal(err)
+			}
+			local.AfterSync(nil)
+			h := local.NewSocketHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return false })
+			rec := httptest.NewRecorder()
+			body := `{"schema":"kei.authorize-request/v1","tool":"` + tc.tool + `","shell_command":"git log","tool_args_digest":"` + digest + `"}`
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body)))
+			var response socketAuthorizeResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK ||
+				response.Decision != tc.wantDecision || response.ReasonCode != tc.wantReason || response.PolicyID != tc.wantPolicyID {
+				t.Fatalf("%s: status=%d response=%+v err=%v; want %s/%s/%s", tc.tool, rec.Code, response, err, tc.wantDecision, tc.wantReason, tc.wantPolicyID)
+			}
+		})
+	}
+}
