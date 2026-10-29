@@ -224,6 +224,7 @@ func BuildDecisionEvent(p AuthorizeParams, resp *AuthorizeResponse, out Authoriz
 	if subject == "" {
 		subject = p.User
 	}
+	subject = SubjectOrDefault(subject)
 
 	resources := p.Resources
 	if len(resources) == 0 && resource != "" {

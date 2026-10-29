@@ -345,6 +345,88 @@ func TestSocketAuthorizeRequiresNamedSession(t *testing.T) {
 	}
 }
 
+// TestSocketAuthorizeDenyWithoutSessionStampsUnauthenticated verifies that a
+// session_required deny (no session, no resolved subject) stamps the legacy
+// unauthenticated subject instead of an empty invoking_subject, which the
+// catalog's audit:flush rejects.
+func TestSocketAuthorizeDenyWithoutSessionStampsUnauthenticated(t *testing.T) {
+	var auditEvent json.RawMessage
+	_, h := multiSessionPDP(t, &perSubjectI11{}, func(raw json.RawMessage) {
+		auditEvent = append(json.RawMessage(nil), raw...)
+	})
+	body := `{"schema":"kei.authorize-request/v1","tool":"web_search"}`
+
+	rec := sessionRequest(h, http.MethodPost, "/v1/authorize", "", body)
+	var denied struct {
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &denied); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || denied.ReasonCode != "session_required" {
+		t.Fatalf("authorize without session = %d %+v %s, want deny/session_required", rec.Code, denied, rec.Body.String())
+	}
+
+	var audit struct {
+		InvokingSubject string `json:"invoking_subject"`
+	}
+	if err := json.Unmarshal(auditEvent, &audit); err != nil {
+		t.Fatalf("no audit event captured: %v", err)
+	}
+	if audit.InvokingSubject != "unauthenticated" {
+		t.Fatalf("invoking_subject=%q, want unauthenticated: %s", audit.InvokingSubject, auditEvent)
+	}
+}
+
+// TestSocketAuthorizeDenyUnlinkedSessionStampsUnauthenticated verifies that a
+// subject_unlinked deny (session exists but has no resolved user) stamps the
+// legacy unauthenticated subject instead of an empty invoking_subject.
+func TestSocketAuthorizeDenyUnlinkedSessionStampsUnauthenticated(t *testing.T) {
+	ids := []policybundle.Identity{
+		{Source: "discord", ExternalID: "ext-123", UserID: "u-alice", Status: "linked", Groups: []string{"members"}},
+	}
+	bundle := bundleWithIdentities(t, ids)
+	dir := t.TempDir()
+	activateBundle(t, dir, bundle)
+
+	var auditEvent json.RawMessage
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{
+		RuntimeToken:           policyTestToken,
+		RuntimeControlPlaneURL: "https://kei.example",
+		RuntimeStateDir:        dir,
+	}, func(event json.RawMessage) { auditEvent = append(json.RawMessage(nil), event...) })
+	l.SetIdentity(&keiruntime.Identity{
+		ID:          "inst-fixture-0001",
+		OrgID:       "org-fixture-0001",
+		WorkspaceID: strPtr("ws-fixture-0001"),
+		AgentID:     "agent-fixture-0001",
+	})
+	h := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+
+	sessionID := startNamedSession(t, h, `{"schema":"kei.session/v2","source":"discord","external_id":"ext-unknown"}`)
+	rec := sessionRequest(h, http.MethodPost, "/v1/authorize", sessionID, `{"schema":"kei.authorize-request/v1","tool":"web_search"}`)
+	var out struct {
+		Decision   string `json:"decision"`
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || out.Decision != "deny" || out.ReasonCode != "subject_unlinked" {
+		t.Fatalf("authorize = %d %+v %s, want deny/subject_unlinked", rec.Code, out, rec.Body.String())
+	}
+
+	var audit struct {
+		InvokingSubject string `json:"invoking_subject"`
+	}
+	if err := json.Unmarshal(auditEvent, &audit); err != nil {
+		t.Fatalf("no audit event captured: %v", err)
+	}
+	if audit.InvokingSubject != "unauthenticated" {
+		t.Fatalf("invoking_subject=%q, want unauthenticated: %s", audit.InvokingSubject, auditEvent)
+	}
+}
+
 func TestSocketCredentialReleaseRequiresNamedSession(t *testing.T) {
 	h := releasePDP(t)
 	body := `{"schema":"kei.credential-release-request/v1","connector":{"connector_id":"conn-github-0001","capability":"issue.get"},"resource":"repos/owner/name"}`

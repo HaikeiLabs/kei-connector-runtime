@@ -1291,6 +1291,10 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 	if subject, ok := l.Sessions.Get(sessionID); ok {
 		e.InvokingSubject = typedSubject(subject)
 	}
+	// A deny without a resolved subject (no session, unlinked session) must
+	// still carry a non-empty invoking_subject: the catalog's audit:flush
+	// rejects empty values.
+	e.InvokingSubject = SubjectOrDefault(e.InvokingSubject)
 	if req.OnBehalfOf != "" {
 		e.OnBehalfOf = req.OnBehalfOf
 	}

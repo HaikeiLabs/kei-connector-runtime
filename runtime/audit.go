@@ -22,6 +22,23 @@ type LifecycleEvent struct {
 	Attrs          map[string]string `json:"attrs,omitempty"`
 }
 
+// UnauthenticatedSubject is the legacy-format (no colon) subject stamped on
+// audit records that have no resolved subject. The catalog's audit:flush
+// rejects empty invoking_subject values, so a deny without a subject must
+// still carry a stable, non-empty value. It is a fixed default, never derived
+// from the agent or any other identity.
+const UnauthenticatedSubject = "unauthenticated"
+
+// SubjectOrDefault returns subject when it is non-empty, otherwise
+// UnauthenticatedSubject. It is the single place that decides the default so
+// every deny path that can produce an empty subject stamps the same value.
+func SubjectOrDefault(subject string) string {
+	if subject == "" {
+		return UnauthenticatedSubject
+	}
+	return subject
+}
+
 type DecisionEvent struct {
 	SpanID              string    `json:"span_id"`
 	InvokedAt           time.Time `json:"invoked_at"`
