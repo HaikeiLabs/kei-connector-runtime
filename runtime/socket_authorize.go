@@ -443,7 +443,7 @@ func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp
 		if req.Session != pdp.DefaultSession && !l.Sessions.Exists(req.Session) {
 			return pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}}, nil, ctx.Err()
 		}
-		g := pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}}
+		g := pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: pdp.ReasonPolicyBundleMissing, DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}}
 		if sub, ok := l.Sessions.Get(req.Session); ok {
 			sub.Token, sub.Enrollment = "", nil
 			g.Subject, g.HasSession = sub, true
@@ -612,7 +612,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 func (l *LocalPDP) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 	id := session.FromRequest(r)
 	if !l.Sessions.EndID(id) {
-		writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
+		writeRuntimeError(w, http.StatusNotFound, string(pdp.ReasonSessionNotFound), "the session does not exist or has ended")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -846,7 +846,7 @@ func (l *LocalPDP) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	id := session.FromRequest(r)
 	subject, ok := l.Sessions.Get(id)
 	if !ok {
-		writeRuntimeError(w, http.StatusNotFound, pdp.ReasonSessionNotFound, "the session does not exist or has ended")
+		writeRuntimeError(w, http.StatusNotFound, string(pdp.ReasonSessionNotFound), "the session does not exist or has ended")
 		return
 	}
 	resp := socketSessionResponse{Schema: sessionSchemaV2, SessionID: id, IdleTTLSeconds: l.idleTTLSeconds()}
@@ -929,10 +929,10 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 // identity's default agent (the audit records that agent instead of the
 // request's). The error is non-nil only when ctx is done.
 func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
-	d = pdp.Decision{ReasonCode: "policy_bundle_missing", DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
+	d = pdp.Decision{ReasonCode: pdp.ReasonPolicyBundleMissing, DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
 	auditTrustedAgent = req.Tool == "shell"
 	if sessionID == "" {
-		d = pdp.Decision{ReasonCode: "session_required", DenySource: "identity", Reason: "a named session is required"}
+		d = pdp.Decision{ReasonCode: pdp.ReasonSessionRequired, DenySource: "identity", Reason: "a named session is required"}
 		return d, auditTrustedAgent, false, nil
 	}
 	if !l.Sessions.Exists(sessionID) {
@@ -945,7 +945,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	}
 	if sub, ok := l.Sessions.Get(sessionID); ok && sub.SubjectKind == "service_principal" {
 		if _, valid := e.BundleServicePrincipalIdentity(sub.UserID, l.trustedAgentID()); !valid {
-			return pdp.Decision{ReasonCode: "subject_unlinked", DenySource: "identity", Reason: "the principal is no longer present for this agent", BundleState: "ready"}, auditTrustedAgent, false, nil
+			return pdp.Decision{ReasonCode: pdp.ReasonSubjectUnlinked, DenySource: "identity", Reason: "the principal is no longer present for this agent", BundleState: "ready"}, auditTrustedAgent, false, nil
 		}
 	}
 	preq := pdp.Request{Session: sessionID, Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
@@ -956,9 +956,9 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	// "shell" is the generic tool name for command authorization; adapters map their own shell tool to it.
 	case req.Tool == "shell":
 		if !validArgumentDigest(req.ToolArgsDigest) {
-			d = pdp.Decision{ReasonCode: "invalid_tool_args_digest", DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
+			d = pdp.Decision{ReasonCode: pdp.ReasonInvalidToolArgsDigest, DenySource: "policy", Reason: "shell authorization requires a SHA-256 argument digest"}
 		} else if identity := l.identity.Load(); identity == nil || identity.AgentID == "" {
-			d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+			d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
 		} else {
 			// Never use the caller's optional AgentID; the authenticated
 			// runtime identity supplies the installation's assigned default.
@@ -966,7 +966,7 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			unmatched = d.ReasonCode == "no_matching_policy"
 		}
 	case req.ShellCommand != "":
-		d = pdp.Decision{ReasonCode: "invalid_shell_request", DenySource: "policy", Reason: "shell command is only valid for the \"shell\" tool"}
+		d = pdp.Decision{ReasonCode: pdp.ReasonInvalidShellRequest, DenySource: "policy", Reason: "shell command is only valid for the \"shell\" tool"}
 	case req.Tool != "" && req.Connector == nil && e.IsV2UnregisteredTool(req.Tool) && l.isOwnerSession(sessionID):
 		// Unregistered tool names receive a local policy decision by name.
 		// Identity and memberships come from the verified installation-owner
@@ -974,11 +974,11 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		trusted := l.trustedAgentID()
 		auditTrustedAgent = true
 		if trusted == "" {
-			d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+			d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
 			break
 		}
 		if req.AgentID != "" && req.AgentID != trusted {
-			d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+			d = pdp.Decision{ReasonCode: pdp.ReasonAgentMismatch, DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
 			break
 		}
 		preq.AgentID = trusted
@@ -991,11 +991,11 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		trusted := l.trustedAgentID()
 		auditTrustedAgent = true
 		if trusted == "" {
-			d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+			d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
 			break
 		}
 		if req.AgentID != "" && req.AgentID != trusted {
-			d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+			d = pdp.Decision{ReasonCode: pdp.ReasonAgentMismatch, DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
 			break
 		}
 		preq.AgentID = trusted
@@ -1007,11 +1007,11 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			trusted := l.trustedAgentID()
 			auditTrustedAgent = true
 			if trusted == "" {
-				d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+				d = pdp.Decision{ReasonCode: pdp.ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}
 				break
 			}
 			if req.AgentID != "" && req.AgentID != trusted {
-				d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+				d = pdp.Decision{ReasonCode: pdp.ReasonAgentMismatch, DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
 				break
 			}
 			preq.AgentID = trusted
@@ -1046,7 +1046,7 @@ func (l *LocalPDP) isOwnerSession(sessionID string) bool {
 // decideCredentialReleaseV2 authorizes one exact tool/connector/capability/
 // resource tuple using the trusted installation agent and named session.
 func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID string, req socketAuthorizeRequest) (pdp.Decision, bool) {
-	denied := func(code, reason string) (pdp.Decision, bool) {
+	denied := func(code pdp.ReasonCode, reason string) (pdp.Decision, bool) {
 		return pdp.Decision{ReasonCode: code, DenySource: "policy", Reason: reason, BundleState: "ready"}, true
 	}
 	if sessionID == pdp.DefaultSession || !l.Sessions.Exists(sessionID) {
@@ -1090,7 +1090,7 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 		Session: sessionID, Tool: req.Tool, AgentID: trusted,
 	}, req.Connector.ConnectorID, req.Connector.Capability, req.Resource)
 	if err != nil {
-		return pdp.Decision{ReasonCode: "request_canceled", DenySource: "runtime_state", Reason: "request canceled", BundleState: "ready"}, true
+		return pdp.Decision{ReasonCode: pdp.ReasonRequestCanceled, DenySource: "runtime_state", Reason: "request canceled", BundleState: "ready"}, true
 	}
 	return d, true
 }
@@ -1137,7 +1137,7 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		writeRuntimeError(w, http.StatusServiceUnavailable, "request_canceled", "request canceled")
 		return
 	}
-	resp := socketCredentialReleaseResponse{Schema: credentialReleaseResponseSchema, Decision: "deny", ReasonCode: d.ReasonCode, Reason: d.Reason, BundleState: d.BundleState}
+	resp := socketCredentialReleaseResponse{Schema: credentialReleaseResponseSchema, Decision: "deny", ReasonCode: string(d.ReasonCode), Reason: d.Reason, BundleState: d.BundleState}
 	if d.Allow {
 		subject := ""
 		if sub, ok := l.Sessions.Get(sessionID); ok {
@@ -1229,8 +1229,8 @@ func (l *LocalPDP) trustedAgentID() string {
 
 func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {
 	resp := socketAuthorizeResponse{
-		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: d.ReasonCode,
-		Hint: denyhint.Hint(d.ReasonCode), DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
+		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: string(d.ReasonCode),
+		Hint: denyhint.Hint(string(d.ReasonCode)), DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
 		BundleState: d.BundleState,
 	}
 	if d.Allow {
@@ -1280,7 +1280,7 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 	e := socketDecisionEvent{
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
-		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: d.ReasonCode,
+		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: string(d.ReasonCode),
 		CredentialReleased: credentialReleased,
 	}
 	if unmatched && d.ReasonCode == "no_matching_policy" {

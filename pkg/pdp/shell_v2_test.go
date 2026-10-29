@@ -188,7 +188,7 @@ func TestAuthorizeShellChecksEveryStage(t *testing.T) {
 		command    string
 		policies   []map[string]any
 		allow      bool
-		reasonCode string
+		reasonCode ReasonCode
 		policyID   string
 	}{
 		{"allow+allow=allow", "cd x && ls", []map[string]any{permit("p-cd", "cd"), permit("p-ls", "ls")}, true, "policy_permit", "p-cd"},

@@ -40,7 +40,7 @@ func TestAuthorizeV2UnregisteredToolUsesOwnerPoliciesByName(t *testing.T) {
 		tool       string
 		policies   []any
 		wantAllow  bool
-		wantReason string
+		wantReason ReasonCode
 	}{
 		{
 			name:      "group policy permits unregistered tool",

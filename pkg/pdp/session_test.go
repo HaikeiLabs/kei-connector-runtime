@@ -147,7 +147,7 @@ func TestEvaluatePerSession(t *testing.T) {
 	linked, _ := sessions.Create(Subject{UserID: "u-alice", Status: StatusLinked})
 	unlinked, _ := sessions.Create(Subject{Status: StatusUnlinked})
 
-	reason := func(id string) string {
+	reason := func(id string) ReasonCode {
 		t.Helper()
 		d, err := e.Evaluate(context.Background(), Request{Session: id, Tool: "github.create_issue"})
 		if err != nil {

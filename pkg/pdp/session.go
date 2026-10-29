@@ -50,14 +50,6 @@ type Subject struct {
 // DefaultSession is the empty session id. It is never stored or live.
 const DefaultSession = ""
 
-// ReasonSessionNotFound is the deny reason for a session id that was never
-// created, has ended, or expired.
-const ReasonSessionNotFound = "session_not_found"
-
-// ReasonSessionRevalidationRequired is the deny reason for a session whose
-// max age was exceeded and was recycled.
-const ReasonSessionRevalidationRequired = "session_revalidation_required"
-
 // SessionMaxAge is how long a named session lives before it must be
 // revalidated. See ADR-026 G0.
 const SessionMaxAge = 8 * time.Hour
@@ -266,7 +258,7 @@ func (s *Sessions) ConsumeRecycled(id string) bool {
 // liveWithReason checks whether id is live. If the session was recycled (max
 // age exceeded) the caller gets ReasonSessionRevalidationRequired; if it
 // expired from idleness it gets ReasonSessionNotFound.
-func (s *Sessions) liveWithReason(id string) (bool, string) {
+func (s *Sessions) liveWithReason(id string) (bool, ReasonCode) {
 	if s.ConsumeRecycled(id) {
 		return false, ReasonSessionRevalidationRequired
 	}

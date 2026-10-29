@@ -33,7 +33,7 @@ func TestEvaluate(t *testing.T) {
 		session    *Subject
 		members    policybundle.Memberships
 		allow      bool
-		reasonCode string
+		reasonCode ReasonCode
 		denySource string
 		policyID   string
 		enrollment bool
@@ -109,8 +109,9 @@ func TestEvaluateRuntimeStateDenies(t *testing.T) {
 	useValidator(t, schemaValidator(t))
 	bundle := testBundle(t, testNow, 42, evaluatorPolicies, nil)
 	cases := []struct {
-		name, reasonCode, state string
-		setup                   func(t *testing.T, e *Evaluator, store *policybundle.Store, dir string)
+		name, state string
+		reasonCode  ReasonCode
+		setup       func(t *testing.T, e *Evaluator, store *policybundle.Store, dir string)
 	}{
 		{name: "cold start with no bundle", reasonCode: "policy_bundle_missing", state: "cold", setup: func(*testing.T, *Evaluator, *policybundle.Store, string) {}},
 		{name: "bundle past not_after", reasonCode: "policy_bundle_expired", state: "expired", setup: func(t *testing.T, e *Evaluator, s *policybundle.Store, _ string) {
@@ -184,7 +185,7 @@ func TestSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := func(reasonCode string) {
+	want := func(reasonCode ReasonCode) {
 		t.Helper()
 		d, _ := e.Evaluate(context.Background(), Request{Session: sessionID, Tool: "github.create_issue"})
 		if d.ReasonCode != reasonCode {

@@ -358,7 +358,7 @@ func TestEmptySessionGetAndDeleteAreNotFound(t *testing.T) {
 			} `json:"error"`
 		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
-		if rec.Code != http.StatusNotFound || out.Error.Code != pdp.ReasonSessionNotFound {
+		if rec.Code != http.StatusNotFound || out.Error.Code != string(pdp.ReasonSessionNotFound) {
 			t.Errorf("%s empty session = %d %s, want 404 session_not_found", method, rec.Code, rec.Body.String())
 		}
 	}
