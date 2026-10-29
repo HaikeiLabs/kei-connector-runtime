@@ -63,8 +63,8 @@ func (e *Evaluator) Decide(ctx context.Context, req DecideRequest) (DecideResult
 	case e.IsV2HarnessTool(t.Tool):
 		return e.decideAsTrustedAgent(ctx, req, preq, e.AuthorizeV2HarnessTool, false)
 	}
-	// For v2 bundles, resolve the agent from the runtime identity. For v1
-	// bundles, Evaluate resolves it from the bundle default.
+	// Resolve the agent from the runtime identity. A bundle that is not v2 is
+	// denied policy_bundle_unsupported by Evaluate below.
 	if v, ok := e.Bundle(); ok && v.Payload.Schema == "kei.policy-bundle/v2" {
 		res, err := e.decideAsTrustedAgent(ctx, req, preq, e.Evaluate, false)
 		if err == nil {

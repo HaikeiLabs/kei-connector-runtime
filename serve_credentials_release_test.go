@@ -35,7 +35,7 @@ func (releaseServeI11) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"connector_id": "conn-github-0001", "issuer": "https://auth.example.com", "resource": body.Resource, "account_model": "per_user",
+			"connector_id": "conn-github-0001", "issuer": "https://auth.example.com", "resource": body.Resource, "account_model": "shared",
 			"credential": map[string]any{"access_token": credentialCanary, "token_type": "Bearer", "expire_time": "2026-10-17T20:00:00Z"},
 		})
 	default:
@@ -43,30 +43,43 @@ func (releaseServeI11) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// releaseServeBundle is a v1 bundle: a github connector with issue.get
-// (permitted for the default agent), the agent binding, the connector tools,
-// and one linked discord identity.
+// releaseServeBundle is a v2 bundle: a shared github connector with issue.get
+// (permitted for linked user u-alice through the registered github.get_issue
+// harness tool) and one linked discord identity.
 func releaseServeBundle(t *testing.T) []byte {
 	t.Helper()
 	now := time.Now().UTC()
-	return []byte(`{
-		"schema":"kei.policy-bundle/v1",
-		"bundle_id":"release-serve-bundle",
-		"bundle_version":1,
-		"policy_revision":1,
-		"issuer":"kei-policy-catalog",
-		"audience":{"installation_id":"inst-fixture-0001","org_id":"org-fixture-0001","workspace_id":"ws-fixture-0001"},
-		"issued_at":"` + now.Format(time.RFC3339) + `","not_after":"` + now.Add(12*time.Hour).Format(time.RFC3339) + `",
-		"refresh":{"poll_interval_seconds":60,"stale_after_seconds":300},
-		"subject_resolution":{"mode":"bundle","max_cache_seconds":0},
-		"policy_set":{"schema":"kei.policy-set/v1","org_id":"org-fixture-0001","workspace_id":"ws-fixture-0001","match_semantics":"kei.match/v1","evaluation":{"order":"array_order_first_match","default":"deny"},"groups":[],"agents":[{"id":"agent-fixture-0001","is_default":true}],"tools":[{"name":"github.get_issue","service":"github","action":"github:read","connector_id":"conn-github-0001","capability":"issue.get"}],"policies":[
-			{"id":"pol-connector-get-permit","name":"connector-get-permit","src_pattern":"agent:agent-fixture-0001","dst_pattern":"capability:issue.get","action":"permit","priority":100,"enabled":true,"approval_required":false,"scope":{"org_id":"org-fixture-0001","workspace_id":"ws-fixture-0001","agent_id":"agent-fixture-0001"}}
-		],"connectors":[
-			{"id":"conn-github-0001","provider":"github","capabilities":[{"name":"issue.get","mutating":false}]}
-		]},
-		"agent_connector_bindings":[{"agent_id":"agent-fixture-0001","connector_id":"conn-github-0001","capabilities":["issue.get"]}],
-		"identities":[{"source":"discord","external_id":"ext-alice","user_id":"u-alice","status":"linked","subject_token":"es256-subject-alice"}]
-	}`)
+	raw, err := json.Marshal(map[string]any{
+		"schema": "kei.policy-bundle/v2", "bundle_id": "release-serve-bundle", "bundle_version": 1, "policy_revision": 1, "issuer": policybundle.Issuer,
+		"audience":  map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"},
+		"issued_at": now.Format(time.RFC3339Nano), "not_after": now.Add(12 * time.Hour).Format(time.RFC3339Nano),
+		"refresh": map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300}, "subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 0},
+		"policy_set": map[string]any{
+			"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2",
+			"evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
+			"tools": []any{map[string]any{
+				"name": "github.get_issue", "source": "discord", "operation_class": "read",
+				"route": map[string]any{"harness_executor": map[string]any{"executor": "discord", "registration": "github.get_issue"}},
+			}},
+			"checks": []any{},
+			"tool_policies": []any{map[string]any{
+				"policy_id": "pol-connector-get-permit", "name": "connector-get-permit", "effect": "permit", "priority": 100,
+				"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": "agent-fixture-0001"},
+				"selector": map[string]any{"source_principal": "user:u-alice", "source": "discord", "tool": "github.get_issue", "connector_id": "conn-github-0001", "capability": "issue.get", "resource_id": "*"},
+			}},
+			"harness_match_semantics": "kei.harness-match/v1", "harness_policies": []any{},
+			"connectors": []any{map[string]any{
+				"id": "conn-github-0001", "provider": "github", "credential_source": "oauth", "account_model": "shared",
+				"capabilities": []any{map[string]any{"name": "issue.get", "mutating": false}},
+			}},
+		},
+		"agent_connector_bindings": []any{map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-github-0001", "capabilities": []string{"issue.get"}}},
+		"identities":               []any{map[string]any{"source": "discord", "external_id": "ext-alice", "user_id": "u-alice", "status": "linked", "subject_token": "es256-subject-alice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestServeCredentialsReleaseRoute(t *testing.T) {
@@ -102,7 +115,7 @@ func TestServeCredentialsReleaseRoute(t *testing.T) {
 	}
 
 	req, err := http.NewRequest(http.MethodPost, "http://unix/v1/credentials:release", strings.NewReader(
-		`{"schema":"kei.credential-release-request/v1","connector":{"connector_id":"conn-github-0001","capability":"issue.get"},"resource":"repos/owner/name"}`))
+		`{"schema":"kei.credential-release-request/v1","tool":"github.get_issue","connector":{"connector_id":"conn-github-0001","capability":"issue.get"},"resource":"repos/owner/name"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

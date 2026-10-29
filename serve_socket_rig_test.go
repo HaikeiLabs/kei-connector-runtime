@@ -177,67 +177,42 @@ func (rig *socketRig) startSession(t *testing.T) {
 	t.Setenv("KEI_SESSION_ID", rig.startNamedSession(t))
 }
 
+// connectorTestBundle is a v2 bundle linking the canary identity (group
+// members) and registering github.repository_read as a harness tool that
+// group:members may use (policy pol-github-read). A v2 bundle decides
+// connector credential references only through preflight, so a kei://connectors
+// reference through the daemon's commands:run route is denied preflight_required.
 func connectorTestBundle(t *testing.T) []byte {
 	t.Helper()
-	var doc map[string]any
-	if err := json.Unmarshal(unsignedExampleBundle(t, time.Now().UTC()), &doc); err != nil {
-		t.Fatal(err)
-	}
-	doc["subject_resolution"] = map[string]any{"mode": "bundle", "max_cache_seconds": 0}
-	doc["identities"] = []any{map[string]any{
-		"source": "discord", "external_id": linkedExternalID, "user_id": "u-canary", "status": "linked",
-		"groups": []string{"members"}, "subject_token": subjectCanary,
-	}}
-	ps := doc["policy_set"].(map[string]any)
-	template := ps["policies"].([]any)[3].(map[string]any) // pol-read-all
-	policy := func(id, dst string) map[string]any {
-		p := map[string]any{}
-		for k, v := range template {
-			p[k] = v
-		}
-		p["id"], p["name"], p["dst_pattern"] = id, id, dst
-		return p
-	}
-	tool := func(name, service, action, connector, capability string) map[string]any {
-		return map[string]any{"name": name, "service": service, "action": action, "connector_id": connector, "capability": capability}
-	}
-	ps["groups"] = []any{map[string]any{"id": "grp-members-0001", "name": "members", "description": "members", "child_group_ids": []string{}}}
-	ps["tools"] = []any{
-		tool("github.repository_read", "github", "github:read", githubConnectorID, "repository.read"),
-		tool("github.pull_request_read", "github", "github:admin", githubConnectorID, "pull_request.read"),
-		tool("linear.team_read", "linear", "linear:read", "conn-linear-0001", "team.read"),
-		tool("notion.page_read", "notion", "notion:read", "conn-notion-0001", "page.read"),
-		// L3c: kei-proxy run credential references.
-		tool("github.credential", "github", "github:credential", githubConnectorID, "credential"),
-		tool("linear.credential", "linear", "linear:credential", "conn-linear-0001", "credential"),
-		tool("notion.credential", "notion", "notion:credential", "conn-notion-0001", "credential"),
-	}
-	ps["policies"] = []any{
-		policy("pol-github-read", "capability:repository.read"), policy("pol-linear-read", "capability:team.read"), policy("pol-notion-read", "capability:page.read"),
-		policy("pol-github-token", "resource:kei://connectors/"+githubConnectorID+"/token"),
-		policy("pol-linear-token", "resource:kei://connectors/conn-linear-0001/token"),
-		policy("pol-notion-token", "resource:kei://connectors/conn-notion-0001/token"),
-	}
-	capability := func(names ...string) []any {
-		var out []any
-		for _, n := range names {
-			out = append(out, map[string]any{"name": n, "mutating": false})
-		}
-		return out
-	}
-	ps["connectors"] = []any{
-		map[string]any{"id": githubConnectorID, "provider": "github", "capabilities": capability("repository.read", "pull_request.read", "credential")},
-		map[string]any{"id": "conn-linear-0001", "provider": "linear", "capabilities": capability("team.read", "credential")},
-		map[string]any{"id": "conn-notion-0001", "provider": "notion", "capabilities": capability("page.read", "credential")},
-	}
-	doc["agent_connector_bindings"] = []any{
-		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": githubConnectorID, "capabilities": []string{"repository.read", "pull_request.read", "credential"}},
-		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-linear-0001", "capabilities": []string{"team.read", "credential"}},
-		map[string]any{"agent_id": "agent-fixture-0001", "connector_id": "conn-notion-0001", "capabilities": []string{"page.read", "credential"}},
-	}
-	b, err := json.Marshal(doc)
+	now := time.Now().UTC()
+	raw, err := json.Marshal(map[string]any{
+		"schema": "kei.policy-bundle/v2", "bundle_id": "connector-test-bundle", "bundle_version": 1, "policy_revision": 1, "issuer": policybundle.Issuer,
+		"audience":  map[string]any{"installation_id": "inst-fixture-0001", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001"},
+		"issued_at": now.Format(time.RFC3339Nano), "not_after": now.Add(12 * time.Hour).Format(time.RFC3339Nano),
+		"refresh": map[string]any{"poll_interval_seconds": 60, "stale_after_seconds": 300}, "subject_resolution": map[string]any{"mode": "bundle", "max_cache_seconds": 0},
+		"policy_set": map[string]any{
+			"schema": "kei.policy-set/v2", "org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "match_semantics": "kei.match/v2",
+			"evaluation": map[string]any{"precedence": []string{"priority_desc", "deny_before_permit", "policy_id_asc"}, "checks": "per_capability_first_match_and", "default": "deny"},
+			"tools": []any{map[string]any{
+				"name": "github.repository_read", "source": "discord", "operation_class": "read",
+				"route": map[string]any{"harness_executor": map[string]any{"executor": "discord", "registration": "github.repository_read"}},
+			}},
+			"checks": []any{},
+			"tool_policies": []any{map[string]any{
+				"policy_id": "pol-github-read", "name": "github read", "effect": "permit", "priority": 50,
+				"scope":    map[string]any{"org_id": "org-fixture-0001", "workspace_id": "ws-fixture-0001", "agent_id": nil},
+				"selector": map[string]any{"source_principal": "group:members", "source": "discord", "tool": "github.repository_read"},
+			}},
+			"harness_match_semantics": "kei.harness-match/v1", "harness_policies": []any{},
+		},
+		"agent_connector_bindings": []any{},
+		"identities": []any{map[string]any{
+			"source": "discord", "external_id": linkedExternalID, "user_id": "u-canary", "status": "linked",
+			"groups": []string{"members"}, "subject_token": subjectCanary,
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return raw
 }
