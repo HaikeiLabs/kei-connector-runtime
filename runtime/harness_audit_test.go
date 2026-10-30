@@ -185,6 +185,19 @@ func TestHarnessAuditFlushShipsCursorKinds(t *testing.T) {
 	}
 }
 
+// TestHarnessAuditRecordFromAcceptsPiKind pins pi as an accepted audit kind:
+// Pi session records must reach audit:flush and create session rows.
+func TestHarnessAuditRecordFromAcceptsPiKind(t *testing.T) {
+	raw := json.RawMessage(`{"schema":"kei.harness-tool-event/v1","event_class":"harness_tool","harness_id":"","harness_kind":"pi","harness_session_id":"s1","phase":"pre","tool":"pi.session","args_digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","native_decision":"allow","observed_at":"2026-10-30T15:40:00Z"}`)
+	rec, ok := harnessAuditRecordFrom(raw)
+	if !ok {
+		t.Fatal("pi record rejected, want accepted")
+	}
+	if rec.HarnessKind != "pi" || rec.HarnessSessionID != "s1" {
+		t.Fatalf("record = %+v, want HarnessKind pi and HarnessSessionID s1", rec)
+	}
+}
+
 func TestHarnessAuditFlushBatchesAtMost100(t *testing.T) {
 	srv := &recordingServer{}
 	server := httptest.NewServer(http.HandlerFunc(srv.handler))
