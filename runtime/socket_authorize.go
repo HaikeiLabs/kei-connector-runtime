@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/HaikeiLabs/kei-connector-contracts/canonical"
 	"io"
 	"log/slog"
 	"net/http"
@@ -971,16 +972,22 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		if sub, ok := l.Sessions.Get(sessionID); ok {
 			subject = sub.UserID
 		}
+		// A tool-bound release's resource is the policy target; the
+		// credential is fetched for the connector's own audience instead.
+		credentialResource := req.Resource
+		if req.Tool != "" {
+			credentialResource = l.connectorCredentialResource(req.Connector.ConnectorID)
+		}
 		var cred *socketCredentialReleaseCred
-		releaseErr := l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, req.Resource, func(c credrelease.ConnectorCredential) error {
-			if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != req.Resource) {
+		releaseErr := l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, credentialResource, func(c credrelease.ConnectorCredential) error {
+			if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != credentialResource) {
 				return errCredentialAudienceMismatch
 			}
 			if req.Tool != "" && c.AccountModel != "shared" {
 				return errCredentialAccountModelUnsupported
 			}
 			cred = &socketCredentialReleaseCred{
-				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
+				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: req.Resource,
 				AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
 			}
 			return nil
@@ -1020,6 +1027,31 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// connectorCredentialResource is the audience the identity service issued
+// connectorID's credential for: the canonical URI of its MCP server, or ""
+// for a connector whose connection has none (a built-in OAuth provider such
+// as linear). It is never the policy resource a tool call targets.
+func (l *LocalPDP) connectorCredentialResource(connectorID string) string {
+	e := l.evaluator.Load()
+	if e == nil {
+		return ""
+	}
+	verified, ok := e.Bundle()
+	if !ok {
+		return ""
+	}
+	connector, ok := verified.Connector(connectorID)
+	if !ok || connector.MCP == nil || connector.MCP.URL == "" {
+		return ""
+	}
+	resource, err := canonical.Resource(connector.MCP.URL)
+	if err != nil {
+		// Never "": that would match a connection recorded without one.
+		return connector.MCP.URL
+	}
+	return resource
 }
 
 // credentialReleaseReason maps an internal credrelease deny reason to the

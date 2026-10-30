@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,12 +29,15 @@ const (
 )
 
 // releaseI11 serves the base session load (connectorCredentials:resolve) and
-// one connector's release (connectorCredentials/{id}:resolve). A resource
-// containing "missing" is answered NOT_CONNECTED so a held credential can be
-// absent even when the policy allows.
-type releaseI11 struct{}
+// one connector's release (connectorCredentials/{id}:resolve). Like the
+// identity service it refuses a resource that is not the connection's own:
+// the connector has no MCP server, so its connection has none, and a policy
+// target such as repos/owner/name must never be sent. While notConnected
+// is set it answers NOT_CONNECTED, so a held credential can be absent even
+// when the policy allows.
+type releaseI11 struct{ notConnected atomic.Bool }
 
-func (releaseI11) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (i *releaseI11) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	switch {
 	case r.URL.Path == credrelease.ResolvePath:
@@ -45,7 +49,11 @@ func (releaseI11) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Resource string `json:"resource"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if strings.Contains(body.Resource, "missing") {
+		if body.Resource != "" {
+			http.Error(w, "resource must be the connector's canonical resource URI", http.StatusBadRequest)
+			return
+		}
+		if i.notConnected.Load() {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"connector_id": releaseConnectorID, "resource": body.Resource,
 				"failure": map[string]any{"reason": "NOT_CONNECTED"},
@@ -103,10 +111,16 @@ func releaseBundle(t *testing.T) []byte {
 }
 
 func releasePDP(t *testing.T) http.Handler {
+	h, _ := releasePDPWithI11(t)
+	return h
+}
+
+func releasePDPWithI11(t *testing.T) (http.Handler, *releaseI11) {
 	t.Helper()
 	dir := t.TempDir()
 	activateBundle(t, dir, releaseBundle(t))
-	srv := httptest.NewServer(releaseI11{})
+	i11 := &releaseI11{}
+	srv := httptest.NewServer(i11)
 	t.Cleanup(srv.Close)
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{
 		RuntimeToken: policyTestToken, RuntimeControlPlaneURL: "https://kei.example", RuntimeStateDir: dir,
@@ -114,14 +128,14 @@ func releasePDP(t *testing.T) http.Handler {
 	t.Cleanup(l.Close)
 	l.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"})
 	l.SetCredentialStore(credrelease.NewStore(credrelease.NewClient(srv.URL, policyTestToken, 5*time.Second)))
-	return sessionHandler(t, l)
+	return sessionHandler(t, l), i11
 }
 
 // TestCredentialsReleaseRoute is the failing (red) test for the HAI-722
 // credential pass-through route. It fails until POST /v1/credentials:release
 // is implemented to match the contract.
 func TestCredentialsReleaseRoute(t *testing.T) {
-	h := releasePDP(t)
+	h, i11 := releasePDPWithI11(t)
 	alice := createSession(t, h, "ext-alice")
 
 	release := func(capability, resource string) *httptest.ResponseRecorder {
@@ -179,7 +193,12 @@ func TestCredentialsReleaseRoute(t *testing.T) {
 	})
 
 	t.Run("allow decision without a held credential denies with a typed reason", func(t *testing.T) {
-		rec := release("issue.get", "repos/missing")
+		i11.notConnected.Store(true)
+		defer i11.notConnected.Store(false)
+		// A new session: alice's holds the credential the first case released.
+		fresh := createSession(t, h, "ext-alice")
+		rec := sessionRequest(h, http.MethodPost, "/v1/credentials:release", fresh,
+			fmt.Sprintf(`{"schema":"kei.credential-release-request/v1","tool":"github.get_issue","connector":{"connector_id":"%s","capability":"issue.get"},"resource":"repos/missing"}`, releaseConnectorID))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
