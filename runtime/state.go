@@ -13,6 +13,9 @@ type collectorState struct {
 	// HarnessToolQuarantined totals the harness_tool records dropped because
 	// the catalog will never accept them, by reason code.
 	HarnessToolQuarantined map[string]int64 `json:"harness_tool_quarantined,omitempty"`
+	// DecisionQuarantined totals the decision records dropped because the
+	// catalog will never accept them, by reason code.
+	DecisionQuarantined map[string]int64 `json:"decision_quarantined,omitempty"`
 }
 
 func readCollectorState(path string) (*collectorState, error) {

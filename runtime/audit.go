@@ -68,6 +68,12 @@ func AppendDecisionEvent(path string, maxBytes int64, e DecisionEvent) error {
 	if path == "" {
 		return nil
 	}
+	// The catalog's audit:flush rejects an empty invoking_subject, which
+	// would pin the oldest spool batch on that record forever. Stamp the
+	// same default the socket path uses, so every writer that funnels
+	// through here (one-shot EmitDecision, legacy pedro records, external
+	// callers) emits a shippable value (HAI-928).
+	e.InvokingSubject = SubjectOrDefault(e.InvokingSubject)
 	data, err := json.Marshal(e)
 	if err != nil {
 		return err

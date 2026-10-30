@@ -413,14 +413,14 @@ type contextBlockingFlushClient struct {
 	started chan struct{}
 }
 
-func (f *contextBlockingFlushClient) Flush(ctx context.Context, _ []keiruntime.DecisionEvent) (int, error) {
+func (f *contextBlockingFlushClient) Flush(ctx context.Context, _ []keiruntime.DecisionEvent) (keiruntime.DecisionFlushResult, error) {
 	f.calls.Add(1)
 	select {
 	case f.started <- struct{}{}:
 	default:
 	}
 	<-ctx.Done()
-	return 0, ctx.Err()
+	return keiruntime.DecisionFlushResult{}, ctx.Err()
 }
 
 func TestCollectorServiceFinalFlushIsBoundedAndRetainsSpool(t *testing.T) {

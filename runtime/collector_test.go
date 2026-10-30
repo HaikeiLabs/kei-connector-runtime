@@ -26,7 +26,7 @@ type retryFlushClient struct {
 	called            chan struct{}
 }
 
-func (f *retryFlushClient) Flush(ctx context.Context, records []DecisionEvent) (int, error) {
+func (f *retryFlushClient) Flush(ctx context.Context, records []DecisionEvent) (DecisionFlushResult, error) {
 	f.calls++
 	if f.called != nil {
 		select {
@@ -36,9 +36,9 @@ func (f *retryFlushClient) Flush(ctx context.Context, records []DecisionEvent) (
 	}
 	if f.remainingFailures > 0 {
 		f.remainingFailures--
-		return 0, errors.New("temporary ABAC outage")
+		return DecisionFlushResult{}, errors.New("temporary ABAC outage")
 	}
-	return len(records), nil
+	return DecisionFlushResult{Upserted: len(records)}, nil
 }
 
 // total returns the total number of events flushed across all batches.
@@ -1100,5 +1100,142 @@ func TestCollectorRetainsSpoolOnUnauthorized(t *testing.T) {
 	st, _ := readCollectorState(c.statePath)
 	if len(st.HarnessToolQuarantined) != 0 {
 		t.Fatalf("quarantined on a 401: %v", st.HarnessToolQuarantined)
+	}
+}
+
+// poisonDecisionCatalog is a fake audit:flush that rejects any batch holding
+// a decision with an empty invoking_subject, the way an older catalog build
+// validates the whole batch: one bad record is a 400 and nothing is stored.
+type poisonDecisionCatalog struct {
+	mu      sync.Mutex
+	shipped []string
+	status  int
+}
+
+func (p *poisonDecisionCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Records []DecisionEvent `json:"records"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	w.Header().Set("Content-Type", "application/json")
+	if p.status != 0 {
+		w.WriteHeader(p.status)
+		_, _ = w.Write([]byte(`{"error":{"code":500,"status":"INTERNAL","message":"internal server error"}}`))
+		return
+	}
+	for _, rec := range req.Records {
+		if strings.TrimSpace(rec.InvokingSubject) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"invalid request body"}}`))
+			return
+		}
+	}
+	p.mu.Lock()
+	for _, rec := range req.Records {
+		p.shipped = append(p.shipped, rec.SpanID)
+	}
+	p.mu.Unlock()
+	_, _ = w.Write([]byte(`{"upserted":` + strconv.Itoa(len(req.Records)) + `,"received":` + strconv.Itoa(len(req.Records)) + `,"skipped":0}`))
+}
+
+// writeDecisionSpool writes raw JSONL lines, bypassing AppendDecisionEvent, so
+// tests can stage records exactly as an older runtime would have spooled them
+// (an empty invoking_subject can still reach the flush from pre-migration
+// spool files).
+func writeDecisionSpool(t *testing.T, lines ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	var b strings.Builder
+	for _, line := range lines {
+		b.WriteString(line + "\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func decisionSpoolLine(spanID, subject string) string {
+	return `{"event_class":"decision","span_id":"` + spanID + `","invoked_at":"2026-10-30T10:00:00Z","invoking_subject":"` + subject + `","agent_id":"agent-1","framework":"claude","tool_name":"web_search","decision":"allow"}`
+}
+
+// TestCollectorQuarantinesDecisionRecordTheCatalogRejects pins the unwedge
+// (HAI-928): one decision the catalog 400s must not hold back the rest of the
+// segment. The good records ship, the rejected one is quarantined and counted
+// as loss by reason code, the spool advances, and the log names the catalog's
+// error but never the record's contents.
+func TestCollectorQuarantinesDecisionRecordTheCatalogRejects(t *testing.T) {
+	catalog := &poisonDecisionCatalog{}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+
+	path := writeDecisionSpool(t,
+		decisionSpoolLine("good-1", "user:u1"),
+		decisionSpoolLine("leak-me-bad-span", ""),
+		decisionSpoolLine("good-2", "user:u2"),
+	)
+	var logs bytes.Buffer
+	c := NewCollector(path, NewABACFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second), 100)
+	c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	if _, err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v (logs=%s)", err, logs.String())
+	}
+	catalog.mu.Lock()
+	shipped := strings.Join(catalog.shipped, ",")
+	catalog.mu.Unlock()
+	if shipped != "good-1,good-2" {
+		t.Fatalf("shipped = %q, want good-1,good-2", shipped)
+	}
+	if _, files, _ := c.pendingStats(); files != 0 {
+		t.Fatalf("pending files = %d, want 0: the spool must advance past the rejected record", files)
+	}
+	st, err := readCollectorState(c.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{"catalog_rejected": 1}
+	if fmt.Sprint(st.DecisionQuarantined) != fmt.Sprint(want) {
+		t.Fatalf("quarantined = %v, want %v", st.DecisionQuarantined, want)
+	}
+	out := logs.String()
+	for _, needle := range []string{"quarantined", "catalog_rejected", "invalid request body"} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("log missing %q: %s", needle, out)
+		}
+	}
+	if strings.Contains(out, "leak-me-bad-span") {
+		t.Fatalf("log leaks record contents: %s", out)
+	}
+}
+
+// TestCollectorRetainsDecisionSpoolOnServerError verifies that a server error
+// is not a record rejection: the batch keeps failing whole, the spool is
+// retained for the next poll, and nothing is quarantined.
+func TestCollectorRetainsDecisionSpoolOnServerError(t *testing.T) {
+	catalog := &poisonDecisionCatalog{status: http.StatusInternalServerError}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+
+	path := writeDecisionSpool(t,
+		decisionSpoolLine("good-1", "user:u1"),
+		decisionSpoolLine("good-2", "user:u2"),
+	)
+	c := NewCollector(path, NewABACFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second), 100)
+	c.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	_, err := c.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run succeeded, want the 500 surfaced")
+	}
+	if !strings.Contains(err.Error(), "status 500") {
+		t.Fatalf("error = %v, want status 500", err)
+	}
+	if _, files, _ := c.pendingStats(); files == 0 {
+		t.Fatal("spool was dropped on a 500")
+	}
+	st, _ := readCollectorState(c.statePath)
+	if len(st.DecisionQuarantined) != 0 {
+		t.Fatalf("quarantined on a 500: %v", st.DecisionQuarantined)
 	}
 }

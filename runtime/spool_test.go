@@ -25,9 +25,9 @@ type fakeFlushClient struct {
 	called  chan struct{}
 }
 
-func (f *fakeFlushClient) Flush(ctx context.Context, records []DecisionEvent) (int, error) {
+func (f *fakeFlushClient) Flush(ctx context.Context, records []DecisionEvent) (DecisionFlushResult, error) {
 	if f.err != nil {
-		return 0, f.err
+		return DecisionFlushResult{}, f.err
 	}
 	f.batches = append(f.batches, records)
 	if f.called != nil {
@@ -36,7 +36,7 @@ func (f *fakeFlushClient) Flush(ctx context.Context, records []DecisionEvent) (i
 		default:
 		}
 	}
-	return len(records), nil
+	return DecisionFlushResult{Upserted: len(records)}, nil
 }
 
 // failAfterFlushClient accepts okBatches batches and then fails, simulating a
@@ -46,15 +46,15 @@ type failAfterFlushClient struct {
 	batches   [][]DecisionEvent
 }
 
-func (f *failAfterFlushClient) Flush(ctx context.Context, records []DecisionEvent) (int, error) {
+func (f *failAfterFlushClient) Flush(ctx context.Context, records []DecisionEvent) (DecisionFlushResult, error) {
 	if f.okBatches == 0 {
-		return 0, errors.New("abac down")
+		return DecisionFlushResult{}, errors.New("abac down")
 	}
 	if f.okBatches > 0 {
 		f.okBatches--
 	}
 	f.batches = append(f.batches, records)
-	return len(records), nil
+	return DecisionFlushResult{Upserted: len(records)}, nil
 }
 
 func (f *failAfterFlushClient) spans() []string {
