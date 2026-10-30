@@ -177,6 +177,13 @@ func TestSocketPrincipalSessionReleasesOnlySharedToolCredential(t *testing.T) {
 					Resource string `json:"resource"`
 				}
 				_ = json.NewDecoder(r.Body).Decode(&body)
+				// The connector has no MCP server, so its credential has no
+				// resource; the policy target must never reach the identity
+				// service, which answers 400 for a non-URI resource.
+				if body.Resource != "" {
+					http.Error(w, "resource must be the connector's canonical resource URI", http.StatusBadRequest)
+					return
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": "conn-fixture-0001", "resource": body.Resource, "account_model": tc.accountModel, "credential": map[string]any{"access_token": "principal-shared-token", "token_type": "Bearer", "expire_time": now.Add(time.Hour).Format(time.RFC3339Nano)}})
 			}))
 			defer bridge.Close()
@@ -254,6 +261,13 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 					Resource string `json:"resource"`
 				}
 				_ = json.NewDecoder(r.Body).Decode(&body)
+				// The connector has no MCP server, so its credential has no
+				// resource; the policy target must never reach the identity
+				// service, which answers 400 for a non-URI resource.
+				if body.Resource != "" {
+					http.Error(w, "resource must be the connector's canonical resource URI", http.StatusBadRequest)
+					return
+				}
 				if credentialMissing {
 					_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": tc.connector, "resource": body.Resource, "account_model": "shared", "failure": map[string]any{"reason": "NOT_CONNECTED"}})
 					return
