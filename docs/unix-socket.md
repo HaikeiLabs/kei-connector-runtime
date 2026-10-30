@@ -185,10 +185,12 @@ its own connector credentials, and nothing it holds is visible to another.
   Audit records (decision, command run, harness hook)
   carry `session_id`.
 
-**Deprecated, for one release:** a `kei.session/v1` PUT (answers `204`) and
-any request without `X-Kei-Session` use the single default session, exactly as
-before: a v1 PUT replaces it, and it has no idle TTL. The daemon logs
-`default_session_deprecated` once per route.
+**Named sessions only:** a `kei.session/v1` PUT is rejected with
+`invalid_request`. A request without `X-Kei-Session` is refused with
+`session_required` by the socket decide route and by v2 harness and
+unregistered-tool authorization. The empty session ID is never stored and holds
+no credentials. Create a named session with a `kei.session/v2` PUT and send its
+ID as `X-Kei-Session`.
 
 ### Session credentials (`KEI_CREDENTIAL_RELEASE=identity`)
 
@@ -272,7 +274,7 @@ never written to audit, and revoked when the child exits (or the session ends).
 Credential references are then optional, so `kei-proxy run --harness-kind
 claude_code -- claude` launches a harness whose rendered MCP config reads the
 variable. An ended or unlinked session denies `session_not_found` or
-`subject_unlinked` before the child starts. The default session gets no key.
+`subject_unlinked` before the child starts.
 
 The client relays the frames to its stdout and stderr and exits with the
 child's exit code: 128+N if a signal killed it, and 127 if it could not start.

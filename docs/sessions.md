@@ -14,18 +14,14 @@ Session failures are distinct:
 
 - `session_not_found` means an ID was never created, has ended, or expired from idleness (`pkg/pdp/session.go:55-57,300-316`).
 - `session_revalidation_required` is returned when a named session reaches its maximum age and is recycled; the caller must create a fresh session (`pkg/pdp/session.go:59-65,240-249,293-316`).
-- `session_required` means the authorization path requires a named session and the request supplied the empty default ID. For example, v2 registered harness-tool authorization refuses the default session (`pkg/pdp/pdp.go:240-261`). The unregistered-v2-tool authorization added in runtime PR #241 has the same named-session requirement (`pkg/pdp/pdp.go:253-274` in that PR).
+- `session_required` means the authorization path requires a named session and the request supplied no session ID. For example, v2 registered harness-tool authorization refuses the empty session ID (`pkg/pdp/pdp.go:240-261`). The unregistered-v2-tool authorization added in runtime PR #241 has the same named-session requirement (`pkg/pdp/pdp.go:253-274` in that PR).
 
-## Empty session ID
+## Requests without a session
 
-`pdp.DefaultSession` is the empty session ID used when a request names no session. It is never stored or live, and it has no credential store. `PUT /v1/session` rejects the legacy `kei.session/v1` schema with `invalid_request`. `GET /v1/session` and `DELETE /v1/session` without `X-Kei-Session` both return `404 session_not_found`; neither operation reads or changes a default session. The tokenless owner-session rewrite can still bind a headerless owner socket request to its verified named owner session before authorization (`runtime/socket_authorize.go:667-704`).
+A request that names no session carries the empty session ID. The runtime never stores it or treats it as live, and it has no credential store. `PUT /v1/session` rejects the legacy `kei.session/v1` schema with `invalid_request`. `GET /v1/session` and `DELETE /v1/session` without `X-Kei-Session` both return `404 session_not_found`; neither operation reads or changes the empty session ID. The tokenless owner-session rewrite can still bind a headerless owner socket request to its verified named owner session before authorization (`runtime/socket_authorize.go:667-704`).
 
 Runtime audit events always include `session_id`; calls without a session record an empty string, while named and rewritten owner calls record the selected session ID.
 
 ## What callers should do
 
 Create a named session with `PUT /v1/session` and `kei.session/v2`, then send the returned `session_id` as `X-Kei-Session` on governed calls. If the runtime returns `session_not_found` or `session_revalidation_required`, create a fresh named session. A request without a session header has no session unless the tokenless owner-session rewrite applies.
-
-## Deprecation
-
-Removal of the legacy default session is tracked in [Linear HAI-878](https://linear.app/haikeilabs/issue/HAI-878).
