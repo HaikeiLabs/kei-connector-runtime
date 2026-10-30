@@ -40,6 +40,9 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	if req.Connector != nil {
 		target.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
+	if req.Tool != "" && req.Connector != nil {
+		return l.decideHarnessToolForTarget(ctx, sessionID, req)
+	}
 	switch {
 	// A shell tool is one the bundle's harness kind registry names for a kind
 	// the local PDP decides (the generic "shell" until the bundle carries a
@@ -84,6 +87,49 @@ func (l *LocalPDP) isOwnerSession(sessionID string) bool {
 	return l.ownerID == sessionID && !l.ownerUnavailable
 }
 
+// decideHarnessToolForTarget authorizes a harness-executed tool against one
+// exact connector/capability/resource tuple. Connector-binding tools remain on
+// the complete-plan path and are never admitted here.
+func (l *LocalPDP) decideHarnessToolForTarget(ctx context.Context, sessionID string, req socketAuthorizeRequest) (pdp.Decision, bool, bool, error) {
+	deny := func(code pdp.ReasonCode, reason string) (pdp.Decision, bool, bool, error) {
+		return pdp.Decision{ReasonCode: code, DenySource: "policy", Reason: reason, BundleState: "ready"}, true, false, nil
+	}
+	if req.Resource == "" {
+		return deny("target_required", "harness connector authorization requires an exact resource")
+	}
+	if sessionID == "" || !l.Sessions.Exists(sessionID) {
+		return deny(pdp.ReasonSessionNotFound, "target authorization requires a live named session")
+	}
+	e, identity := l.evaluator.Load(), l.identity.Load()
+	if e == nil || identity == nil {
+		return deny(pdp.ReasonPolicyBundleMissing, "runtime identity or policy bundle is unavailable")
+	}
+	trusted := identity.AgentID
+	if trusted == "" || (req.AgentID != "" && req.AgentID != trusted) {
+		return deny("agent_mismatch", "the request agent is not this installation's default agent")
+	}
+	verified, ok := e.Bundle()
+	if !ok || verified.Payload.Schema != "kei.policy-bundle/v2" {
+		return deny("policy_bundle_invalid", "target authorization requires a verified v2 bundle")
+	}
+	connector, ok := verified.Connector(req.Connector.ConnectorID)
+	if !ok {
+		return deny("connector_not_registered", "connector is not described in the verified v2 bundle")
+	}
+	capabilityFound := false
+	for _, capability := range connector.Capabilities {
+		if capability.Name == req.Connector.Capability {
+			capabilityFound = true
+			break
+		}
+	}
+	if !capabilityFound {
+		return deny("capability_not_registered", "capability is not declared for the connector")
+	}
+	d, err := e.AuthorizeV2HarnessToolForTarget(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted}, req.Connector.ConnectorID, req.Connector.Capability, req.Resource)
+	return d, true, false, err
+}
+
 // decideCredentialReleaseV2 authorizes one exact tool/connector/capability/
 // resource tuple using the trusted installation agent and named session.
 func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID string, req socketAuthorizeRequest) (pdp.Decision, bool) {
@@ -114,8 +160,13 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 	if !ok {
 		return denied("connector_not_registered", "connector is not described in the verified v2 bundle")
 	}
-	if connector.AccountModel != "shared" {
-		return denied("account_model_not_supported", "tool-bound release requires a shared connector")
+	if connector.AccountModel != "shared" && connector.AccountModel != "per_user" {
+		return denied("account_model_not_supported", "tool-bound release requires a shared or per_user connector")
+	}
+	if connector.AccountModel == "per_user" {
+		if subject, ok := l.Sessions.Get(sessionID); !ok || subject.SubjectKind == "service_principal" || subject.UserID == "" {
+			return denied("account_model_not_supported", "per_user credentials require a user-bound session")
+		}
 	}
 	capabilityFound := false
 	for _, capability := range connector.Capabilities {
