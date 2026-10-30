@@ -170,10 +170,15 @@ func TestHarnessRegisteredKindMapping(t *testing.T) {
 		{"codex", "codex", true},
 		{"opencode", "opencode", true},
 		{"cursor", "cursor", true},
+		// pi is a valid hook kind (HAI-922); `kei connect pi` registers it as a
+		// custom (SDK) harness, so the report-only flag matches kind "custom".
+		{"pi", "custom", true},
 		{"claude", "codex", false},
 		{"codex", "claude_code", false},
 		{"opencode", "claude_code", false},
 		{"cursor", "claude_code", false},
+		{"pi", "claude_code", false},
+		{"pi", "opencode", false},
 	}
 	for _, tc := range cases {
 		harnesses := []policybundle.Harness{{AgentID: "h1", Kind: tc.bundle}}

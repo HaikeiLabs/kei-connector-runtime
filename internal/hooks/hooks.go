@@ -96,7 +96,7 @@ func WriteAudit(cfg Config, record []byte) {
 }
 
 func validHarnessKind(kind string) bool {
-	return kind == "claude" || kind == "codex" || kind == "opencode" || kind == "cursor"
+	return kind == "claude" || kind == "codex" || kind == "opencode" || kind == "cursor" || kind == "pi"
 }
 
 // validHarnessKindIn is validHarnessKind plus the short names the persisted

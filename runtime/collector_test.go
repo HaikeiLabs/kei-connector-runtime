@@ -714,6 +714,49 @@ func TestHarnessToolFlushCarriesSkill(t *testing.T) {
 	}
 }
 
+// TestHarnessToolFlushKeepsPiSessionRecord pins the HAI-922 collector half:
+// the harness_tool record `kei-proxy hook pi` writes (pseudo tool pi.session,
+// harness_kind pi) is a valid tool observation, so the record validation does
+// not quarantine it, and canonicalHarnessKind passes "pi" through unchanged.
+func TestHarnessToolFlushKeepsPiSessionRecord(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"upserted":1}`))
+	}))
+	defer server.Close()
+
+	client := NewHarnessToolFlushClientFromConfig(fakeCollectorConfig{token: "tok", controlPlane: server.URL}, time.Second)
+	// Exactly the record ReportPermissions marshals for the contract stdin
+	// {"session_id":"s1","hook_event_name":"SessionStart","tool_name":"pi.session",
+	//  "tool_input":{},"phase":"pre","native_decision":"allow"} (no --harness flag).
+	raw := json.RawMessage(`{"schema":"kei.harness-tool-event/v1","event_class":"harness_tool","harness_id":"","harness_kind":"pi","harness_session_id":"s1","phase":"pre","tool":"pi.session","args_digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","native_decision":"allow","observed_at":"2026-10-29T15:40:00Z"}`)
+	res, err := client.FlushHarnessTool(context.Background(), []json.RawMessage{raw})
+	if err != nil {
+		t.Fatalf("FlushHarnessTool: %v", err)
+	}
+	if n := res.Upserted; n != 1 {
+		t.Fatalf("upserted = %d, want 1", n)
+	}
+	if len(res.Quarantined) != 0 {
+		t.Fatalf("quarantined = %v, want none: the pi session record is a valid tool observation", res.Quarantined)
+	}
+	var envelope struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(gotBody, &envelope); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if len(envelope.Events) != 1 {
+		t.Fatalf("events = %d, want 1", len(envelope.Events))
+	}
+	ev := envelope.Events[0]
+	if ev["tool"] != "pi.session" || ev["harness_kind"] != "pi" || ev["observed_at"] != "2026-10-29T15:40:00Z" {
+		t.Fatalf("event = %v, want tool=pi.session harness_kind=pi observed_at=...", ev)
+	}
+}
+
 // TestHarnessToolFlushBatchesAtMost500 verifies the client splits a large batch
 // into chunks of at most 500 events.
 func TestHarnessToolFlushBatchesAtMost500(t *testing.T) {
