@@ -223,14 +223,16 @@ func skillToolName(name string, raw json.RawMessage) (string, bool) {
 
 // bundleKind maps a hook's short harness kind to the kind recorded in the
 // policy bundle's harnesses[] (ADR-029). The rendered hook CLI uses short
-// kinds (claude, codex, opencode, cursor); the bundle records claude_code,
-// codex, opencode and cursor. This is the single place that translates between
-// the two.
+// kinds (claude, codex, opencode, cursor, pi); the bundle records claude_code,
+// codex, opencode, cursor and custom — `kei connect pi` registers Pi as a
+// custom (SDK) harness. This is the single place that translates between the
+// two.
 var bundleKind = map[string]string{
 	"claude":   "claude_code",
 	"codex":    "codex",
 	"opencode": "opencode",
 	"cursor":   "cursor",
+	"pi":       "custom",
 }
 
 // harnessRegistered reports whether the bundle's registered harnesses include

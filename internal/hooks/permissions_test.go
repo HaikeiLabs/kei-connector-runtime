@@ -442,6 +442,49 @@ func TestNonOpencodeHarnessesHaveNoSkill(t *testing.T) {
 	}
 }
 
+// TestHookPiSessionEventReportsHarnessTool pins the HAI-922 contract: the Pi
+// extension runs `kei-proxy hook pi` (no --harness flag) with a session-level
+// event whose pseudo tool is pi.session, and the hook writes exactly one
+// harness_tool record with harness_kind "pi" and harness_session_id from the
+// payload. The tool-less session path must not be involved: the collector
+// quarantines tool-less records, so pi.session is what keeps the record.
+func TestHookPiSessionEventReportsHarnessTool(t *testing.T) {
+	input := `{"session_id":"s1","hook_event_name":"SessionStart","tool_name":"pi.session","tool_input":{},"phase":"pre","native_decision":"allow"}`
+	var spool []byte
+	cfg := Config{AppendAudit: func(record []byte) error {
+		spool = append(spool, record...)
+		spool = append(spool, '\n')
+		return nil
+	}}
+	var stdout, stderr bytes.Buffer
+	if code := ReportPermissions([]string{"pi"}, strings.NewReader(input), &stdout, cfg); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("hook wrote deciding output: %q", stdout.String())
+	}
+	lines := strings.Split(strings.TrimSpace(string(spool)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("spool lines = %d, want exactly one record", len(lines))
+	}
+	var got permissionEvent
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Schema != "kei.harness-tool-event/v1" || got.EventClass != "harness_tool" {
+		t.Fatalf("schema/class = %s/%s, want kei.harness-tool-event/v1/harness_tool", got.Schema, got.EventClass)
+	}
+	if got.HarnessKind != "pi" {
+		t.Fatalf("harness_kind = %q, want pi", got.HarnessKind)
+	}
+	if got.HarnessSessionID != "s1" {
+		t.Fatalf("harness_session_id = %q, want s1", got.HarnessSessionID)
+	}
+	if got.Tool != "pi.session" || got.Phase != "pre" || got.NativeDecision != "allow" {
+		t.Fatalf("event = %+v", got)
+	}
+}
+
 // TestActiveSkillStorePersists verifies the store survives across store
 // instances (simulating separate hook processes) and is keyed by session.
 func TestActiveSkillStorePersists(t *testing.T) {
