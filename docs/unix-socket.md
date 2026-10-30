@@ -43,7 +43,14 @@ A v2 tool absent from the bundle's `harness_executor` routes is denied as
 `tool_not_registered`; the response and audit `policy_reason` direct the operator
 to re-sync the harness manifest. A tool registered with `connector_binding`
 remains denied on this decision-only endpoint as `preflight_required`, with an
-audit reason that identifies the connector route and complete-plan requirement.
+audit reason that identifies the connector route and complete-plan requirement. A trusted
+`harness_executor` may instead request an exact-target decision by including
+`connector: {connector_id, capability}` and a non-empty `resource` alongside
+`tool`. The runtime verifies the connector and capability against the local
+v2 bundle, then evaluates the tool policy with `connector_id`, `capability`,
+and `resource_id` in the same decision. This is decision-only: it returns no
+credential and does not authorize `connector_binding` tools or provide an
+execution route.
 
 (The ADR-035 preflight/consume plan routes were removed with the connector
 invoke path in HAI-724; they are no longer served.)
@@ -297,9 +304,13 @@ harness-executor tool, include both `tool` and
 `connector{connector_id, capability}`; the daemon checks the named tool against
 the trusted installation agent and live named session, verifies the connector
 and capability in the v2 bundle, and evaluates the tool policy with the exact
-connector/capability/resource context. Only `shared` connectors may release;
-non-shared or unsupported models, a mismatch, a deny, or unavailable
-credentials return no credential. Optional `on_behalf_of` is forwarded only
+connector/capability/resource context. `shared` and `per_user` connector
+credentials may be released only when the session-held credential's account
+model matches the verified bundle. A `per_user` credential is fetched using
+that named session's subject token and can only be used by the same session
+subject; the fresh policy decision binds the exact tool/connector/capability/
+resource tuple. Unsupported models, any tuple or audience mismatch, a deny, or
+unavailable credentials return no credential. Optional `on_behalf_of` is forwarded only
 for audit attribution and never affects authorization. The request is
 `kei.credential-release-request/v1` (the session in `X-Kei-Session`); the answer is
 `kei.credential-release-response/v1` — `decision`, the `credential` value

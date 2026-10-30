@@ -892,8 +892,8 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+authorizeRequestSchema+" object with no unknown fields")
 		return
 	}
-	if (req.Tool == "") == (req.Connector == nil) || (req.Connector != nil && (req.Connector.ConnectorID == "" || req.Connector.Capability == "")) {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs exactly one of tool or connector{connector_id, capability}")
+	if (req.Tool == "" && req.Connector == nil) || (req.Connector != nil && (req.Connector.ConnectorID == "" || req.Connector.Capability == "")) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs a tool, connector, or tool with connector{connector_id, capability}")
 		return
 	}
 	if !validOnBehalfOf(req.OnBehalfOf) {
@@ -978,12 +978,22 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		if req.Tool != "" {
 			credentialResource = l.connectorCredentialResource(req.Connector.ConnectorID)
 		}
+		var expectedAccountModel string
+		if req.Tool != "" {
+			if e := l.evaluator.Load(); e != nil {
+				if verified, ok := e.Bundle(); ok {
+					if connector, found := verified.Connector(req.Connector.ConnectorID); found {
+						expectedAccountModel = connector.AccountModel
+					}
+				}
+			}
+		}
 		var cred *socketCredentialReleaseCred
 		releaseErr := l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, credentialResource, func(c credrelease.ConnectorCredential) error {
 			if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != credentialResource) {
 				return errCredentialAudienceMismatch
 			}
-			if req.Tool != "" && c.AccountModel != "shared" {
+			if req.Tool != "" && (expectedAccountModel == "" || c.AccountModel != expectedAccountModel || (c.AccountModel != "shared" && c.AccountModel != "per_user")) {
 				return errCredentialAccountModelUnsupported
 			}
 			cred = &socketCredentialReleaseCred{

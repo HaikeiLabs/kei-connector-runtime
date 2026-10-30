@@ -129,6 +129,22 @@ func v2SharedCredentialReleaseBundle(t *testing.T, now time.Time, target string)
 	return raw
 }
 
+func v2CredentialReleaseBundle(t *testing.T, now time.Time, target, accountModel string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(v2SharedCredentialReleaseBundle(t, now, target), &doc); err != nil {
+		t.Fatal(err)
+	}
+	set := doc["policy_set"].(map[string]any)
+	connector := set["connectors"].([]any)[0].(map[string]any)
+	connector["account_model"] = accountModel
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func principalV2CredentialBundle(t *testing.T, now time.Time, accountModel string) []byte {
 	t.Helper()
 	var doc map[string]any
@@ -233,6 +249,8 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 		want                                        string
 	}{
 		{"allowed shared credential", "github.read_repo", "conn-fixture-0001", "repository.read", target, "allow"},
+		{"allowed per-user credential", "github.read_repo", "conn-fixture-0001", "repository.read", target, "allow"},
+		{"credential subject isolation", "github.read_repo", "conn-fixture-0001", "repository.read", target, "deny"},
 		{"mismatched tool", "github.write_repo", "conn-fixture-0001", "repository.read", target, "deny"},
 		{"mismatched connector", "github.read_repo", "conn-other", "repository.read", target, "deny"},
 		{"mismatched capability", "github.read_repo", "conn-fixture-0001", "repository.write", target, "deny"},
@@ -247,7 +265,11 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := storeBundle.Activate(v2SharedCredentialReleaseBundle(t, now, target), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+			accountModel := "shared"
+			if tc.name == "allowed per-user credential" {
+				accountModel = "per_user"
+			}
+			if _, err := storeBundle.Activate(v2CredentialReleaseBundle(t, now, target, accountModel), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
 				t.Fatal(err)
 			}
 			credentialMissing := tc.name == "missing credential"
@@ -276,7 +298,7 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 				if credentialMismatch {
 					connectorID = "conn-other"
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": connectorID, "resource": body.Resource, "account_model": "shared", "credential": map[string]any{"access_token": "shared-token", "token_type": "Bearer", "expire_time": "2026-10-17T20:00:00Z"}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"connector_id": connectorID, "resource": body.Resource, "account_model": accountModel, "credential": map[string]any{"access_token": "shared-token", "token_type": "Bearer", "expire_time": "2026-10-17T20:00:00Z"}})
 			}))
 			defer bridge.Close()
 			l := NewLocalPDP(testPolicyConfig{policyStateDir: dir, token: "runtime-token"}, nil)
@@ -290,7 +312,11 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 				t.Fatal(err)
 			}
 			store := credrelease.NewStore(credrelease.NewClient(bridge.URL, "runtime-token", time.Second))
-			if err := store.Load(context.Background(), "user-alice", "subject-token"); err != nil {
+			credentialSubject := "user-alice"
+			if tc.name == "credential subject isolation" {
+				credentialSubject = "user-bob"
+			}
+			if err := store.Load(context.Background(), credentialSubject, "subject-token"); err != nil {
 				t.Fatal(err)
 			}
 			l.sessionCreds.Store(sessionID, store)
@@ -313,6 +339,51 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 			}
 			if got.Decision != tc.want || (tc.want == "deny" && got.Credential != nil) || (tc.want == "allow" && (got.Credential == nil || got.Credential.AccessToken != "shared-token")) {
 				t.Fatalf("decision=%q credential=%+v body=%s", got.Decision, got.Credential, rec.Body)
+			}
+		})
+	}
+}
+
+func TestSocketAuthorizeV2HarnessToolBindsExactTarget(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	defer policybundle.SetV2SchemaValidator(nil)
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	local := NewLocalPDP(cfg, nil)
+	defer local.Close()
+	local.SetIdentity(&Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"})
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(v2CredentialReleaseBundle(t, now, "repos/owner/name", "per_user"), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil || sessionResponse.SessionID == "" {
+		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+	}
+	cases := []struct {
+		name, body, decision, reason string
+	}{
+		{"exact target allowed", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","connector":{"connector_id":"conn-fixture-0001","capability":"repository.read"},"resource":"repos/owner/name"}`, "permit", ""},
+		{"different resource denied", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","connector":{"connector_id":"conn-fixture-0001","capability":"repository.read"},"resource":"repos/other/name"}`, "deny", "no_matching_policy"},
+		{"missing target denied", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","connector":{"connector_id":"conn-fixture-0001","capability":"repository.read"}}`, "deny", "target_required"},
+		{"unregistered connector denied", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","connector":{"connector_id":"conn-forged","capability":"repository.read"},"resource":"repos/owner/name"}`, "deny", "connector_not_registered"},
+		{"unregistered capability denied", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","connector":{"connector_id":"conn-fixture-0001","capability":"admin.write"},"resource":"repos/owner/name"}`, "deny", "capability_not_registered"},
+		{"forged agent denied", `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","agent_id":"agent-forged","connector":{"connector_id":"conn-fixture-0001","capability":"repository.read"},"resource":"repos/owner/name"}`, "deny", "agent_mismatch"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(tc.body)), sessionResponse.SessionID)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			var got socketAuthorizeResponse
+			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil || got.Decision != tc.decision || (tc.reason != "" && got.ReasonCode != tc.reason) {
+				t.Fatalf("status=%d decision=%+v body=%s", rec.Code, got, rec.Body.String())
 			}
 		})
 	}
@@ -374,6 +445,17 @@ func TestSocketAuthorizeV2RouteDenialsExplainTheirRegistrationInKeiAudit(t *test
 		t.Fatalf("connector decision=%+v", connector)
 	}
 	checkAudit(connector.ReasonCode, connector.Reason)
+
+	// Supplying target dimensions must not turn a connector_binding tool into
+	// a decision-only harness_executor call.
+	targetBody := `{"schema":"kei.authorize-request/v1","tool":"github.read_repo","connector":{"connector_id":"conn-fixture-0001","capability":"repository.read"},"resource":"repos/owner/name"}`
+	targetReq := withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(targetBody)), sessionResponse.SessionID)
+	targetRec := httptest.NewRecorder()
+	h.ServeHTTP(targetRec, targetReq)
+	var targetResponse socketAuthorizeResponse
+	if targetRec.Code != http.StatusOK || json.Unmarshal(targetRec.Body.Bytes(), &targetResponse) != nil || targetResponse.Decision == "permit" {
+		t.Fatalf("connector_binding target decision=%+v body=%s", targetResponse, targetRec.Body.String())
+	}
 
 	unknown := call("utilities.oms.list_triage")
 	if unknown.Decision != "deny" || unknown.ReasonCode != "tool_not_registered" || !strings.Contains(unknown.Reason, "harness_executor") || !strings.Contains(unknown.Reason, "re-sync") {
