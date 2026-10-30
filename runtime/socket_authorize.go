@@ -997,7 +997,7 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 				return errCredentialAccountModelUnsupported
 			}
 			cred = &socketCredentialReleaseCred{
-				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: req.Resource,
+				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
 				AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
 			}
 			return nil

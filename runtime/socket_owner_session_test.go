@@ -145,6 +145,28 @@ func v2CredentialReleaseBundle(t *testing.T, now time.Time, target, accountModel
 	return raw
 }
 
+func v2CredentialReleaseBundleWithMCPAudience(t *testing.T, now time.Time, target, audience string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(v2CredentialReleaseBundle(t, now, target, "shared"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	set := doc["policy_set"].(map[string]any)
+	connector := set["connectors"].([]any)[0].(map[string]any)
+	connector["kind"] = "mcp"
+	connector["slug"] = "drive_prod"
+	connector["mcp"] = map[string]any{
+		"url": audience, "transport": "streamable_http", "auth_method": "oauth",
+		"approved_manifest_hash": "sha256:a94748f3bd7e1bc1e46ff952e802378a98249adfd5fcd2677ff48bd0df848dbb",
+		"approved_tools":         []any{map[string]any{"name": "github.read_repo", "tool_hash": "sha256:9e84a27116887ce94c79f25184ee07da9b9dd0288847be9e0ee885fdc61ec537"}},
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func principalV2CredentialBundle(t *testing.T, now time.Time, accountModel string) []byte {
 	t.Helper()
 	var doc map[string]any
@@ -244,11 +266,13 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	defer policybundle.SetV2SchemaValidator(nil)
 	const target = "repos/owner/name"
+	const connectorAudience = "https://drive.example/mcp"
 	for _, tc := range []struct {
 		name, tool, connector, capability, resource string
 		want                                        string
 	}{
 		{"allowed shared credential", "github.read_repo", "conn-fixture-0001", "repository.read", target, "allow"},
+		{"credential audience distinct from policy target", "github.read_repo", "conn-fixture-0001", "repository.read", "drive/drive-123", "allow"},
 		{"allowed per-user credential", "github.read_repo", "conn-fixture-0001", "repository.read", target, "allow"},
 		{"credential subject isolation", "github.read_repo", "conn-fixture-0001", "repository.read", target, "deny"},
 		{"mismatched tool", "github.write_repo", "conn-fixture-0001", "repository.read", target, "deny"},
@@ -269,7 +293,15 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 			if tc.name == "allowed per-user credential" {
 				accountModel = "per_user"
 			}
-			if _, err := storeBundle.Activate(v2CredentialReleaseBundle(t, now, target, accountModel), "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+			bundleTarget := target
+			if tc.name == "credential audience distinct from policy target" {
+				bundleTarget = tc.resource
+			}
+			bundle := v2CredentialReleaseBundle(t, now, bundleTarget, accountModel)
+			if tc.name == "credential audience distinct from policy target" {
+				bundle = v2CredentialReleaseBundleWithMCPAudience(t, now, bundleTarget, connectorAudience)
+			}
+			if _, err := storeBundle.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
 				t.Fatal(err)
 			}
 			credentialMissing := tc.name == "missing credential"
@@ -283,10 +315,12 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 					Resource string `json:"resource"`
 				}
 				_ = json.NewDecoder(r.Body).Decode(&body)
-				// The connector has no MCP server, so its credential has no
-				// resource; the policy target must never reach the identity
-				// service, which answers 400 for a non-URI resource.
-				if body.Resource != "" {
+				expectedAudience := ""
+				if tc.name == "credential audience distinct from policy target" {
+					expectedAudience = connectorAudience
+				}
+				// Lookup must use the connector audience, not the policy target.
+				if body.Resource != expectedAudience {
 					http.Error(w, "resource must be the connector's canonical resource URI", http.StatusBadRequest)
 					return
 				}
@@ -332,6 +366,7 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 				Decision   string `json:"decision"`
 				Credential *struct {
 					AccessToken string `json:"access_token"`
+					Resource    string `json:"resource"`
 				} `json:"credential"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -339,6 +374,9 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 			}
 			if got.Decision != tc.want || (tc.want == "deny" && got.Credential != nil) || (tc.want == "allow" && (got.Credential == nil || got.Credential.AccessToken != "shared-token")) {
 				t.Fatalf("decision=%q credential=%+v body=%s", got.Decision, got.Credential, rec.Body)
+			}
+			if tc.name == "credential audience distinct from policy target" && got.Credential.Resource != connectorAudience {
+				t.Fatalf("credential resource=%q, want connector audience %q", got.Credential.Resource, connectorAudience)
 			}
 		})
 	}

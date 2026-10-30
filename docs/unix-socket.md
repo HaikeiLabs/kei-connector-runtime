@@ -315,8 +315,11 @@ for audit attribution and never affects authorization. The request is
 `kei.credential-release-request/v1` (the session in `X-Kei-Session`); the answer is
 `kei.credential-release-response/v1` — `decision`, the `credential` value
 with its `expires_at`, or a typed `reason_code` and no credential, never a
-fallback. Audit events use `invoking_subject=user:<id>` (or the typed session
-principal) and may carry the harness-provided type-prefixed `on_behalf_of`.
+fallback. On an allow, `credential.resource` is the credential's actual
+connector audience (as returned by the credential service), not the policy
+target supplied in the request. Audit events use
+`invoking_subject=user:<id>` (or the typed session principal) and may carry the
+harness-provided type-prefixed `on_behalf_of`.
 `POST` only: any other method, and a daemon without session credential
 release, answers `404`. The value is held in session memory and flushed when
 the session ends; it is never logged or printed.
