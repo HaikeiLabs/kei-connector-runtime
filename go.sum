@@ -32,8 +32,6 @@ github.com/AzureAD/microsoft-authentication-extensions-for-go/cache v0.1.1 h1:WJ
 github.com/AzureAD/microsoft-authentication-extensions-for-go/cache v0.1.1/go.mod h1:tCcJZ0uHAmvjsVYzEFivsRTN00oz5BEsRgQHu5JZ9WE=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2 h1:RHK7bS+HQMslb1sZpAokUt+zTVmue0hKSs2C791hhzU=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2/go.mod h1:HKpQxkWaGLJ+D/5H8QRpyQXA1eKjxkFlOMwck5+33Jk=
-github.com/HaikeiLabs/kei-connector-contracts v0.15.0 h1:TBODjfFR3PtL0WCF2rkHKMzImOobcakJloTYF1AXM4k=
-github.com/HaikeiLabs/kei-connector-contracts v0.15.0/go.mod h1:Y3GI1O5wqRFogqDGPiXcE20wQyEHX8rTGXw2U2VCKQw=
 github.com/HaikeiLabs/kei-connector-contracts v0.16.0 h1:bBoaLcPg1Tk61gV3Ji/3pq/UXFGa8F62RyfKeB55wWk=
 github.com/HaikeiLabs/kei-connector-contracts v0.16.0/go.mod h1:Y3GI1O5wqRFogqDGPiXcE20wQyEHX8rTGXw2U2VCKQw=
 github.com/aws/aws-sdk-go-v2 v1.45.1 h1:iIoG3NaLhV6UZpPXyPXlDj2I9oS8tV/nMcMnITCC6Ks=

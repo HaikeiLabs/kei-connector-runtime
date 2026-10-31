@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/HaikeiLabs/kei-connector-contracts/authorizerequest"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
@@ -55,6 +56,9 @@ type socketAuthorizeRequest struct {
 	// ShellCommand is accepted only over the tenant-local socket and is used
 	// solely to evaluate shell: policies. It is never copied to audit events.
 	ShellCommand string `json:"shell_command,omitempty"`
+	// Caller is optional caller metadata for the audit trail (HAI-527,
+	// kei-connector-contracts authorizerequest). It is never a policy input.
+	Caller *authorizerequest.Caller `json:"caller,omitempty"`
 }
 
 type socketAuthorizeConnector struct {
@@ -153,6 +157,9 @@ type socketDecisionEvent struct {
 	ParentSpan          *string  `json:"parent_span,omitempty"`
 	ToolArgsDigest      *string  `json:"tool_args_digest,omitempty"`
 	SessionID           *string  `json:"session_id,omitempty"`
+	CallerHarness       *string  `json:"caller_harness,omitempty"`
+	CallerOrigin        *string  `json:"caller_origin,omitempty"`
+	CallerSessionRef    *string  `json:"caller_session_ref,omitempty"`
 	// CredentialReleased is set only by the HAI-722 pass-through route: true
 	// when a credential value crossed the socket. The value itself is never
 	// recorded.
@@ -900,6 +907,10 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "on_behalf_of must be empty or a type-prefixed value")
 		return
 	}
+	if req.Caller != nil && req.Caller.Validate() != nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "caller must be harness, origin (interactive or automation) and session_ref as short tokens")
+		return
+	}
 	sessionID := session.FromRequest(r)
 	d, auditTrustedAgent, unmatched, err := l.decideAuthorize(r.Context(), sessionID, req)
 	if err != nil {
@@ -943,6 +954,10 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 	}
 	if req.Resource == "" {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a resource is required")
+		return
+	}
+	if req.Caller != nil && req.Caller.Validate() != nil {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "caller must be harness, origin (interactive or automation) and session_ref as short tokens")
 		return
 	}
 	if !validOnBehalfOf(req.OnBehalfOf) {
@@ -1168,6 +1183,9 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 	}
 	if req.ToolArgsDigest != "" {
 		e.ToolArgsDigest = &req.ToolArgsDigest
+	}
+	if c := req.Caller; c != nil {
+		e.CallerHarness, e.CallerOrigin, e.CallerSessionRef = c.Harness, c.Origin, c.SessionRef
 	}
 	if d.PolicyID != "" {
 		e.PolicyID = &d.PolicyID

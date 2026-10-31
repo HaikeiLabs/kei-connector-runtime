@@ -62,6 +62,11 @@ type DecisionEvent struct {
 	BundleState         string    `json:"bundle_state,omitempty"`
 	DenySource          string    `json:"deny_source,omitempty"`
 	ReasonCode          string    `json:"reason_code,omitempty"`
+	// Optional caller metadata from the authorize request (HAI-527). Nil means
+	// the caller did not say; the catalog records it as unknown.
+	CallerHarness    *string `json:"caller_harness,omitempty"`
+	CallerOrigin     *string `json:"caller_origin,omitempty"`
+	CallerSessionRef *string `json:"caller_session_ref,omitempty"`
 }
 
 func AppendDecisionEvent(path string, maxBytes int64, e DecisionEvent) error {
