@@ -96,12 +96,12 @@ func TestFlushClientRuntimeMode(t *testing.T) {
 		token:      "rt-token",
 	}
 	client := NewABACFlushClientFromConfig(cfg, 5*time.Second)
-	n, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-1", Decision: "allow"}})
+	res, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-1", Decision: "allow"}})
 	if err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("upserted = %d, want 1", n)
+	if res.Upserted != 1 {
+		t.Fatalf("upserted = %d, want 1", res.Upserted)
 	}
 	if gotPath != "/api/v1/runtime/audit:flush" {
 		t.Errorf("path = %q, want /api/v1/runtime/audit:flush", gotPath)
@@ -144,12 +144,12 @@ func TestFlushClientAcceptsSkippedAndWarns(t *testing.T) {
 	}))
 	defer srv.Close()
 	client := NewABACFlushClientFromConfig(mockCollectorConfig{runtimeURL: srv.URL, token: "rt-token"}, time.Second)
-	n, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-1"}, {SpanID: "s-2"}, {SpanID: "s-3"}})
+	res, err := client.Flush(context.Background(), []DecisionEvent{{SpanID: "s-1"}, {SpanID: "s-2"}, {SpanID: "s-3"}})
 	if err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("upserted = %d, want 2", n)
+	if res.Upserted != 2 {
+		t.Fatalf("upserted = %d, want 2", res.Upserted)
 	}
 	if !strings.Contains(logs.String(), `"skipped":1`) {
 		t.Fatalf("missing skipped count warning: %s", logs.String())

@@ -24,7 +24,24 @@ import (
 )
 
 type ABACFlushClient interface {
-	Flush(ctx context.Context, records []DecisionEvent) (int, error)
+	Flush(ctx context.Context, records []DecisionEvent) (DecisionFlushResult, error)
+}
+
+// DecisionFlushResult reports what one Flush call did with its records.
+type DecisionFlushResult struct {
+	Upserted int
+	// Quarantined counts dropped records by reason code.
+	Quarantined map[string]int
+	// CatalogRejection is the catalog's error for the last rejected record
+	// (status, reason, message). It never carries record contents.
+	CatalogRejection string
+}
+
+func (r *DecisionFlushResult) quarantine(reason string, n int) {
+	if r.Quarantined == nil {
+		r.Quarantined = map[string]int{}
+	}
+	r.Quarantined[reason] += n
 }
 
 type abacFlushClient struct {
@@ -45,7 +62,109 @@ func NewABACFlushClientFromConfig(cfg CollectorConfig, timeout time.Duration) AB
 	}
 }
 
-func (c *abacFlushClient) Flush(ctx context.Context, records []DecisionEvent) (int, error) {
+// decisionFlushHTTPError carries the catalog's non-2xx for the audit:flush
+// route: the status code, the Retry-After hint on a 429, and the AIP error
+// body's status and message. The catalog's messages name the failed check,
+// never a record's values.
+type decisionFlushHTTPError struct {
+	statusCode int
+	retryAfter time.Duration
+	status     string
+	message    string
+}
+
+func (e *decisionFlushHTTPError) Error() string {
+	msg := fmt.Sprintf("flush returned status %d", e.statusCode)
+	if detail := e.detail(); detail != "" {
+		msg += ": " + detail
+	}
+	return msg
+}
+
+func (e *decisionFlushHTTPError) detail() string {
+	switch {
+	case e.status != "" && e.message != "":
+		return e.status + ": " + e.message
+	default:
+		return e.status + e.message
+	}
+}
+
+// rejectsRecords reports whether the catalog refused the batch's contents, so
+// splitting the batch can isolate the record at fault. Any other status
+// (auth, throttling, outage) says nothing about the records and is retried
+// whole.
+func (e *decisionFlushHTTPError) rejectsRecords() bool {
+	switch e.statusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
+func decisionFlushResponseError(resp *http.Response) error {
+	e := &decisionFlushHTTPError{statusCode: resp.StatusCode}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		e.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	var body struct {
+		Error struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, maxCatalogErrorBody)).Decode(&body) == nil {
+		e.status = safeCatalogErrorText(body.Error.Status)
+		e.message = safeCatalogErrorText(body.Error.Message)
+	}
+	return e
+}
+
+// Flush POSTs the batch to the catalog's audit:flush route. Delivery is
+// at-least-once: a failed batch returns an error so the collector retains the
+// spool and retries.
+//
+// The catalog validates some record-level constraints across the whole batch
+// and its 400 body names the failed check, not the record at fault (the
+// audit_records handler answers "invalid request body" without pointing at a
+// record), so one record the catalog will never accept — for example an empty
+// invoking_subject on an older catalog build — would hold the spool forever
+// (HAI-928). A batch the catalog rejects is therefore split in halves until
+// each rejected record stands alone and is quarantined; the rest ship.
+func (c *abacFlushClient) Flush(ctx context.Context, records []DecisionEvent) (DecisionFlushResult, error) {
+	var res DecisionFlushResult
+	if err := c.flushIsolatingRejects(ctx, records, &res); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// flushIsolatingRejects sends records and, when the catalog rejects their
+// contents, bisects them until each rejected record stands alone and is
+// quarantined. Errors that are not record rejections are returned unchanged.
+func (c *abacFlushClient) flushIsolatingRejects(ctx context.Context, records []DecisionEvent, res *DecisionFlushResult) error {
+	n, err := c.flushChunk(ctx, records)
+	if err == nil {
+		res.Upserted += n
+		return nil
+	}
+	var httpErr *decisionFlushHTTPError
+	if !errors.As(err, &httpErr) || !httpErr.rejectsRecords() {
+		return err
+	}
+	if len(records) == 1 {
+		res.quarantine(quarantineCatalogRejected, 1)
+		res.CatalogRejection = fmt.Sprintf("status %d %s", httpErr.statusCode, httpErr.detail())
+		return nil
+	}
+	mid := len(records) / 2
+	if err := c.flushIsolatingRejects(ctx, records[:mid], res); err != nil {
+		return err
+	}
+	return c.flushIsolatingRejects(ctx, records[mid:], res)
+}
+
+func (c *abacFlushClient) flushChunk(ctx context.Context, records []DecisionEvent) (int, error) {
 	body, err := json.Marshal(map[string][]DecisionEvent{"records": records})
 	if err != nil {
 		return 0, fmt.Errorf("marshal flush: %w", err)
@@ -66,7 +185,7 @@ func (c *abacFlushClient) Flush(ctx context.Context, records []DecisionEvent) (i
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return 0, fmt.Errorf("flush returned status %d", resp.StatusCode)
+		return 0, decisionFlushResponseError(resp)
 	}
 	var out struct {
 		Upserted *int `json:"upserted"`
@@ -165,6 +284,10 @@ func lifecycleRetryDelay(err error) (time.Duration, bool) {
 	var auditErr *harnessAuditFlushHTTPError
 	if errors.As(err, &auditErr) {
 		return throttleDelay(auditErr.statusCode, auditErr.retryAfter)
+	}
+	var decisionErr *decisionFlushHTTPError
+	if errors.As(err, &decisionErr) {
+		return throttleDelay(decisionErr.statusCode, decisionErr.retryAfter)
 	}
 	return 0, false
 }
@@ -824,6 +947,9 @@ type skippedRecords struct {
 	// quarantined holds harness_tool records dropped since the collector
 	// state was last written, by reason code.
 	quarantined map[string]int
+	// decisionQuarantined holds decision records dropped since the collector
+	// state was last written, by reason code.
+	decisionQuarantined map[string]int
 }
 
 func (s *skippedRecords) addQuarantined(counts map[string]int) {
@@ -832,6 +958,17 @@ func (s *skippedRecords) addQuarantined(counts map[string]int) {
 			s.quarantined = map[string]int{}
 		}
 		s.quarantined[reason] += n
+	}
+}
+
+// addDecisionQuarantined accumulates decision records dropped because the
+// catalog will never accept them, by reason code.
+func (s *skippedRecords) addDecisionQuarantined(counts map[string]int) {
+	for reason, n := range counts {
+		if s.decisionQuarantined == nil {
+			s.decisionQuarantined = map[string]int{}
+		}
+		s.decisionQuarantined[reason] += n
 	}
 }
 
@@ -845,6 +982,13 @@ func (s *skippedRecords) moveQuarantined(st *collectorState) {
 		st.HarnessToolQuarantined[reason] += int64(n)
 	}
 	s.quarantined = nil
+	for reason, n := range s.decisionQuarantined {
+		if st.DecisionQuarantined == nil {
+			st.DecisionQuarantined = map[string]int64{}
+		}
+		st.DecisionQuarantined[reason] += int64(n)
+	}
+	s.decisionQuarantined = nil
 }
 
 func sortedKeys(m map[string]int) []string {
@@ -891,10 +1035,16 @@ func (s skippedRecords) log(logger *slog.Logger, path string) {
 func (c *Collector) flushBatch(ctx context.Context, b parsedBatch, skipped *skippedRecords) (int, error) {
 	if len(b.decisions) > 0 && c.FlushClient != nil {
 		payload, _ := json.Marshal(map[string][]DecisionEvent{"records": b.decisions})
-		if _, err := c.FlushClient.Flush(ctx, b.decisions); err != nil {
+		res, err := c.FlushClient.Flush(ctx, b.decisions)
+		if err != nil {
 			return 0, err
 		}
 		c.logger.Info("audit collector flush succeeded", "path", c.jsonlPath, "event_class", EventClassDecision, "records_sent", len(b.decisions), "payload_bytes", len(payload))
+		for _, reason := range sortedKeys(res.Quarantined) {
+			c.logger.Warn("audit collector quarantined decision records the catalog will not accept",
+				"path", c.jsonlPath, "reason", reason, "records", res.Quarantined[reason], "catalog_error", res.CatalogRejection)
+		}
+		skipped.addDecisionQuarantined(res.Quarantined)
 	}
 	if len(b.lifecycle) > 0 && c.LifecycleClient != nil {
 		payload, _ := json.Marshal(map[string][]json.RawMessage{"records": b.lifecycle})
