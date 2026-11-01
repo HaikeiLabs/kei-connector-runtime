@@ -37,6 +37,10 @@ type Config struct {
 	// RuntimeHeartbeatInterval is KEI_RUNTIME_HEARTBEAT_INTERVAL: how often
 	// `kei-proxy serve` reports liveness (Go duration, default 1m).
 	RuntimeHeartbeatInterval time.Duration
+	// ExportableServicePrincipals is KEI_EXPORTABLE_SERVICE_PRINCIPALS: the
+	// comma-separated service principal names whose subject token
+	// POST /v1/session:subjectToken may return. Empty (default) refuses all.
+	ExportableServicePrincipals []string
 }
 
 func envOr(key, fallback string) string {
@@ -93,6 +97,19 @@ func tokenlessOwnerSessionFromEnv() bool {
 	}
 }
 
+// exportableServicePrincipalsFromEnv reads KEI_EXPORTABLE_SERVICE_PRINCIPALS
+// (comma-separated principal names). Blank entries are dropped; unset or empty
+// yields nil, which keeps subject token export off.
+func exportableServicePrincipalsFromEnv() []string {
+	var names []string
+	for _, name := range strings.Split(os.Getenv("KEI_EXPORTABLE_SERVICE_PRINCIPALS"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 const defaultRuntimeHeartbeatInterval = time.Minute
 
 // runtimeHeartbeatIntervalFromEnv reads KEI_RUNTIME_HEARTBEAT_INTERVAL (a Go
@@ -125,6 +142,7 @@ func configFromEnv() Config {
 		SessionIdleTTL:                sessionIdleTTLFromEnv(),
 		TokenlessOwnerSession:         tokenlessOwnerSessionFromEnv(),
 		RuntimeHeartbeatInterval:      runtimeHeartbeatIntervalFromEnv(),
+		ExportableServicePrincipals:   exportableServicePrincipalsFromEnv(),
 	}
 }
 

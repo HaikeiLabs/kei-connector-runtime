@@ -242,6 +242,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 	local := keiruntime.NewLocalPDP(cfg, emitFunc)
 	local.SetSessionIdleTTL(cfg.SessionIdleTTL)
 	local.SetTokenlessOwnerSession(cfg.TokenlessOwnerSession)
+	local.SetExportableServicePrincipals(cfg.ExportableServicePrincipals)
 	if creds != nil {
 		store := connectorSecretStore()
 		secretResolver := invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: store}

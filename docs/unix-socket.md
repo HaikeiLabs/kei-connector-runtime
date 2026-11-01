@@ -103,8 +103,9 @@ This daemon-socket model brings three benefits:
 ### API surface
 
 The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
-`POST /v1/authorize`, `POST /v1/credentials:release`, and
-`PUT/DELETE/GET /v1/session`. Session creation accepts only `kei.session/v2`;
+`POST /v1/authorize`, `POST /v1/credentials:release`,
+`PUT/DELETE/GET /v1/session`, and the opt-in
+`POST /v1/session:subjectToken` (see below). Session creation accepts only `kei.session/v2`;
 the legacy `kei.session/v1` request is rejected. GET or DELETE without
 `X-Kei-Session` returns `404 session_not_found`; the operations apply only to
 named sessions. `GET /v1/model-config` returns the runtime's
@@ -223,8 +224,10 @@ credentials. A provider 401 triggers one single-provider re-fetch and one retry,
 and after that the call is denied. The daemon sets `RLIMIT_CORE=0` so it never
 core-dumps them.
 
-**No socket route returns a credential.** Any process running as the proxy's
-OS user can reach the owner-only socket. Only the explicitly configured owner
+**No socket route returns a connector credential** outside
+`POST /v1/credentials:release`, and only the opt-in
+`POST /v1/session:subjectToken` below returns a principal subject token. Any
+process running as the proxy's OS user can reach the owner-only socket. Only the explicitly configured owner
 routes listed above use that same-UID boundary without a bearer token; session
 creation and command execution remain token-authenticated. Credentialed work runs
 inside the daemon instead, through the route below.
@@ -323,6 +326,78 @@ harness-provided type-prefixed `on_behalf_of`.
 `POST` only: any other method, and a daemon without session credential
 release, answers `404`. The value is held in session memory and flushed when
 the session ends; it is never logged or printed.
+
+### `POST /v1/session:subjectToken` (opt-in, `KEI_EXPORTABLE_SERVICE_PRINCIPALS`)
+
+Returns the subject token of a bound service principal to a caller that holds
+that principal's session (owner decision 2026-11-01). It exists for a workload
+that must present the principal's raw `typ=subject` JWT to a service that
+verifies it itself, such as the analytics Open WebUI sidecar, which
+authenticates the seed Job as `analytics-seed`. It is **off by default**.
+
+Send `X-Kei-Session` with the ID of a principal session (`PUT /v1/session` with
+`service_principal_id` or `service_principal_name`) and an empty body or `{}`:
+
+```sh
+curl --unix-socket /run/kei-proxy/runtime.sock -X POST \
+  -H "Authorization: Bearer $KEI_RUNTIME_TOKEN" -H "X-Kei-Session: $SESSION" \
+  http://localhost/v1/session:subjectToken
+```
+
+```json
+{"schema":"kei.subject-token/v1","subject_token":"<jwt>","expire_time":"2026-11-01T19:00:00Z","service_principal_id":"<uuid>"}
+```
+
+The token always comes from the **current verified bundle**, never from the
+caller or from the token the session was opened with, so a caller that
+re-fetches gets the token of each refreshed bundle. The catalog reissues the
+bundle within 1 h of the earliest embedded token expiry and the runtime polls
+it every 60 s by default, so the token returned normally has at least ~1 h
+left and at most ~8 h. The response is sent with `Cache-Control: no-store`.
+
+Every guard fails closed, in this order:
+
+| Guard | Status | `error.code` |
+|---|---|---|
+| Runtime bearer token missing or wrong (the route is never tokenless, even with `KEI_TOKENLESS_OWNER_SESSION`) | `401` | `invalid_runtime_token` |
+| `KEI_EXPORTABLE_SERVICE_PRINCIPALS` unset or empty | `403` | `subject_token_export_disabled` |
+| A body other than empty or `{}` | `400` | `invalid_request` |
+| No `X-Kei-Session`, or an unknown, ended or idle-expired session | `404` | `session_not_found` |
+| A user session, or a revoked principal session | `403` | `principal_session_required` |
+| Runtime identity or local PDP not resolved yet | `503` | `runtime_identity_unavailable` |
+| Bundle not active (cold, refresh-stale, subject snapshot stale, expired, invalid, unsupported, revoked) | `503` | the decision's runtime-state code, for example `subject_snapshot_stale` or `policy_bundle_expired` |
+| Principal no longer bound to this runtime's agent in the current bundle, or its identity expired | `403` | `service_principal_unavailable` |
+| Principal's name not in `KEI_EXPORTABLE_SERVICE_PRINCIPALS` | `403` | `service_principal_not_exportable` |
+| Token missing or with less than 60 s left (retry after the next refresh) | `503` | `subject_token_expiring` |
+
+A refresh-stale bundle still decides `/v1/authorize` calls, but this route
+refuses it: it hands a bearer out of the daemon, so it requires an active
+bundle.
+
+**`KEI_EXPORTABLE_SERVICE_PRINCIPALS`** is a comma-separated list of service
+principal **names** (`service_principal_name` in the bundle), for example
+`KEI_EXPORTABLE_SERVICE_PRINCIPALS=analytics-seed`. Blank entries are ignored.
+Unset or empty, the default, turns the route off. A principal is matched by the
+name the current bundle gives it, not by anything the caller sends; a principal
+without a name in the bundle can never be exported.
+
+**Audit.** Every request that passes runtime authentication, except one
+rejected as `invalid_request`, writes one decision record (`tool_name: kei:session.subjectToken`, `decision`
+`allow`/`deny`, `reason_code`, `invoking_subject` and `resources_touched`
+`service_principal:<id>`, `session_id`, the runtime's agent). An issue records
+`policy_reason: "subject token issued; expire_time=<RFC3339>"`; the catalog's
+`audit:flush` rejects unknown record fields, so the expiry travels in that
+existing field. The token is never written to audit or logs, and the route
+logs no header value.
+
+**Threat model.** Anything that can reach the owner-only socket and holds the
+runtime token and a principal session can obtain a bearer token for that
+principal, valid for up to ~8 h, and use it anywhere that accepts the
+principal's subject token, outside Kei's local PDP. Ending the session or
+unbinding the principal stops new issues but does not revoke a token already
+handed out. That is why the route is opt-in per principal name: list only
+principals whose subject token a co-located workload genuinely needs, and give
+those principals only the bindings that workload needs.
 
 ### Same-host daemon and harness (primary deployment)
 

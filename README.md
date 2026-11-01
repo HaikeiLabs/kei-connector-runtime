@@ -486,6 +486,14 @@ daemon re-runs the same decision and, only on allow, returns the session-held
 connector credential value with its expiry; a deny returns a typed
 `reason_code` and no credential. The value is held in session memory, flushed
 when the session ends, and is never logged or printed.
+Setting `KEI_EXPORTABLE_SERVICE_PRINCIPALS` (comma-separated service
+principal names; unset or empty by default, which refuses every request)
+enables `POST /v1/session:subjectToken`: a caller holding a principal session
+gets that principal's subject token from the current verified bundle. It hands
+out a bearer valid for up to ~8 h, so it is opt-in per principal, token-only
+and audited; see
+[docs/unix-socket.md](docs/unix-socket.md#post-v1sessionsubjecttoken-opt-in-kei_exportable_service_principals)
+for the guards and threat model.
 
 The default socket is `/run/kei-proxy/runtime.sock` on Linux or
 `$TMPDIR/kei-proxy/runtime.sock` on macOS (falls back to `os.TempDir()`); set

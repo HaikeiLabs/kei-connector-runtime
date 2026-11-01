@@ -198,6 +198,9 @@ type LocalPDP struct {
 	// endHooks run after a named session's credentials are dropped.
 	endHooksMu sync.Mutex
 	endHooks   []func(id string)
+	// exportable is the KEI_EXPORTABLE_SERVICE_PRINCIPALS allow-list for
+	// POST /v1/session:subjectToken; empty refuses every request.
+	exportable exportablePrincipals
 }
 
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
@@ -562,6 +565,9 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/credentials:release" && r.Method == http.MethodPost && l.creds != nil:
 		case r.URL.Path == "/v1/tools:register" && r.Method == http.MethodPost:
 		case r.URL.Path == "/v1/model-config" && r.Method == http.MethodGet && l.modelConfigHandler != nil:
+		// Owner-only Unix socket only, never a TCP listener, and always
+		// token-authenticated (not a tokenless owner route).
+		case r.URL.Path == subjectTokenPath && r.Method == http.MethodPost && allowUnauthenticatedAuthorize:
 		default:
 			next.ServeHTTP(w, r)
 			return
@@ -605,6 +611,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.handleCredentialRelease(w, r)
 		case r.URL.Path == "/v1/model-config":
 			l.modelConfigHandler.ServeHTTP(w, r)
+		case r.URL.Path == subjectTokenPath:
+			l.handleSubjectToken(w, r)
 		case r.Method == http.MethodPut:
 			l.handleSessionStart(w, r)
 		case r.Method == http.MethodGet:
