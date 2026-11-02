@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +29,7 @@ var harnessAuditContractFields = map[string]bool{
 	"phase": true, "native_decision": true, "args_digest": true, "digest_key_id": true,
 	"args_ciphertext": true, "recipient_key_ids": true, "harness_session_id": true,
 	"tool_use_id": true, "observed_at": true,
+	"caller_harness": true, "caller_session_ref": true,
 }
 
 type recordedRequest struct {
@@ -196,6 +199,77 @@ func TestHarnessAuditRecordFromAcceptsPiKind(t *testing.T) {
 	if rec.HarnessKind != "pi" || rec.HarnessSessionID != "s1" {
 		t.Fatalf("record = %+v, want HarnessKind pi and HarnessSessionID s1", rec)
 	}
+}
+
+// The catalog's audit:flush validation (kei-policy-catalog
+// pkg/auditrecord ValidateCaller) skips a record whose caller fields do not
+// match these, so the hook must never send a value outside them.
+var (
+	catalogCallerHarness    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	catalogCallerSessionRef = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,128}$`)
+)
+
+func sessionRefOf(raw json.RawMessage) string {
+	rec, _ := harnessAuditRecordFrom(raw)
+	b, _ := json.Marshal(rec)
+	var got struct {
+		Ref string `json:"caller_session_ref"`
+	}
+	_ = json.Unmarshal(b, &got)
+	return got.Ref
+}
+
+// TestHarnessAuditRecordCarriesCallerMetadata covers HAI-527 for hook rows:
+// the record names the harness as the catalog spells it and an opaque session
+// reference derived from the harness session id. No hook input states
+// interactive vs automation, so caller_origin is never set (stays unknown).
+func TestHarnessAuditRecordCarriesCallerMetadata(t *testing.T) {
+	const session = "f3a1c2 user's chat / é"
+	line := func(kind, sessionID string) json.RawMessage {
+		s := ""
+		if sessionID != "" {
+			s = `"harness_session_id":` + strconv.Quote(sessionID) + `,`
+		}
+		return json.RawMessage(`{"schema":"kei.harness-tool-event/v1","event_class":"harness_tool","harness_id":"h-1","harness_kind":"` + kind + `",` + s + `"phase":"pre","tool":"shell","args_digest":"sha256:abc","native_decision":"unknown","observed_at":"2026-11-02T10:00:00Z"}`)
+	}
+	for kind, want := range map[string]string{"claude": "claude_code", "codex": "codex", "opencode": "opencode", "cursor": "cursor", "pi": "pi"} {
+		t.Run(kind, func(t *testing.T) {
+			rec, ok := harnessAuditRecordFrom(line(kind, session))
+			if !ok {
+				t.Fatal("record rejected")
+			}
+			b, _ := json.Marshal(rec)
+			var got map[string]any
+			_ = json.Unmarshal(b, &got)
+			if got["caller_harness"] != want {
+				t.Errorf("caller_harness = %v, want %s", got["caller_harness"], want)
+			}
+			ref, _ := got["caller_session_ref"].(string)
+			if !catalogCallerHarness.MatchString(want) || !catalogCallerSessionRef.MatchString(ref) {
+				t.Errorf("caller fields fail catalog validation: harness %q ref %q", want, ref)
+			}
+			if strings.Contains(ref, "chat") || strings.Contains(ref, "f3a1c2") {
+				t.Errorf("caller_session_ref carries the raw session id: %q", ref)
+			}
+			again, other := sessionRefOf(line(kind, session)), sessionRefOf(line(kind, "another-session"))
+			if ref == "" || again != ref || other == ref {
+				t.Errorf("session ref not stable per session: %q %q %q", ref, again, other)
+			}
+			if _, ok := got["caller_origin"]; ok {
+				t.Errorf("caller_origin = %v, want unset: the hook has no source for it", got["caller_origin"])
+			}
+		})
+	}
+	t.Run("no session id leaves the session ref unknown", func(t *testing.T) {
+		rec, ok := harnessAuditRecordFrom(line("codex", ""))
+		if !ok {
+			t.Fatal("record rejected")
+		}
+		b, _ := json.Marshal(rec)
+		if strings.Contains(string(b), "caller_session_ref") || !strings.Contains(string(b), `"caller_harness":"codex"`) {
+			t.Errorf("record = %s, want caller_harness only", b)
+		}
+	})
 }
 
 func TestHarnessAuditFlushBatchesAtMost100(t *testing.T) {

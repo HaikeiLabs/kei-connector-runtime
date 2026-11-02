@@ -3,6 +3,8 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -56,6 +58,23 @@ type harnessAuditRecord struct {
 	HarnessSessionID string   `json:"harness_session_id,omitempty"`
 	ToolUseID        string   `json:"tool_use_id,omitempty"`
 	ObservedAt       string   `json:"observed_at"`
+	// Caller metadata (HAI-527), the same columns the authorize path fills.
+	// caller_origin is never set: no hook input says interactive or
+	// automation, so it stays unknown.
+	CallerHarness    string `json:"caller_harness,omitempty"`
+	CallerSessionRef string `json:"caller_session_ref,omitempty"`
+}
+
+// hookCallerSessionRef is an opaque, stable reference to a harness session.
+// The raw session id is hashed so the value always passes the catalog's
+// caller_session_ref check (a record that fails it is dropped) and carries
+// no harness-supplied text. Empty in, empty out (unknown).
+func hookCallerSessionRef(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionID))
+	return "session:" + hex.EncodeToString(sum[:16])
 }
 
 // spoolHarnessToolRecord decodes only the contract fields from a hook spool
@@ -107,6 +126,8 @@ func harnessAuditRecordFrom(raw json.RawMessage) (harnessAuditRecord, bool) {
 		HarnessSessionID: rec.HarnessSessionID,
 		ToolUseID:        rec.ToolUseID,
 		ObservedAt:       rec.ObservedAt,
+		CallerHarness:    canonicalHarnessKind(rec.HarnessKind),
+		CallerSessionRef: hookCallerSessionRef(rec.HarnessSessionID),
 	}, true
 }
 
