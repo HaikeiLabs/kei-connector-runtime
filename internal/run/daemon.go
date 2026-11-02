@@ -292,10 +292,12 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 
 	var exitCode int
 	var spawnErr error
+	var handedOutAt time.Time
 	err := d.withCredentials(ctx, sessionID, subject, refs, plain, func(env []string, secrets []string) {
 		if routeKey != "" {
 			secrets = append(secrets, routeKey)
 		}
+		handedOutAt = time.Now().UTC()
 		exitCode, spawnErr = spawn(ctx, argv, env, req.Dir, frames, secrets)
 	})
 	if err != nil {
@@ -307,6 +309,9 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 	if spawnErr != nil {
 		return deny("command_not_started", "the command could not be started", exitCode, connectorIDs, fields)
 	}
+	// The child started with every resolved credential in its environment:
+	// each connector's credential was handed out, whatever the exit code.
+	d.appendCredentialAccess(handedOutAt, subject, req.AgentID, refs)
 	outcome := "success"
 	if exitCode != 0 {
 		outcome = "failure"

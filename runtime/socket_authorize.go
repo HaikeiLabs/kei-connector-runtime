@@ -160,10 +160,11 @@ type socketDecisionEvent struct {
 	CallerHarness       *string  `json:"caller_harness,omitempty"`
 	CallerOrigin        *string  `json:"caller_origin,omitempty"`
 	CallerSessionRef    *string  `json:"caller_session_ref,omitempty"`
-	// CredentialReleased is set only by the HAI-722 pass-through route: true
-	// when a credential value crossed the socket. The value itself is never
-	// recorded.
-	CredentialReleased *bool `json:"credential_released,omitempty"`
+	// CredentialKind is set only when the call handed out a connector
+	// credential (kei-connector-contracts audit.CredentialKind): secret_store
+	// or oauth. The credential itself, and whether or how often a session's
+	// credentials were released, are never recorded.
+	CredentialKind string `json:"credential_kind,omitempty"`
 }
 
 // SessionKeychain provides CLI login token storage and verification.
@@ -936,7 +937,7 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 			// default identity used for the policy decision.
 			auditReq.AgentID = l.trustedAgentID()
 		}
-		data := l.decisionEventJSONWithUnmatched(auditReq, sessionID, d, nil, unmatched)
+		data := l.decisionEventJSONWithUnmatched(auditReq, sessionID, d, "", unmatched)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1053,8 +1054,19 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		if auditTrustedAgent {
 			auditReq.AgentID = l.trustedAgentID()
 		}
-		released := resp.Decision == "allow" && resp.Credential != nil
-		data := l.decisionEventJSON(auditReq, sessionID, d, &released)
+		// The record is the decision the caller got: a policy allow whose
+		// release failed is the deny with the release reason. credential_kind
+		// is set only when a credential was handed out.
+		auditDecision, kind := d, ""
+		if resp.Decision == "allow" && resp.Credential != nil {
+			kind = l.connectorCredentialKind(req.Connector.ConnectorID)
+		} else if d.Allow {
+			auditDecision.Allow = false
+			auditDecision.ReasonCode = pdp.ReasonCode(resp.ReasonCode)
+			auditDecision.Reason = resp.Reason
+			auditDecision.DenySource = "runtime_state"
+		}
+		data := l.decisionEventJSON(auditReq, sessionID, auditDecision, kind)
 		l.emit(data)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1148,11 +1160,11 @@ func typedSubject(subject pdp.Subject) string {
 	return kind + ":" + subject.UserID
 }
 
-func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialReleased *bool) json.RawMessage {
-	return l.decisionEventJSONWithUnmatched(req, sessionID, d, credentialReleased, false)
+func (l *LocalPDP) decisionEventJSON(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialKind string) json.RawMessage {
+	return l.decisionEventJSONWithUnmatched(req, sessionID, d, credentialKind, false)
 }
 
-func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialReleased *bool, unmatched bool) json.RawMessage {
+func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, sessionID string, d pdp.Decision, credentialKind string, unmatched bool) json.RawMessage {
 	spanID := req.SpanID
 	if spanID == "" {
 		spanID = uuid.NewString()
@@ -1165,7 +1177,7 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: string(d.ReasonCode),
-		CredentialReleased: credentialReleased,
+		CredentialKind: credentialKind,
 	}
 	if unmatched && d.ReasonCode == "no_matching_policy" {
 		e.Decision = "unmatched"
