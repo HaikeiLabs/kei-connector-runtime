@@ -67,6 +67,18 @@ type DecisionEvent struct {
 	CallerHarness    *string `json:"caller_harness,omitempty"`
 	CallerOrigin     *string `json:"caller_origin,omitempty"`
 	CallerSessionRef *string `json:"caller_session_ref,omitempty"`
+	// SessionID is the runtime session the decision ran in (named sessions).
+	SessionID *string `json:"session_id,omitempty"`
+	// OnBehalfOf is the typed principal the caller acted for. ParseAuditLine
+	// drops a kind the catalog's audit:flush does not accept, since the
+	// catalog skips the whole record for one (see catalogOnBehalfOf).
+	OnBehalfOf *string `json:"on_behalf_of,omitempty"`
+	// CredentialReleased is set only on a credential-release decision
+	// (kei-connector-contracts audit.AuditRecord): true when a credential
+	// value was released, false when it was not. The value is never recorded.
+	// Catalogs older than the field reject it, so the catalog must accept it
+	// before a runtime that forwards it is deployed.
+	CredentialReleased *bool `json:"credential_released,omitempty"`
 }
 
 func AppendDecisionEvent(path string, maxBytes int64, e DecisionEvent) error {

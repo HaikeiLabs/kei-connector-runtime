@@ -40,6 +40,7 @@ type pedroAuditLine struct {
 func ParseAuditLine(line string) (DecisionEvent, bool) {
 	var event DecisionEvent
 	if err := json.Unmarshal([]byte(line), &event); err == nil {
+		event.OnBehalfOf = catalogOnBehalfOf(event.OnBehalfOf)
 		return event, true
 	}
 
@@ -138,4 +139,28 @@ func parsePedroTimestamp(value string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("invalid timestamp %q", value)
+}
+
+// catalogOnBehalfOf returns value when the catalog's audit:flush accepts it
+// (kei-policy-catalog auditrecord.ValidateSubjects: user, workspace,
+// organization or remote_identity:<source>:<id>), and nil otherwise. The
+// catalog skips the whole record for any other on_behalf_of, so dropping only
+// the field keeps the decision in the audit trail.
+func catalogOnBehalfOf(value *string) *string {
+	if value == nil || *value == "" {
+		return nil
+	}
+	kind, id, ok := strings.Cut(*value, ":")
+	if !ok || id == "" {
+		return nil
+	}
+	switch kind {
+	case "user", "workspace", "organization":
+		return value
+	case "remote_identity":
+		if source, external, ok := strings.Cut(id, ":"); ok && source != "" && external != "" {
+			return value
+		}
+	}
+	return nil
 }
