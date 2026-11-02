@@ -161,7 +161,8 @@ func TestDaemonRunResolvesDescriptorSecretIntoChildOnly(t *testing.T) {
 		t.Fatalf("child output not redacted: stdout=%q stderr=%q", out.stdout, out.stderr)
 	}
 	rig.assertNoLeak(out)
-	if rig.store.calls != 1 || len(rig.audit) != 1 || !strings.Contains(rig.audit[0], runDescriptorConnector) {
+	// One credential access record, then the run event.
+	if rig.store.calls != 1 || len(rig.audit) != 2 || !strings.Contains(rig.audit[1], runDescriptorConnector) {
 		t.Fatalf("store reads %d, audit %v", rig.store.calls, rig.audit)
 	}
 }

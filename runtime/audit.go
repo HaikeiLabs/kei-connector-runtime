@@ -67,6 +67,11 @@ type DecisionEvent struct {
 	CallerHarness    *string `json:"caller_harness,omitempty"`
 	CallerOrigin     *string `json:"caller_origin,omitempty"`
 	CallerSessionRef *string `json:"caller_session_ref,omitempty"`
+	// CredentialKind is set only on a record of a call that handed out a
+	// connector credential: secret_store or oauth (kei-connector-contracts
+	// audit.CredentialKind). Catalogs older than the field reject it, so the
+	// catalog must accept it before a runtime that sends it is deployed.
+	CredentialKind string `json:"credential_kind,omitempty"`
 }
 
 func AppendDecisionEvent(path string, maxBytes int64, e DecisionEvent) error {
