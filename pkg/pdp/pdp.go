@@ -487,6 +487,22 @@ func (e *Evaluator) V2ToolRoute(name string) (route string, isV2 bool) {
 	return "", true
 }
 
+// InactiveBundleDenial reports whether the bundle in force is anything but
+// active (cold, stale, expired, invalid, unsupported or revoked) and, if so,
+// returns the same runtime_state denial a decision on it would carry. A
+// refresh-stale bundle still decides calls; callers that hand bundle data out
+// of the daemon use this to refuse it as well.
+func (e *Evaluator) InactiveBundleDenial() (Decision, bool) {
+	_, state, err := e.check()
+	if err == nil && state == policybundle.Active {
+		return Decision{}, false
+	}
+	if err == nil && state == "" {
+		state = policybundle.Cold
+	}
+	return stateDenial(state), true
+}
+
 // Bundle returns the verified bundle in force, or false when none is valid.
 func (e *Evaluator) Bundle() (*policybundle.Verified, bool) {
 	v, _, err := e.check()
