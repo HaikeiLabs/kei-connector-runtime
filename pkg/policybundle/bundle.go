@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -240,6 +241,7 @@ func extractServicePrincipalIdentities(raw []byte) ([]ServicePrincipalIdentity, 
 	}
 	principals := make([]ServicePrincipalIdentity, 0)
 	users := make([]json.RawMessage, 0, len(entries))
+	sawPrincipal := false
 	for i, entry := range entries {
 		var marker struct {
 			SubjectType string `json:"subject_type"`
@@ -254,25 +256,14 @@ func extractServicePrincipalIdentities(raw []byte) ([]ServicePrincipalIdentity, 
 		if marker.SubjectType != "service_principal" {
 			return nil, nil, fmt.Errorf("%w: identities[%d].subject_type", ErrBundleUnsupported, i)
 		}
-		var principal ServicePrincipalIdentity
-		if err := strictJSON(entry, &principal); err != nil {
-			return nil, nil, fmt.Errorf("%w: malformed service-principal identity", ErrBundleUnsupported)
-		}
-		if !idPattern.MatchString(principal.ServicePrincipalID) || !idPattern.MatchString(principal.AgentID) || principal.SubjectToken == "" || principal.ExpireTime.IsZero() || principal.Groups == nil {
-			return nil, nil, fmt.Errorf("%w: incomplete service-principal identity", ErrBundleUnsupported)
-		}
-		if principal.ServicePrincipalName != "" && !namePattern.MatchString(principal.ServicePrincipalName) {
-			return nil, nil, fmt.Errorf("%w: invalid service-principal name", ErrBundleUnsupported)
-		}
-		seenGroups := make(map[string]struct{}, len(principal.Groups))
-		for _, group := range principal.Groups {
-			if strings.TrimSpace(group) == "" {
-				return nil, nil, fmt.Errorf("%w: invalid service-principal group", ErrBundleUnsupported)
-			}
-			if _, duplicate := seenGroups[group]; duplicate {
-				return nil, nil, fmt.Errorf("%w: duplicate service-principal group", ErrBundleUnsupported)
-			}
-			seenGroups[group] = struct{}{}
+		sawPrincipal = true
+		principal, err := parseServicePrincipalIdentity(entry)
+		if err != nil {
+			// One bad principal must not take down user identities, other
+			// principals and policies: drop it and log it by id, never the token.
+			slog.Warn("policy bundle service-principal identity dropped",
+				"service_principal_id", servicePrincipalLogID(entry), "identity_index", i, "reason", err.Error())
+			continue
 		}
 		principals = append(principals, principal)
 		// The shared evaluator currently gates sessions against its user identity
@@ -281,7 +272,7 @@ func extractServicePrincipalIdentities(raw []byte) ([]ServicePrincipalIdentity, 
 		compat, _ := json.Marshal(Identity{Source: "service_principal", ExternalID: principal.ServicePrincipalID, UserID: principal.ServicePrincipalID, Status: "linked", Groups: principal.Groups})
 		users = append(users, compat)
 	}
-	if len(principals) == 0 {
+	if !sawPrincipal {
 		return nil, raw, nil
 	}
 	identities, err := json.Marshal(users)
@@ -291,6 +282,44 @@ func extractServicePrincipalIdentities(raw []byte) ([]ServicePrincipalIdentity, 
 	doc["identities"] = identities
 	clean, err := json.Marshal(doc)
 	return principals, clean, err
+}
+
+// parseServicePrincipalIdentity strictly decodes and checks one principal
+// identity entry.
+func parseServicePrincipalIdentity(entry json.RawMessage) (ServicePrincipalIdentity, error) {
+	var principal ServicePrincipalIdentity
+	if err := strictJSON(entry, &principal); err != nil {
+		return principal, errors.New("malformed service-principal identity")
+	}
+	if !idPattern.MatchString(principal.ServicePrincipalID) || !idPattern.MatchString(principal.AgentID) || principal.SubjectToken == "" || principal.ExpireTime.IsZero() || principal.Groups == nil {
+		return principal, errors.New("incomplete service-principal identity")
+	}
+	if principal.ServicePrincipalName != "" && !namePattern.MatchString(principal.ServicePrincipalName) {
+		return principal, errors.New("invalid service-principal name")
+	}
+	seenGroups := make(map[string]struct{}, len(principal.Groups))
+	for _, group := range principal.Groups {
+		if strings.TrimSpace(group) == "" {
+			return principal, errors.New("invalid service-principal group")
+		}
+		if _, duplicate := seenGroups[group]; duplicate {
+			return principal, errors.New("duplicate service-principal group")
+		}
+		seenGroups[group] = struct{}{}
+	}
+	return principal, nil
+}
+
+// servicePrincipalLogID returns an entry's principal id for logs, or "invalid"
+// when it is missing or not a well-formed id. It never reads the token.
+func servicePrincipalLogID(entry json.RawMessage) string {
+	var id struct {
+		ServicePrincipalID string `json:"service_principal_id"`
+	}
+	if json.Unmarshal(entry, &id) != nil || !idPattern.MatchString(id.ServicePrincipalID) {
+		return "invalid"
+	}
+	return id.ServicePrincipalID
 }
 
 func validatePolicySetV2(raw json.RawMessage) error {
