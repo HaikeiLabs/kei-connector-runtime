@@ -50,6 +50,7 @@ type harnessAuditRecord struct {
 	Phase            string   `json:"phase"`
 	NativeDecision   string   `json:"native_decision"`
 	ArgsDigest       string   `json:"args_digest"`
+	ResourcesTouched []string `json:"resources_touched,omitempty"`
 	DigestKeyID      string   `json:"digest_key_id,omitempty"`
 	ArgsCiphertext   string   `json:"args_ciphertext,omitempty"`
 	RecipientKeyIDs  []string `json:"recipient_key_ids,omitempty"`
@@ -68,6 +69,7 @@ type spoolHarnessToolRecord struct {
 	Phase            string   `json:"phase"`
 	NativeDecision   string   `json:"native_decision"`
 	ArgsDigest       string   `json:"args_digest"`
+	ResourcesTouched []string `json:"resources_touched"`
 	DigestKeyID      string   `json:"digest_key_id"`
 	ArgsCiphertext   string   `json:"args_ciphertext"`
 	RecipientKeyIDs  []string `json:"recipient_key_ids"`
@@ -75,6 +77,7 @@ type spoolHarnessToolRecord struct {
 	ToolUseID        string   `json:"tool_use_id"`
 	ObservedAt       string   `json:"observed_at"`
 }
+
 
 // harnessAuditRecordFrom maps one spool record to the contract. Records that
 // cannot satisfy the contract's required fields are rejected so a single bad
@@ -101,6 +104,7 @@ func harnessAuditRecordFrom(raw json.RawMessage) (harnessAuditRecord, bool) {
 		Phase:            rec.Phase,
 		NativeDecision:   rec.NativeDecision,
 		ArgsDigest:       rec.ArgsDigest,
+		ResourcesTouched: rec.ResourcesTouched,
 		DigestKeyID:      rec.DigestKeyID,
 		ArgsCiphertext:   rec.ArgsCiphertext,
 		RecipientKeyIDs:  rec.RecipientKeyIDs,

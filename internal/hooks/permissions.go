@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,19 +27,20 @@ type permissionEvent struct {
 	HarnessSessionID  string `json:"harness_session_id,omitempty"`
 	// SessionID is the kei-proxy daemon session the harness runs in
 	// (--session or $KEI_SESSION_ID), not the harness's own session.
-	SessionID       string    `json:"session_id,omitempty"`
-	ToolUseID       string    `json:"tool_use_id,omitempty"`
-	Phase           string    `json:"phase"`
-	Tool            string    `json:"tool"`
-	Skill           string    `json:"skill,omitempty"`
-	ArgsDigest      string    `json:"args_digest"`
-	DigestKeyID     string    `json:"digest_key_id,omitempty"`
-	ArgsCiphertext  string    `json:"args_ciphertext,omitempty"`
-	RecipientKeyIDs []string  `json:"recipient_key_ids,omitempty"`
-	NativeDecision  string    `json:"native_decision"`
-	Argv0           string    `json:"argv0,omitempty"`
-	Failed          bool      `json:"failed,omitempty"`
-	ObservedAt      time.Time `json:"observed_at"`
+	SessionID        string    `json:"session_id,omitempty"`
+	ToolUseID        string    `json:"tool_use_id,omitempty"`
+	Phase            string    `json:"phase"`
+	Tool             string    `json:"tool"`
+	Skill            string    `json:"skill,omitempty"`
+	ArgsDigest       string    `json:"args_digest"`
+	DigestKeyID      string    `json:"digest_key_id,omitempty"`
+	ArgsCiphertext   string    `json:"args_ciphertext,omitempty"`
+	RecipientKeyIDs  []string  `json:"recipient_key_ids,omitempty"`
+	NativeDecision   string    `json:"native_decision"`
+	Argv0            string    `json:"argv0,omitempty"`
+	ResourcesTouched []string  `json:"resources_touched,omitempty"`
+	Failed           bool      `json:"failed,omitempty"`
+	ObservedAt       time.Time `json:"observed_at"`
 }
 
 // Run dispatches the report-only permission hook CLI. Every harness-facing
@@ -126,7 +128,8 @@ func ReportPermissions(args []string, stdin io.Reader, stdout io.Writer, cfg Con
 		handleSessionEvent(kind, in, cfg)
 		return 0
 	}
-	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: registered, HarnessSessionID: in.SessionID, SessionID: *sessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ObservedAt: time.Now().UTC()}
+	resources := harnessResources(tool, argv0, in.CWD)
+	event := permissionEvent{Schema: "kei.harness-tool-event/v1", EventClass: "harness_tool", HarnessID: *harnessID, HarnessKind: kind, HarnessRegistered: registered, HarnessSessionID: in.SessionID, SessionID: *sessionID, ToolUseID: in.ToolUseID, Phase: phase, Tool: tool, Skill: skill, ArgsDigest: argsDigest, DigestKeyID: digestKeyID, ArgsCiphertext: argsCiphertext, RecipientKeyIDs: recipientKeyIDs, NativeDecision: decision, Argv0: argv0, ResourcesTouched: resources, ObservedAt: time.Now().UTC()}
 	data, err := json.Marshal(event)
 	if err == nil {
 		WriteAudit(cfg, data)
@@ -184,6 +187,38 @@ func reportedTool(name string, raw json.RawMessage) (string, string) {
 		tool = "shell"
 	}
 	return tool, argv0
+}
+
+// harnessResources records only the shell executable and a home-relative
+// working directory. It never forwards command arguments or absolute home paths.
+func harnessResources(tool, argv0, cwd string) []string {
+	if tool != "shell" {
+		return nil
+	}
+	var resources []string
+	if argv0 != "" {
+		executable := filepath.Base(argv0)
+		if executable != "." && executable != string(filepath.Separator) {
+			resources = append(resources, "shell:"+executable)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || cwd == "" {
+		return resources
+	}
+	relative, err := filepath.Rel(home, cwd)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return resources
+	}
+	if relative == "." {
+		relative = ""
+	}
+	relative = filepath.ToSlash(relative)
+	dir := "~"
+	if relative != "" {
+		dir += "/" + relative
+	}
+	return append(resources, "cwd:"+dir)
 }
 
 // activeSkillFor returns the invoking skill to tag a reported tool call with.

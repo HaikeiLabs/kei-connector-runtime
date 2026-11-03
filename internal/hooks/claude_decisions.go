@@ -360,6 +360,7 @@ type claudeEventContext struct {
 	digestKeyID      string
 	argsCiphertext   string
 	recipientKeyIDs  []string
+	resourcesTouched []string
 }
 
 func newClaudeEventContext(in ToolInput, kind string, harnessID, sessionID *string, tool, argv0, skill string, registered bool, argsDigest, digestKeyID, argsCiphertext string, recipientKeyIDs []string) claudeEventContext {
@@ -375,6 +376,7 @@ func newClaudeEventContext(in ToolInput, kind string, harnessID, sessionID *stri
 		argsDigest:       argsDigest,
 		digestKeyID:      digestKeyID,
 		argsCiphertext:   argsCiphertext,
+		resourcesTouched: harnessResources(tool, argv0, in.CWD),
 		recipientKeyIDs:  recipientKeyIDs,
 	}
 }
@@ -397,6 +399,7 @@ func writeEvent(ctx claudeEventContext, phase, nativeDecision string, toolUseID 
 		ArgsCiphertext:    ctx.argsCiphertext,
 		RecipientKeyIDs:   ctx.recipientKeyIDs,
 		NativeDecision:    nativeDecision,
+		ResourcesTouched:  ctx.resourcesTouched,
 		Argv0:             ctx.argv0,
 		ObservedAt:        time.Now().UTC(),
 	}
