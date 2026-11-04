@@ -170,7 +170,9 @@ kei-proxy identity link \
 Pass `--tenant-id` for providers whose user IDs are only unique within a tenant.
 The command reads `KEI_RUNTIME_TOKEN` and `KEI_RUNTIME_CONTROL_PLANE_URL` from
 the environment, so the installation and workspace come from the authenticated
-runtime credential. It prints JSON containing `claim_url` and `expires_at` to
+runtime credential. It calls the catalog runtime API
+`POST /api/v1/runtime/chat-identity-claims` on that control plane with the
+runtime credential as Bearer auth, like heartbeat. It prints JSON containing `claim_url` and `expires_at` to
 stdout. The claim URL is a bearer secret; a harness must deliver it privately
 to the initiating user and must not log or persist it. The default control
 plane timeout is eight seconds to fit within the Python harness's subprocess
