@@ -41,6 +41,47 @@ func TestControlPlaneModelProfileClient_GetRuntimeDefaultModelProfile(t *testing
 	}
 }
 
+func TestControlPlaneModelProfileClient_GetRuntimeAssignedModelProfileForAgent(t *testing.T) {
+	const agentID = "00000000-0000-0000-0000-000000000014"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/model-profiles/assigned" || r.URL.Query().Get("agent_id") != agentID {
+			t.Fatalf("request = %s, want assigned?agent_id=%s", r.URL.String(), agentID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profile_id": "00000000-0000-0000-0000-000000000015",
+			"org_id":     "00000000-0000-0000-0000-000000000016",
+			"agent_id":   agentID,
+			"status":     "active",
+		})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneModelProfileClient(server.URL, "runtime-token", 0)
+	profile, err := client.GetRuntimeAssignedModelProfileForAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile == nil || profile.AgentID != agentID {
+		t.Fatalf("unexpected profile: %+v", profile)
+	}
+}
+
+func TestControlPlaneModelProfileClient_RejectsMismatchedRequestedAgent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profile_id": "00000000-0000-0000-0000-000000000015",
+			"org_id":     "00000000-0000-0000-0000-000000000016",
+			"agent_id":   "00000000-0000-0000-0000-000000000017",
+			"status":     "active",
+		})
+	}))
+	defer server.Close()
+	client := NewControlPlaneModelProfileClient(server.URL, "runtime-token", 0)
+	if _, err := client.GetRuntimeAssignedModelProfileForAgent(context.Background(), "00000000-0000-0000-0000-000000000014"); err == nil {
+		t.Fatal("expected mismatched agent response to fail")
+	}
+}
+
 func TestControlPlaneModelProfileClient_GetRuntimeAssignedModelProfile(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/runtime/model-profiles/assigned" {

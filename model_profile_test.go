@@ -33,6 +33,51 @@ func TestRunModelProfileUsesRuntimeAssignedProfileByDefault(t *testing.T) {
 	}
 }
 
+func TestRunModelProfileUsesRequestedAgent(t *testing.T) {
+	const agentID = "00000000-0000-0000-0000-000000000041"
+	const profileID = "00000000-0000-0000-0000-000000000042"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/model-profiles/assigned" || r.URL.Query().Get("agent_id") != agentID {
+			t.Fatalf("request = %s, want assigned?agent_id=%s", r.URL.String(), agentID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profile_id": profileID,
+			"org_id":     "00000000-0000-0000-0000-000000000043",
+			"agent_id":   agentID,
+			"status":     "active",
+		})
+	}))
+	defer server.Close()
+	setModelProfileRuntimeEnv(t, server.URL)
+
+	if code := runModelProfile([]string{"--agent-id", agentID, "--profile-id", profileID}); code != 0 {
+		t.Fatalf("runModelProfile() = %d, want 0", code)
+	}
+}
+
+func TestRunModelProfileRejectsInvalidAgentID(t *testing.T) {
+	setModelProfileRuntimeEnv(t, "http://127.0.0.1:1")
+	if code := runModelProfile([]string{"--agent-id", "not-a-uuid"}); code != 2 {
+		t.Fatalf("runModelProfile() = %d, want 2", code)
+	}
+}
+
+func TestRunModelProfileRejectsResponseForDifferentAgent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profile_id": "00000000-0000-0000-0000-000000000045",
+			"org_id":     "00000000-0000-0000-0000-000000000046",
+			"agent_id":   "00000000-0000-0000-0000-000000000047",
+			"status":     "active",
+		})
+	}))
+	defer server.Close()
+	setModelProfileRuntimeEnv(t, server.URL)
+	if code := runModelProfile([]string{"--agent-id", "00000000-0000-0000-0000-000000000044"}); code != 1 {
+		t.Fatalf("runModelProfile() = %d, want 1", code)
+	}
+}
+
 func TestRunModelProfileFailsWhenDefaultAgentIsMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/runtime/model-profiles/assigned" {

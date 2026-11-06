@@ -705,6 +705,9 @@ func (f fakeRuntimeProfiles) GetRuntimeAssignedModelProfile(context.Context) (*M
 	}
 	return f.profile, nil
 }
+func (f fakeRuntimeProfiles) GetRuntimeAssignedModelProfileForAgent(context.Context, string) (*ModelProfile, error) {
+	return f.GetRuntimeAssignedModelProfile(context.Background())
+}
 func TestHandleModelConfig(t *testing.T) {
 	cfg := Config{
 		RuntimeToken:           "kh_live_12345678901234567890",

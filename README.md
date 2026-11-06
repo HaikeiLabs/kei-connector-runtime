@@ -453,6 +453,19 @@ KEI_RUNTIME_TOKEN=kh_live_... \
 kei-proxy serve
 ```
 
+The one-shot `kei-proxy model profile` command resolves the active profile
+assigned to the installation's default agent. Use `--agent-id AGENT_UUID` to
+resolve the profile assigned to another agent attached to that installation;
+`--profile-id PROFILE_UUID` may additionally assert the expected assignment.
+For example:
+
+```sh
+kei-proxy model profile --agent-id 00000000-0000-0000-0000-000000000001
+```
+
+The command reads an `api_key` credential from the configured secret store
+and emits it only in the JSON response on stdout; keep that output private.
+
 The initial endpoints are `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
 `POST /v1/authorize`, and `PUT/DELETE/GET /v1/session`. The model-config
 endpoint returns the runtime's assigned model profile — model name, endpoint,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
+	"github.com/google/uuid"
 )
 
 // runModelProfile resolves a runtime model profile and, when applicable,
@@ -17,7 +18,8 @@ import (
 // emitted only on stdout and are never logged by the proxy.
 func runModelProfile(args []string) int {
 	fs := flag.NewFlagSet("model profile", flag.ContinueOnError)
-	profileID := fs.String("profile-id", "", "model profile ID (must be assigned to the runtime's default agent)")
+	agentID := fs.String("agent-id", "", "agent UUID whose assigned model profile to resolve")
+	profileID := fs.String("profile-id", "", "model profile ID (must be assigned to the selected agent)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -26,22 +28,40 @@ func runModelProfile(args []string) int {
 		fmt.Fprintln(os.Stderr, "model profile requires KEI_RUNTIME_TOKEN and KEI_RUNTIME_CONTROL_PLANE_URL")
 		return 2
 	}
+	var requestedAgentID string
+	if *agentID != "" {
+		parsedAgentID, err := uuid.Parse(*agentID)
+		if err != nil || parsedAgentID == uuid.Nil {
+			fmt.Fprintln(os.Stderr, "model profile --agent-id must be a valid UUID")
+			return 2
+		}
+		requestedAgentID = parsedAgentID.String()
+	}
 	client := NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var profile *ModelProfile
 	var err error
-	fmt.Fprintln(os.Stderr, "model profile lookup: runtime default agent assignment")
-	profile, err = client.GetRuntimeAssignedModelProfile(ctx)
+	if requestedAgentID == "" {
+		fmt.Fprintln(os.Stderr, "model profile lookup: runtime default agent assignment")
+		profile, err = client.GetRuntimeAssignedModelProfile(ctx)
+	} else {
+		fmt.Fprintln(os.Stderr, "model profile lookup: requested agent assignment")
+		profile, err = client.GetRuntimeAssignedModelProfileForAgent(ctx, requestedAgentID)
+	}
 	if err == nil && profile == nil {
-		err = fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
+		if requestedAgentID == "" {
+			err = fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
+		} else {
+			err = fmt.Errorf("runtime has no active model profile assigned to the selected agent")
+		}
 	}
 	if err == nil && *profileID != "" {
 		// The assigned-profile endpoint validates the runtime's workspace and
-		// default-agent scope. Permit an explicit ID only when it is exactly
+		// selected-agent scope. Permit an explicit ID only when it is exactly
 		// that authorized assignment; never resolve arbitrary profile IDs here.
 		if profile.ProfileID != *profileID {
-			err = fmt.Errorf("profile %q is not assigned to the runtime's default agent", *profileID)
+			err = fmt.Errorf("profile %q is not assigned to the selected agent", *profileID)
 		}
 	}
 	if err != nil {

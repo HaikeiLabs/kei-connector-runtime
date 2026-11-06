@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added: agent-specific model profile lookup
+
+`kei-proxy model profile` accepts `--agent-id <uuid>` to resolve the active
+model profile assigned to that agent on the calling installation. The optional
+`--profile-id` assertion is checked against that agent's assignment. The
+credential lookup from the configured secret store is unchanged.
+
 ### Breaking: tool manifest v3 only (HAI-875)
 
 kei-proxy accepts `kei.tool-manifest/v3` only from this release. Manifests v1, v2, and v4 are rejected. Agentware 0.12.0 posts v3 and is unaffected.

@@ -29,6 +29,7 @@ type ControlPlaneModelProfileClient interface {
 	GetRuntimeModelProfile(ctx context.Context, profileID string) (*ModelProfile, error)
 	GetRuntimeDefaultModelProfile(ctx context.Context) (*ModelProfile, error)
 	GetRuntimeAssignedModelProfile(ctx context.Context) (*ModelProfile, error)
+	GetRuntimeAssignedModelProfileForAgent(ctx context.Context, agentID string) (*ModelProfile, error)
 }
 
 func (c *controlPlaneModelProfileClient) GetRuntimeDefaultModelProfile(ctx context.Context) (*ModelProfile, error) {
@@ -36,18 +37,37 @@ func (c *controlPlaneModelProfileClient) GetRuntimeDefaultModelProfile(ctx conte
 }
 
 func (c *controlPlaneModelProfileClient) GetRuntimeAssignedModelProfile(ctx context.Context) (*ModelProfile, error) {
-	profile, err := c.getRuntimeModelProfile(ctx, c.baseURL+"/api/v1/runtime/model-profiles/assigned")
+	return c.getRuntimeAssignedModelProfile(ctx, "")
+}
+
+func (c *controlPlaneModelProfileClient) GetRuntimeAssignedModelProfileForAgent(ctx context.Context, agentID string) (*ModelProfile, error) {
+	parsedAgentID, err := uuid.Parse(agentID)
+	if err != nil || parsedAgentID == uuid.Nil {
+		return nil, fmt.Errorf("invalid agent ID")
+	}
+	return c.getRuntimeAssignedModelProfile(ctx, parsedAgentID.String())
+}
+
+func (c *controlPlaneModelProfileClient) getRuntimeAssignedModelProfile(ctx context.Context, agentID string) (*ModelProfile, error) {
+	endpoint := c.baseURL + "/api/v1/runtime/model-profiles/assigned"
+	if agentID != "" {
+		endpoint += "?agent_id=" + url.QueryEscape(agentID)
+	}
+	profile, err := c.getRuntimeModelProfile(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	if profile == nil {
-		return nil, fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
+		return nil, fmt.Errorf("runtime has no active model profile assigned to the requested agent")
 	}
 	if profile.AgentID == "" || profile.AgentID == uuid.Nil.String() {
-		return nil, fmt.Errorf("runtime assigned-profile response has no valid default assigned agent")
+		return nil, fmt.Errorf("runtime assigned-profile response has no valid assigned agent")
+	}
+	if agentID != "" && profile.AgentID != agentID {
+		return nil, fmt.Errorf("runtime assigned-profile response agent ID does not match the requested agent")
 	}
 	if profile.ProfileID == "" || profile.ProfileID == uuid.Nil.String() {
-		return nil, fmt.Errorf("runtime default agent has no valid active assigned model profile")
+		return nil, fmt.Errorf("runtime agent has no valid active assigned model profile")
 	}
 	return profile, nil
 }
