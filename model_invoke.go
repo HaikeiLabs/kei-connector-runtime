@@ -39,12 +39,10 @@ func runModelInvoke(args []string) int {
 		invokeReq.RequestID = uuid.New().String()
 	}
 
-	// The installation's default agent assignment picks the profile; the
-	// control plane scopes it to the runtime token's workspace.
 	client := NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	profile, err := client.GetRuntimeAssignedModelProfile(ctx)
+	profile, err := resolveModelInvokeProfile(ctx, client, invokeReq.AgentID, invokeReq.ProfileID)
 	if err != nil {
 		sendError("failed to resolve model profile: " + err.Error())
 		return 1
@@ -63,6 +61,22 @@ func runModelInvoke(args []string) int {
 	}
 
 	return 0
+}
+
+func resolveModelInvokeProfile(ctx context.Context, client ControlPlaneModelProfileClient, agentID, profileID string) (*ModelProfile, error) {
+	var profile *ModelProfile
+	var err error
+	if profileID != "" {
+		profile, err = client.GetRuntimeModelProfileForAgent(ctx, profileID, agentID)
+	} else if agentID != "" {
+		profile, err = client.GetRuntimeAssignedModelProfileForAgent(ctx, agentID)
+	} else {
+		profile, err = client.GetRuntimeAssignedModelProfile(ctx)
+	}
+	if err == nil && profile == nil {
+		return nil, fmt.Errorf("requested model profile is not assigned to the selected agent")
+	}
+	return profile, err
 }
 
 func sendError(message string) {

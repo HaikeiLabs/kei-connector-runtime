@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added: agent-specific model profile selection
+
+`kei-proxy model profile` accepts `--agent-id <uuid>` and uses `--profile-id`
+to select any active profile assigned to that agent (or the installation's
+default agent). `kei-proxy model profiles` lists active assignments without
+credentials. `model invoke` accepts `agent_id` and `profile_id` in its request
+JSON. Serve exposes `GET /v1/model-profiles` (safe metadata only), and both
+`/v1/model-config` and `/v1/models` accept those selectors as query parameters.
+Profile selection remains scoped to assignments authorized by the runtime API,
+and secret-store credential lookup is unchanged. The serve daemon has no
+`POST /v1/chat/completions` route; model invocation remains `model invoke`.
+
 ### Breaking: tool manifest v3 only (HAI-875)
 
 kei-proxy accepts `kei.tool-manifest/v3` only from this release. Manifests v1, v2, and v4 are rejected. Agentware 0.12.0 posts v3 and is unaffected.

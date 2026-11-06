@@ -157,8 +157,13 @@ func (c runtimeToolRegistryClient) SyncTools(ctx context.Context, token string, 
 }
 
 func runModel(args []string) int {
-	if len(args) > 0 && args[0] == "profile" {
-		return runModelProfile(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "profile":
+			return runModelProfile(args[1:])
+		case "profiles":
+			return runModelProfiles(args[1:])
+		}
 	}
 	return runModelInvoke(args)
 }
@@ -234,7 +239,9 @@ Examples:
 	kei-proxy identity link --platform discord --platform-user-id 123456789
   kei-proxy identity status --platform-user-id 123456789 --tenant-id guild-id
   echo '{"request":{...}}' | KEI_RUNTIME_TOKEN=$KEI_RUNTIME_TOKEN kei-proxy model invoke
-  kei-proxy model profile [--profile-id PROFILE_ID]
+  kei-proxy model profile [--agent-id AGENT_UUID] [--profile-id PROFILE_UUID]
+  kei-proxy model profiles [--agent-id AGENT_UUID]
+  # model invoke request JSON may include agent_id and profile_id
   kei-proxy --user-id U1234ABCD --tool github.create_pr --action github:write
 `)
 }

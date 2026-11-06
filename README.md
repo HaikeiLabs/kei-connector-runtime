@@ -453,6 +453,30 @@ KEI_RUNTIME_TOKEN=kh_live_... \
 kei-proxy serve
 ```
 
+The one-shot `kei-proxy model profile` command resolves an agent's default
+active profile, or selects a specific assigned profile with `--profile-id`.
+Use `--agent-id` to select an attached agent; omitting it uses the installation's
+default agent. `kei-proxy model profiles [--agent-id AGENT_UUID]` lists active
+assignments as JSON without credentials. For example:
+
+```sh
+kei-proxy model profiles --agent-id 00000000-0000-0000-0000-000000000001
+kei-proxy model profile --agent-id 00000000-0000-0000-0000-000000000001 \
+  --profile-id 00000000-0000-0000-0000-000000000002
+```
+
+The selected-profile response includes `is_default`. The `profile` command reads
+an `api_key` credential from the configured secret store and emits it only in
+the JSON response on stdout; keep that output private. `model invoke` accepts
+`agent_id` and `profile_id` in its JSON request body; `agent_id` by itself picks
+that agent's default assignment. `GET /v1/model-config` and `GET /v1/models`
+accept the same `agent_id` and `profile_id` as query parameters. `GET /v1/model-profiles?agent_id=...` returns
+the assigned profile metadata without secret references or credentials. The
+OpenAI-compatible `/v1/models` response advertises the selected profile's
+configured default model. If `profile_id` is omitted, the selected agent's
+default assignment is used. This runtime currently does not expose
+`POST /v1/chat/completions`; model invocation is through `kei-proxy model invoke`.
+
 The initial endpoints are `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
 `POST /v1/authorize`, and `PUT/DELETE/GET /v1/session`. The model-config
 endpoint returns the runtime's assigned model profile — model name, endpoint,
