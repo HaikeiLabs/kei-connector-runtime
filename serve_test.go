@@ -690,6 +690,31 @@ type fakeRuntimeProfiles struct {
 func (f fakeRuntimeProfiles) GetRuntimeModelProfile(context.Context, string) (*ModelProfile, error) {
 	return f.profile, nil
 }
+func (f fakeRuntimeProfiles) GetRuntimeModelProfileForAgent(_ context.Context, profileID, agentID string) (*ModelProfile, error) {
+	profile := f.assigned
+	if profile == nil {
+		profile = f.profile
+	}
+	if profile != nil && profile.ProfileID == profileID && (agentID == "" || profile.AgentID == agentID) {
+		return profile, nil
+	}
+	return nil, nil
+}
+func (f fakeRuntimeProfiles) ListRuntimeModelProfiles(context.Context, string) (*ModelProfileList, error) {
+	profile := f.assigned
+	if profile == nil {
+		profile = f.profile
+	}
+	result := &ModelProfileList{}
+	if profile != nil {
+		result.ModelProfiles = append(result.ModelProfiles, ModelProfileSummary{
+			ProfileID: profile.ProfileID, DisplayName: profile.DisplayName,
+			DefaultModel: profile.DefaultModel, Endpoint: profile.Endpoint,
+			AuthType: profile.AuthType, Status: profile.Status, IsDefault: profile.IsDefault,
+		})
+	}
+	return result, nil
+}
 func (f fakeRuntimeProfiles) GetRuntimeDefaultModelProfile(context.Context) (*ModelProfile, error) {
 	if f.defaultProfile != nil {
 		return f.defaultProfile, nil
@@ -796,6 +821,33 @@ func TestHandleModelConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("selected_agent_and_profile", func(t *testing.T) {
+		const agentID = "00000000-0000-0000-0000-000000000041"
+		const profileID = "00000000-0000-0000-0000-000000000042"
+		h := &runtimeHTTPHandler{
+			cfg: cfg,
+			profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
+				ProfileID: profileID, AgentID: agentID, DefaultModel: "selected-model",
+				Endpoint: "https://api.example.test", Status: "active", AuthType: "none", IsDefault: false,
+			}},
+			client: &http.Client{Timeout: time.Second},
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/model-config?agent_id="+agentID+"&profile_id="+profileID, nil)
+		req.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var response map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response["model"] != "selected-model" || response["is_default"] != false {
+			t.Fatalf("response = %v, want selected non-default profile", response)
+		}
+	})
+
 	t.Run("success_no_credential", func(t *testing.T) {
 		h := &runtimeHTTPHandler{
 			cfg: cfg,
@@ -896,6 +948,52 @@ func TestHandleModelConfig(t *testing.T) {
 			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 		}
 	})
+}
+
+func TestHandleModelProfilesAndModelsSelection(t *testing.T) {
+	const agentID = "00000000-0000-0000-0000-000000000051"
+	const profileID = "00000000-0000-0000-0000-000000000052"
+	cfg := Config{RuntimeToken: "kh_live_12345678901234567890", RuntimeControlPlaneURL: "http://127.0.0.1:1"}
+	h := &runtimeHTTPHandler{
+		cfg: cfg,
+		profiles: fakeRuntimeProfiles{assigned: &ModelProfile{
+			ProfileID: profileID, AgentID: agentID, DisplayName: "Selected",
+			DefaultModel: "selected-model", Endpoint: "https://model.example.test",
+			AuthType: "api_key", Status: "active", IsDefault: false,
+			SecretRef: "must-not-leak", SecretBackend: "file",
+		}},
+		client: &http.Client{Timeout: time.Second},
+	}
+
+	listRec := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/model-profiles?agent_id="+agentID, nil)
+	listReq.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/model-profiles status = %d; body=%s", listRec.Code, listRec.Body.String())
+	}
+	if strings.Contains(listRec.Body.String(), "must-not-leak") || strings.Contains(listRec.Body.String(), "secret_ref") {
+		t.Fatalf("profile list leaked secret metadata: %s", listRec.Body.String())
+	}
+
+	modelsRec := httptest.NewRecorder()
+	modelsReq := httptest.NewRequest(http.MethodGet, "/v1/models?agent_id="+agentID+"&profile_id="+profileID, nil)
+	modelsReq.Header.Set("Authorization", "Bearer kh_live_12345678901234567890")
+	h.ServeHTTP(modelsRec, modelsReq)
+	if modelsRec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models status = %d; body=%s", modelsRec.Code, modelsRec.Body.String())
+	}
+	var models struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(modelsRec.Body.Bytes(), &models); err != nil {
+		t.Fatal(err)
+	}
+	if len(models.Data) != 1 || models.Data[0].ID != "selected-model" {
+		t.Fatalf("models = %+v, want selected model", models.Data)
+	}
 }
 
 // setenv sets an environment variable for the lifetime of a test and returns

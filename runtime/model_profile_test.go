@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,49 @@ func TestControlPlaneModelProfileClient_RejectsMismatchedRequestedAgent(t *testi
 	client := NewControlPlaneModelProfileClient(server.URL, "runtime-token", 0)
 	if _, err := client.GetRuntimeAssignedModelProfileForAgent(context.Background(), "00000000-0000-0000-0000-000000000014"); err == nil {
 		t.Fatal("expected mismatched agent response to fail")
+	}
+}
+
+func TestControlPlaneModelProfileClient_GetRuntimeModelProfileForAgent(t *testing.T) {
+	const agentID = "00000000-0000-0000-0000-000000000024"
+	const profileID = "00000000-0000-0000-0000-000000000025"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/model-profiles/"+profileID || r.URL.Query().Get("agent_id") != agentID {
+			t.Fatalf("request = %s, want profile and agent selector", r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profile_id": profileID, "org_id": "00000000-0000-0000-0000-000000000026",
+			"agent_id": agentID, "is_default": false, "status": "active",
+		})
+	}))
+	defer server.Close()
+	client := NewControlPlaneModelProfileClient(server.URL, "runtime-token", 0)
+	profile, err := client.GetRuntimeModelProfileForAgent(context.Background(), profileID, agentID)
+	if err != nil || profile == nil || profile.IsDefault {
+		t.Fatalf("profile = %+v, err = %v", profile, err)
+	}
+}
+
+func TestControlPlaneModelProfileClient_ListRuntimeModelProfiles(t *testing.T) {
+	const agentID = "00000000-0000-0000-0000-000000000027"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/model-profiles" || r.URL.Query().Get("agent_id") != agentID {
+			t.Fatalf("request = %s, want profile list and agent selector", r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{"model_profiles":[{"profile_id":"00000000-0000-0000-0000-000000000028","display_name":"Test","default_model":"model","endpoint":"https://models.example.test","auth_type":"api_key","status":"active","is_default":true}]}`))
+	}))
+	defer server.Close()
+	client := NewControlPlaneModelProfileClient(server.URL, "runtime-token", 0)
+	profiles, err := client.ListRuntimeModelProfiles(context.Background(), agentID)
+	if err != nil || len(profiles.ModelProfiles) != 1 || !profiles.ModelProfiles[0].IsDefault {
+		t.Fatalf("profiles = %+v, err = %v", profiles, err)
+	}
+	encoded, err := json.Marshal(profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret_ref") || strings.Contains(string(encoded), "credential") {
+		t.Fatalf("profile list contains credential material: %s", encoded)
 	}
 }
 
