@@ -347,6 +347,11 @@ func (e *Evaluator) ReconcileSessions() []string {
 		if sub.Status != StatusLinked {
 			return false
 		}
+		// Principal bindings are checked against the current bundle and trusted
+		// agent on authorization, not against human identity memberships.
+		if sub.SubjectKind == "service_principal" {
+			return false
+		}
 		if sub.Source == "installation_owner" {
 			return v.Payload.Subject == nil || v.Payload.Subject.UserID != sub.UserID
 		}
