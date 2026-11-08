@@ -757,6 +757,63 @@ func TestSocketSessionStartAsNamedBoundServicePrincipal(t *testing.T) {
 	}
 }
 
+func TestPrincipalSessionSurvivesOtherSessionEndAndSync(t *testing.T) {
+	const agentID = "20000000-0000-0000-0000-000000000006"
+	var doc map[string]any
+	if err := json.Unmarshal(v2WebSearchBundle(t, nil, "group:bug-intake"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["identities"] = []any{map[string]any{"subject_type": "service_principal", "service_principal_id": "sp-bug-intake", "service_principal_name": "kei-bug-intake", "agent_id": agentID, "groups": []string{"bug-intake"}, "subject_token": "token", "expire_time": time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, h := principalSessionHandler(t, raw, agentID, nil)
+	t.Cleanup(l.Close)
+	start := func() string {
+		t.Helper()
+		rec := putSession(t, h, `{"schema":"kei.session/v2","service_principal_name":"kei-bug-intake"}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("start: %d %s", rec.Code, rec.Body.String())
+		}
+		var result struct {
+			ID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.ID
+	}
+	a, b := start(), start()
+	authorize := func() {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(`{"schema":"kei.authorize-request/v1","tool":"web_search"}`))
+		req.Header.Set(session.Header, a)
+		h.ServeHTTP(rec, req)
+		var result struct {
+			Decision string `json:"decision"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusOK || result.Decision != "permit" {
+			t.Fatalf("authorize: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	authorize()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/session", nil)
+	req.Header.Set(session.Header, b)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("end: %d %s", rec.Code, rec.Body.String())
+	}
+	authorize()
+	l.AfterSync(nil)
+	authorize()
+}
+
 func TestSocketSessionStartAsBoundServicePrincipal(t *testing.T) {
 	const agentID, principalID = "20000000-0000-0000-0000-000000000006", "sp-bug-intake"
 	l, h := principalSessionHandler(t, principalBundle(t, agentID, principalID, time.Now().Add(time.Hour)), agentID, nil)
