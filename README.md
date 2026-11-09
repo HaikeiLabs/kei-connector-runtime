@@ -149,7 +149,6 @@ generic or wrong command.
 
 | reason_code | hint |
 | --- | --- |
-| `agent_not_bound_to_connector` | Bind the agent to the connector on the console Connectors page (kei-cli has no bind command). |
 | `no_matching_policy` | Add a policy for this source and target: `kei policies create --name <name> --src-pattern <src> --dst-pattern <dst> --effect permit` |
 | `tool_not_registered` | Register the harness tools: `kei harness sync --harness custom --manifest tools.json` |
 | `agent_not_assigned` | Assign an agent to this runtime installation on the console Agents page so the runtime identity has a default agent. |

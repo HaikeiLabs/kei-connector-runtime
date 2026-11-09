@@ -9,7 +9,6 @@ type ReasonCode string
 const (
 	ReasonAgentMismatch               ReasonCode = "agent_mismatch"
 	ReasonAgentNotAssigned            ReasonCode = "agent_not_assigned"
-	ReasonAgentNotBoundToConnector    ReasonCode = "agent_not_bound_to_connector"
 	ReasonInvalidShellRequest         ReasonCode = "invalid_shell_request"
 	ReasonInvalidToolArgsDigest       ReasonCode = "invalid_tool_args_digest"
 	ReasonNoMatchingPolicy            ReasonCode = "no_matching_policy"
@@ -27,7 +26,7 @@ const (
 )
 
 var knownReasonCodes = map[ReasonCode]bool{
-	ReasonAgentMismatch: true, ReasonAgentNotAssigned: true, ReasonAgentNotBoundToConnector: true,
+	ReasonAgentMismatch: true, ReasonAgentNotAssigned: true,
 	ReasonInvalidShellRequest: true, ReasonInvalidToolArgsDigest: true, ReasonNoMatchingPolicy: true,
 	ReasonPolicyBundleInvalid: true, ReasonPolicyBundleMissing: true, ReasonPreflightRequired: true,
 	ReasonRequestCanceled: true, ReasonSessionNotFound: true, ReasonSessionRequired: true,

@@ -263,9 +263,6 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "agent is not assigned to this installation"}
 	}
 	connectorID := tool.Route.ConnectorBinding.ConnectorID
-	if !v.agentBound(agentID, connectorID, tool.RequiredCapabilities) {
-		return Decision{Outcome: "deny", ReasonCode: "agent_not_bound_to_connector", Reason: "agent binding does not cover the tool's required capabilities"}
-	}
 	if len(ops) == 0 || len(tool.RequiredCapabilities) == 0 {
 		return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan is empty"}
 	}
@@ -303,29 +300,6 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		}
 	}
 	return Decision{Outcome: "allow", ReasonCode: "policy_permit"}
-}
-
-func (v *Verified) agentBound(agentID, connectorID string, required []string) bool {
-	var bindings []struct {
-		AgentID      string   `json:"agent_id"`
-		ConnectorID  string   `json:"connector_id"`
-		Capabilities []string `json:"capabilities"`
-	}
-	if json.Unmarshal(v.Payload.AgentConnectorBindings, &bindings) != nil {
-		return false
-	}
-	for _, binding := range bindings {
-		if binding.AgentID != agentID || binding.ConnectorID != connectorID {
-			continue
-		}
-		for _, capability := range required {
-			if !containsExact(binding.Capabilities, capability) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
 }
 
 func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool {

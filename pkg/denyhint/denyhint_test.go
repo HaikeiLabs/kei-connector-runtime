@@ -6,7 +6,6 @@ import "testing"
 // deny reason_code a developer can hit to a concrete next step.
 func TestHintCoversEveryKnownDenyCode(t *testing.T) {
 	known := []string{
-		"agent_not_bound_to_connector",
 		"no_matching_policy",
 		"tool_not_registered",
 		"agent_not_assigned",
