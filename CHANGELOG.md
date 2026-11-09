@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed: agent-connector bindings no longer gate authorization (HAI-623)
+
+kei-proxy no longer denies a connector call with `agent_not_bound_to_connector`
+before policy runs. `agent_connector_bindings` in the bundle is wiring only;
+a call is allowed or denied by the bundle's rules and live access grants. An
+agent with no grant for the connector now gets the policy deny
+(`no_matching_policy` or `no_grant_matched`). The reason code and its deny
+hint are removed.
+
 ### Added: agent-specific model profile selection
 
 `kei-proxy model profile` accepts `--agent-id <uuid>` and uses `--profile-id`
