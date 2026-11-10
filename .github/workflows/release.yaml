@@ -282,7 +282,7 @@ jobs:
     name: Prepare release notes
     needs: [release, validate-tag]
     if: success()
-    runs-on: ubuntu-latest
+    runs-on: kei-docker-ci
     permissions:
       contents: read
     outputs:
