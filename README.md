@@ -576,6 +576,44 @@ Failures are closed and redacted: a missing secret is `secret not found`, a
 missing role or unreachable GCP is `secret store unavailable` with the role
 names above, and a secret value never appears in an error or log line.
 
+## Mounted secret store
+
+The runtime's tenant secret store also supports a `mounted` backend for
+secrets delivered as files mounted into the container — a Kubernetes Secret
+volume or the Secrets Store CSI driver. A reference is `mounted:<relative/path>`,
+resolved under the root directory named by `KEI_SECRETS_MOUNT_DIR` (default
+`/var/run/secrets/kei`). The file is read on every call (no caching), so a
+rotated secret is picked up on the existing 401 re-fetch without a restart;
+a single trailing newline is trimmed. The backend is read-only — the runtime
+never writes to the mount — and stays decision-only: it reads the file it is
+pointed at and nothing else.
+
+Paths are validated before any I/O: absolute paths, `..` segments, and
+symlinks that resolve outside the root are rejected. Errors are generic and
+never echo the reference or the secret value.
+
+Kubernetes example — a Secret mounted read-only at the default root:
+
+```yaml
+volumes:
+  - name: kei-secrets
+    secret:
+      secretName: kei-secrets
+      defaultMode: 0400
+      items:
+        - key: snowflake-key-pair
+          path: snowflake/key.pem
+volumeMounts:
+  - name: kei-secrets
+    mountPath: /var/run/secrets/kei
+    readOnly: true
+```
+
+then reference it as `mounted:snowflake/key.pem`. The Secrets Store CSI
+driver (for example, a Kubernetes `SecretProviderClass` backed by a cloud
+vault) works the same way: point `KEI_SECRETS_MOUNT_DIR` at the CSI mount
+and use the same `mounted:<relative/path>` references.
+
 ## Runtime heartbeat (liveness)
 
 A harness needs only `KEI_RUNTIME_TOKEN` (plus the control-plane URL).
