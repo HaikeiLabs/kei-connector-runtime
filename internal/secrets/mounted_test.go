@@ -152,10 +152,10 @@ func TestMountedErrorsNeverContainSecret(t *testing.T) {
 		"mounted:missing",
 	}
 	// Also the wrong-backend-name error path.
-	if _, err := store.Get(context.Background(), "aws-secrets-manager", "mounted:real"); err == nil {
+	_, wrongBackendErr := store.Get(context.Background(), "aws-secrets-manager", "mounted:real")
+	if wrongBackendErr == nil {
 		t.Fatal("Get with wrong backend succeeded, want error")
 	}
-	refs = append(refs, "mounted:real")
 
 	for _, ref := range refs {
 		_, err := store.Get(context.Background(), "mounted", ref)
@@ -165,6 +165,9 @@ func TestMountedErrorsNeverContainSecret(t *testing.T) {
 		if strings.Contains(err.Error(), value) {
 			t.Fatalf("Get(%s) error contains the secret value: %v", ref, err)
 		}
+	}
+	if strings.Contains(wrongBackendErr.Error(), value) {
+		t.Fatalf("wrong-backend error contains the secret value: %v", wrongBackendErr)
 	}
 }
 

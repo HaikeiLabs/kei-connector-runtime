@@ -114,13 +114,16 @@ func (r *BackendRegistry) store(name string) (Store, error) {
 	return instance, nil
 }
 
-// DefaultBackendRegistry returns the built-in backends. All authenticate with
-// workload / managed identity; none reads static cloud credentials.
+// DefaultBackendRegistry returns the built-in backends. The cloud backends
+// authenticate with workload / managed identity; none reads static cloud
+// credentials. The mounted backend reads files from the container's secret
+// mount (KEI_SECRETS_MOUNT_DIR).
 func DefaultBackendRegistry() *BackendRegistry {
 	reg := NewBackendRegistry()
 	reg.Register("azure-key-vault", func() (Store, error) { return NewAzureKeyVaultStore() })
 	reg.Register("aws-secrets-manager", func() (Store, error) { return NewAWSSecretsManagerStore() })
 	reg.Register("gcp-secret-manager", func() (Store, error) { return gcp.NewStore(), nil })
+	reg.Register("mounted", NewMountedStoreFromEnv)
 	return reg
 }
 

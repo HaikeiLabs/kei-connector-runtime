@@ -35,6 +35,7 @@ var secretRefBackends = map[string]bool{
 	"azure-key-vault":     true,
 	"aws-secrets-manager": true,
 	"gcp-secret-manager":  true,
+	"mounted":             true,
 	"vault":               true,
 	"custom":              true,
 }
