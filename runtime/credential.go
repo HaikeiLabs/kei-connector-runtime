@@ -58,7 +58,7 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg CredentialCo
 	}
 
 	// Create secret store (for backend operations)
-	store, err := secrets.NewStore()
+	store, err := secrets.NewStoreFromEnv()
 	if err != nil {
 		fmt.Fprintf(stderr, "credential sync failed: create secret store: %v\n", err)
 		return 1

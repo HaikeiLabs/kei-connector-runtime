@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/statedir"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
@@ -41,6 +42,11 @@ type Config struct {
 	// comma-separated service principal names whose subject token
 	// POST /v1/session:subjectToken may return. Empty (default) refuses all.
 	ExportableServicePrincipals []string
+	// SecretsBackend is KEI_SECRETS_BACKEND: the single secret store this
+	// install uses (aws-secrets-manager, azure-key-vault, or
+	// gcp-secret-manager). Empty (default) means no secret store; every
+	// secret call fails closed.
+	SecretsBackend string
 }
 
 func envOr(key, fallback string) string {
@@ -143,6 +149,7 @@ func configFromEnv() Config {
 		TokenlessOwnerSession:         tokenlessOwnerSessionFromEnv(),
 		RuntimeHeartbeatInterval:      runtimeHeartbeatIntervalFromEnv(),
 		ExportableServicePrincipals:   exportableServicePrincipalsFromEnv(),
+		SecretsBackend:                os.Getenv("KEI_SECRETS_BACKEND"),
 	}
 }
 
@@ -180,6 +187,9 @@ func ValidateRuntimeTokenFormat(token string) error {
 // legacy in-cluster relay mode is gone, so commands that need a runtime token
 // report it when no token is configured.
 func (c Config) Validate() error {
+	if err := secrets.ValidateBackendName(c.SecretsBackend); err != nil {
+		return err
+	}
 	if !c.IsRuntime() {
 		return nil
 	}

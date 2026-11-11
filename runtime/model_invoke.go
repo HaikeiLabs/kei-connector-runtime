@@ -57,7 +57,7 @@ func GetModelProfileAPIKey(profile *ModelProfile) (string, error) {
 		return "", nil
 	}
 
-	store, err := secrets.NewStore()
+	store, err := secrets.NewStoreFromEnv()
 	if err != nil {
 		return "", fmt.Errorf("failed to create secret store: %w", err)
 	}

@@ -84,7 +84,7 @@ func runModelProfile(args []string) int {
 		APIKey string `json:"api_key,omitempty"`
 	}{ModelProfile: profile}
 	if profile.AuthType == "api_key" {
-		store, storeErr := secrets.NewStore()
+		store, storeErr := secrets.NewStoreFromEnv()
 		if storeErr != nil {
 			fmt.Fprintf(os.Stderr, "model profile credential store unavailable: %v\n", storeErr)
 			return 1

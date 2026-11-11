@@ -308,9 +308,9 @@ func Run(args []string, stdout, stderr io.Writer, cfg Config) int {
 	if cfg.DaemonSocket != "" {
 		return runViaDaemon(args, stdout, stderr, cfg, os.Environ())
 	}
-	store, err := secrets.NewStore()
+	store, err := secrets.NewStoreFromEnv()
 	if err != nil {
-		fmt.Fprintln(stderr, "run credential store is unavailable")
+		fmt.Fprintf(stderr, "run credential store is unavailable: %v\n", err)
 		return 1
 	}
 	var credBinding runCredentialBindingClient

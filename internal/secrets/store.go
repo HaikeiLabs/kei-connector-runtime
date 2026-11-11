@@ -8,6 +8,8 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets/errdef"
@@ -86,6 +88,33 @@ func (r *BackendRegistry) Empty() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.factories) == 0
+}
+
+// Only returns a new registry holding only the named backend's factory. The
+// error names the offending value when no factory is registered under that
+// name; the registry is the single source of the allowed names.
+func (r *BackendRegistry) Only(name string) (*BackendRegistry, error) {
+	r.mu.Lock()
+	factory, ok := r.factories[name]
+	r.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown secret backend %q (expected one of: %s)", name, strings.Join(r.Names(), ", "))
+	}
+	reg := NewBackendRegistry()
+	reg.Register(name, factory)
+	return reg, nil
+}
+
+// Names returns the registered backend names, sorted.
+func (r *BackendRegistry) Names() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	names := make([]string, 0, len(r.factories))
+	for name := range r.factories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // store resolves a backend by name, constructing it lazily on first use. The
