@@ -4,6 +4,8 @@ Status: **proposal**, 2026-11-10. No code yet. Open questions for the owner
 are in [§11](#11-open-questions-for-the-owner).
 Audit with citations: [oidc-token-exchange-audit.md](oidc-token-exchange-audit.md)
 (finding IDs `A1`–`A15` below refer to it).
+See also: [oidc-token-exchange-ietf-review.md](oidc-token-exchange-ietf-review.md)
+— delta list against the current IETF delegation drafts (HAI-992), 2026-11-11.
 
 ## 1. Goal
 
