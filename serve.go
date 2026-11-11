@@ -508,7 +508,7 @@ func (h *runtimeHTTPHandler) handleModelConfig(w http.ResponseWriter, r *http.Re
 // the same backends model profiles use. Without one, opaque_ref connectors
 // deny credential_backend_unavailable.
 func connectorSecretStore() secrets.Store {
-	store, err := secrets.NewStore()
+	store, err := secrets.NewStoreFromEnv()
 	if err != nil {
 		return nil
 	}

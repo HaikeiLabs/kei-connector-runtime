@@ -232,6 +232,10 @@ Environment:
   KEI_PROXY_AGENT_VERSION   agent version
   KEI_PROXY_FRAMEWORK       agent framework (e.g. claude, codex)
   KEI_TOOL_MANIFEST        path to a v2/v3 tool manifest; bootstrap sync negotiates its schema
+  KEI_SECRETS_BACKEND      the single secret store this install uses: aws-secrets-manager,
+                            azure-key-vault, or gcp-secret-manager. Unset (default) means no
+                            secret store; every secret call fails closed. Unknown values fail
+                            at startup.
 
 Examples:
   kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets

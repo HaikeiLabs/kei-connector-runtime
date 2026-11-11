@@ -552,10 +552,27 @@ the module resolves through the public proxy and is verified against the public
 checksum database. Do not reintroduce `GOPRIVATE` or credential plumbing for
 this dependency.
 
+## Single configured secret backend
+
+Each runtime install uses exactly one secret store, named by
+`KEI_SECRETS_BACKEND`: `aws-secrets-manager`, `azure-key-vault`, or
+`gcp-secret-manager`. The runtime builds only that backend; a call whose
+backend differs from the configured one fails closed, and a secret value
+never appears in an error or log line.
+
+- Unset (default): no secret store is built and every secret call fails
+  closed. Local bring-your-own harnesses (for example Claude Code) use SSO
+  identity and need no secret store — leave the variable unset.
+- Set: remote cloud deploys must set it (helm/env) for model profile
+  credentials, connector opaque_ref secrets, and credential sync.
+- Unknown value: the runtime fails at startup with a clear error naming the
+  offending value.
+
 ## GCP Secret Manager backend
 
 The runtime's tenant secret store supports `gcp-secret-manager` alongside
-`aws-secrets-manager` and `azure-key-vault`. A reference is the secret's
+`aws-secrets-manager` and `azure-key-vault` (one per install, via
+`KEI_SECRETS_BACKEND`). A reference is the secret's
 resource name, `projects/{project}/secrets/{secret}`, optionally with
 `/versions/{version}`. Each delivered secret is written as a new secret
 version (a rotation generation); reads return the latest version.
