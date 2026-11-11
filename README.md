@@ -256,17 +256,21 @@ The collector sends each `harness_tool` record to two places:
   are counted by reason code (`malformed`, `tool_missing`,
   `catalog_rejected`) in `harness_tool_quarantined` in `<path>.state` and
   logged with the catalog's error status and message, never the record.
-- `POST /api/v1/runtime/audit:flush`, which writes `abac.audit_records` and
+  `POST /api/v1/runtime/audit:flush`, which writes `abac.audit_records` and
   shows in the console Audit Logs. Records follow the HP harness audit event
   contract and are built field by field: `event_class`, `harness_agent_id`,
   `harness_kind` (`claude|codex|opencode`, which the catalog maps to
   `claude_code`, `codex`, and `opencode`), `tool`, `skill?`, `phase`,
-  `native_decision`, `args_digest`, `digest_key_id?`, `args_ciphertext?`,
-  `recipient_key_ids?`, `harness_session_id?`, `tool_use_id?`, and
-  `observed_at`. Raw tool input is never sent. `args_ciphertext` is passed
-  through unchanged; Kei cannot decrypt it (ADR-030). Batches hold at most 100
-  records. A record that is missing a required contract field is dropped
-  rather than left to block the spool.
+  `native_decision`, `args_digest`, `resources_touched?`, `digest_key_id?`,
+  `args_ciphertext?`, `recipient_key_ids?`, `harness_session_id?`,
+  `tool_use_id?`, and `observed_at`. Shell events may include `shell:<executable>`
+  and a home-relative `cwd:~/...`; the raw command and absolute home path are
+  never forwarded. The catalog recomputes policy precedence at ingest from
+  current policy and group state, so the displayed policy is explanatory
+  attribution, not proof of the exact Claude-native rule applied at event time.
+  `args_ciphertext` is passed through unchanged; Kei cannot decrypt it
+  (ADR-030). Batches hold at most 100 records. A record that is missing a
+  required contract field is dropped rather than left to block the spool.
 
 Both routes authenticate with `KEI_RUNTIME_TOKEN` and need
 `KEI_RUNTIME_CONTROL_PLANE_URL`. Delivery is at least once. The collector
