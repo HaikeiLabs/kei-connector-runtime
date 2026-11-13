@@ -164,3 +164,22 @@ func TestNewStoreFromEnvValid(t *testing.T) {
 		t.Fatalf("Get error = %v, want ErrUnavailable", err)
 	}
 }
+
+// HAI-1000: KEI_SECRETS_AZURE_VAULT_URL qualifies a bare external secret name
+// for the azure-key-vault backend. Only an https vault origin is accepted.
+func TestConfiguredAzureVaultURL(t *testing.T) {
+	for value, want := range map[string]string{
+		"":                                     "",
+		"https://acme.vault.azure.net":         "https://acme.vault.azure.net",
+		" https://acme.vault.azure.net/ ":      "https://acme.vault.azure.net",
+		"http://acme.vault.azure.net":          "",
+		"https://acme.vault.azure.net/secrets": "",
+		"https://user:pw@acme.vault.azure.net": "",
+		"acme.vault.azure.net":                 "",
+	} {
+		t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", value)
+		if got := ConfiguredAzureVaultURL(); got != want {
+			t.Errorf("ConfiguredAzureVaultURL(%q) = %q, want %q", value, got, want)
+		}
+	}
+}

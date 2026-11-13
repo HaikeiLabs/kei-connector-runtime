@@ -1,0 +1,249 @@
+package credentials
+
+// External credential refs (HAI-1000). A connector whose credential_ref is a
+// secret the customer keeps in their own secret manager is never delivered by
+// Kei. Instead the catalog lists those refs, and each sync checks that each
+// ref exists in the runtime's configured secret store. A ref that exists is
+// recorded in the connector reference index as an external entry, which the
+// heartbeat reports as a connector activation and the daemon releases on a
+// governed call. Resolution only validates: it never reads, logs, or returns
+// a secret value.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
+)
+
+// externalCredentialRefsPath is the catalog list of external credential refs
+// for the runtime token's installation.
+const externalCredentialRefsPath = "/api/v1/runtime/external-credential-refs"
+
+// maxExternalRefPages bounds pagination so a misbehaving catalog cannot loop
+// the sync forever.
+const maxExternalRefPages = 1000
+
+// ExternalCredentialRef is one external credential_ref the catalog lists.
+type ExternalCredentialRef struct {
+	ConnectorID   string `json:"connector_id"`
+	Field         string `json:"field"`
+	CredentialRef string `json:"credential_ref"`
+	Status        string `json:"status"`
+}
+
+type externalCredentialRefsPage struct {
+	Refs          []ExternalCredentialRef `json:"external_credential_refs"`
+	NextPageToken string                  `json:"next_page_token"`
+}
+
+type externalRefsClient struct {
+	baseURL string
+	client  *http.Client
+}
+
+func newExternalRefsClient(baseURL string, timeout time.Duration) *externalRefsClient {
+	return &externalRefsClient{baseURL: strings.TrimRight(baseURL, "/"), client: &http.Client{Timeout: timeout}}
+}
+
+// external404Once logs the older-catalog 404 once per process.
+var external404Once sync.Once
+
+// ListExternalCredentialRefs returns every external credential ref, following
+// next_page_token until it is empty. listed is false when the catalog does not
+// serve the route (404 from an older catalog), which means no refs.
+func (c *externalRefsClient) ListExternalCredentialRefs(ctx context.Context, token string) (refs []ExternalCredentialRef, listed bool, err error) {
+	pageToken := ""
+	for page := 0; page < maxExternalRefPages; page++ {
+		endpoint := c.baseURL + externalCredentialRefsPath
+		if pageToken != "" {
+			endpoint += "?page_token=" + url.QueryEscape(pageToken)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, false, fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/json")
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, false, fmt.Errorf("list external credential refs request failed: %w", err)
+		}
+		if resp.StatusCode == http.StatusNotFound && page == 0 {
+			resp.Body.Close()
+			external404Once.Do(func() {
+				slog.Debug("catalog does not serve external credential refs; treating as none")
+			})
+			return nil, false, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, false, fmt.Errorf("list external credential refs returned status %d", resp.StatusCode)
+		}
+		var body externalCredentialRefsPage
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, false, fmt.Errorf("decode external credential refs: %w", err)
+		}
+		refs = append(refs, body.Refs...)
+		if body.NextPageToken == "" {
+			return refs, true, nil
+		}
+		if body.NextPageToken == pageToken {
+			return nil, false, fmt.Errorf("list external credential refs repeated a page token")
+		}
+		pageToken = body.NextPageToken
+	}
+	return nil, false, fmt.Errorf("list external credential refs exceeded %d pages", maxExternalRefPages)
+}
+
+// ExternalRefsOutput is the redacted result of one external-ref resolution.
+// It names connectors only, never a ref or a value.
+type ExternalRefsOutput struct {
+	// Listed is false when the catalog does not serve the route; the index is
+	// then left as it was.
+	Listed     bool     `json:"listed"`
+	Resolved   []string `json:"resolved_connector_ids,omitempty"`
+	Unresolved []string `json:"unresolved_connector_ids,omitempty"`
+	// Removed counts external index entries removed as stale.
+	Removed int `json:"removed,omitempty"`
+}
+
+// ResolveExternalRefs lists the catalog's external credential refs and
+// reconciles the external entries of the connector reference index with what
+// the configured secret store (cfg.SecretsBackend) can find: a ref that exists
+// is written as an external entry; a ref that does not, and any external
+// entry the catalog no longer lists, is removed. Entries Kei delivered are
+// never touched.
+func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (*ExternalRefsOutput, error) {
+	refs, listed, err := newExternalRefsClient(cfg.ControlPlaneURL, cfg.Timeout).ListExternalCredentialRefs(ctx, cfg.RuntimeToken)
+	if err != nil {
+		return nil, err
+	}
+	out := &ExternalRefsOutput{Listed: listed}
+	if !listed {
+		return out, nil
+	}
+	indexPath := connectorIndexPath(cfg)
+	resolved := map[string]ConnectorReference{} // by index key
+	resolvedIDs, unresolvedIDs := map[string]bool{}, map[string]bool{}
+	warnedVaultURL := false
+	for _, ref := range refs {
+		if !warnedVaultURL && needsAzureVaultURL(strings.TrimSpace(cfg.SecretsBackend), ref.CredentialRef) {
+			// One warning per sync, naming the variable and never a ref.
+			warnedVaultURL = true
+			fmt.Fprintf(warningWriter(cfg), "warning: external credential refs are bare Azure Key Vault names; set %s to resolve them\n", secrets.AzureVaultURLEnvVar)
+		}
+		entry, ok := resolveExternalRef(ctx, cfg, store, ref)
+		if !ok {
+			if _, err := uuid.Parse(ref.ConnectorID); err == nil {
+				unresolvedIDs[ref.ConnectorID] = true
+			}
+			continue
+		}
+		resolved[connectorReferenceKey(entry.ConnectorID, entry.Field)] = entry
+		resolvedIDs[entry.ConnectorID] = true
+	}
+	for _, entry := range resolved {
+		if err := writeExternalReference(indexPath, entry); err != nil {
+			return nil, err
+		}
+	}
+	removed, err := RemoveExternalConnectorReferences(indexPath, func(entry ConnectorReference) bool {
+		_, keep := resolved[connectorReferenceKey(entry.ConnectorID, entry.Field)]
+		return !keep
+	})
+	if err != nil {
+		return nil, fmt.Errorf("remove stale external credential references failed")
+	}
+	out.Removed = removed
+	out.Resolved = sortedIDs(resolvedIDs)
+	for id := range resolvedIDs {
+		delete(unresolvedIDs, id)
+	}
+	out.Unresolved = sortedIDs(unresolvedIDs)
+	return out, nil
+}
+
+// resolveExternalRef checks that one listed ref exists in the configured
+// store. It only validates the ref; the value is never read into this
+// process's output.
+func resolveExternalRef(ctx context.Context, cfg Config, store secrets.Store, ref ExternalCredentialRef) (ConnectorReference, bool) {
+	backend := strings.TrimSpace(cfg.SecretsBackend)
+	if backend == "" || store == nil {
+		return ConnectorReference{}, false
+	}
+	if _, err := uuid.Parse(ref.ConnectorID); err != nil || !connectorSecretField.MatchString(ref.Field) {
+		return ConnectorReference{}, false
+	}
+	secretRef, ok := ExternalSecretRef(backend, ref.CredentialRef)
+	if !ok {
+		return ConnectorReference{}, false
+	}
+	entry := ConnectorReference{ConnectorID: ref.ConnectorID, Field: ref.Field, SecretBackend: backend, SecretRef: secretRef, External: true}
+	if validateConnectorReference(entry) != nil {
+		return ConnectorReference{}, false
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := store.Validate(checkCtx, backend, secretRef); err != nil {
+		return ConnectorReference{}, false
+	}
+	return entry, true
+}
+
+// writeExternalReference records entry unless a Kei-delivered entry already
+// holds that connector field, which external resolution never replaces.
+func writeExternalReference(path string, entry ConnectorReference) error {
+	if err := validateConnectorReference(entry); err != nil {
+		return err
+	}
+	err := updateConnectorReferenceIndex(path, func(index *connectorReferenceIndex) bool {
+		key := connectorReferenceKey(entry.ConnectorID, entry.Field)
+		if existing, ok := index.Entries[key]; ok && (!existing.External || existing == entry) {
+			return false
+		}
+		index.Entries[key] = entry
+		return true
+	})
+	if err != nil {
+		return fmt.Errorf("persist external credential reference failed")
+	}
+	return nil
+}
+
+func warningWriter(cfg Config) io.Writer {
+	if cfg.Warnings != nil {
+		return cfg.Warnings
+	}
+	return os.Stderr
+}
+
+func sortedIDs(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}

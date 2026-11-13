@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -25,6 +26,11 @@ type ConnectorReference struct {
 	SecretBackend string `json:"secret_backend"`
 	SecretRef     string `json:"secret_ref"`
 	Generation    int    `json:"generation"`
+	// External marks a reference to a secret the customer keeps in their own
+	// secret manager (an external credential_ref, HAI-1000). Credential sync
+	// writes it after checking the ref exists in the configured store; Kei
+	// never delivered it, so the ref does not name the connector field.
+	External bool `json:"external,omitempty"`
 }
 
 type connectorReferenceIndex struct {
@@ -44,6 +50,35 @@ func WriteConnectorReference(path string, entry ConnectorReference) error {
 	if err := validateConnectorReference(entry); err != nil {
 		return err
 	}
+	return updateConnectorReferenceIndex(path, func(index *connectorReferenceIndex) bool {
+		index.Entries[connectorReferenceKey(entry.ConnectorID, entry.Field)] = entry
+		return true
+	})
+}
+
+// RemoveExternalConnectorReferences deletes the external entries for which
+// remove returns true and reports how many it deleted. Entries Kei delivered
+// are never removed. A missing index has nothing to remove.
+func RemoveExternalConnectorReferences(path string, remove func(ConnectorReference) bool) (int, error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	removed := 0
+	err := updateConnectorReferenceIndex(path, func(index *connectorReferenceIndex) bool {
+		for key, entry := range index.Entries {
+			if entry.External && remove(entry) {
+				delete(index.Entries, key)
+				removed++
+			}
+		}
+		return removed > 0
+	})
+	return removed, err
+}
+
+// updateConnectorReferenceIndex applies update to the index under an
+// exclusive lock and atomically rewrites it when update reports a change.
+func updateConnectorReferenceIndex(path string, update func(*connectorReferenceIndex) bool) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return errors.New("create credential index directory failed")
@@ -75,7 +110,9 @@ func WriteConnectorReference(path string, entry ConnectorReference) error {
 	if index.Version != 1 || index.Entries == nil {
 		return errors.New("credential index has an unsupported format")
 	}
-	index.Entries[connectorReferenceKey(entry.ConnectorID, entry.Field)] = entry
+	if !update(&index) {
+		return nil
+	}
 	data, err := json.Marshal(index)
 	if err != nil {
 		return errors.New("encode credential index failed")
@@ -98,13 +135,106 @@ func ReadConnectorReference(path, connectorID, field string) (ConnectorReference
 	if !ok {
 		return ConnectorReference{}, ErrConnectorReferenceNotFound
 	}
-	if entry.ConnectorID != connectorID || entry.Field != field || !connectorSecretRefNamesField(entry.SecretRef, connectorID, field) {
+	if entry.ConnectorID != connectorID || entry.Field != field || (!entry.External && !connectorSecretRefNamesField(entry.SecretRef, connectorID, field)) {
 		return ConnectorReference{}, ErrConnectorReferenceMismatch
 	}
 	if validateConnectorReference(entry) != nil {
 		return ConnectorReference{}, errors.New("credential index entry is invalid")
 	}
 	return entry, nil
+}
+
+// ReadExternalConnectorReference returns the external entry credential sync
+// resolved for connectorID at credentialRef, the external credential_ref a
+// bundle descriptor names. credentialRef may be the backend's bare name
+// (ExternalSecretRef). An entry for that ref under another backend is
+// ErrConnectorReferenceMismatch; no resolved entry is
+// ErrConnectorReferenceNotFound.
+func ReadExternalConnectorReference(path, connectorID, backend, credentialRef string) (ConnectorReference, error) {
+	if _, err := uuid.Parse(connectorID); err != nil || credentialRef == "" || strings.HasPrefix(credentialRef, keiManagedRefPrefix) {
+		return ConnectorReference{}, ErrConnectorReferenceNotFound
+	}
+	index, err := readConnectorReferenceIndex(path)
+	if err != nil {
+		return ConnectorReference{}, err
+	}
+	keys := make([]string, 0, len(index.Entries))
+	for key := range index.Entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	mismatch := false
+	for _, key := range keys {
+		entry := index.Entries[key]
+		if !entry.External || entry.ConnectorID != connectorID || connectorReferenceKey(entry.ConnectorID, entry.Field) != key {
+			continue
+		}
+		canonical, ok := ExternalSecretRef(entry.SecretBackend, credentialRef)
+		if !ok || canonical != entry.SecretRef {
+			continue
+		}
+		if entry.SecretBackend != backend {
+			mismatch = true
+			continue
+		}
+		if validateConnectorReference(entry) != nil {
+			return ConnectorReference{}, errors.New("credential index entry is invalid")
+		}
+		return entry, nil
+	}
+	if mismatch {
+		return ConnectorReference{}, ErrConnectorReferenceMismatch
+	}
+	return ConnectorReference{}, ErrConnectorReferenceNotFound
+}
+
+// ExternalSecretRef returns the store reference for an external credential_ref
+// in backend. The catalog sends a bare name (contract.ValidateCredentialRef
+// rejects a URL scheme), which the runtime qualifies from its one configured
+// backend:
+//   - aws-secrets-manager: <name> becomes aws-secrets-manager:///<name> in the
+//     runtime's default region;
+//   - azure-key-vault: <name> becomes <KEI_SECRETS_AZURE_VAULT_URL>/secrets/<name>,
+//     and is unresolvable while that variable is unset;
+//   - gcp-secret-manager: projects/<p>/secrets/<s> is already a store ref.
+//
+// A ref the backend already accepts is used as is. Anything else reports false.
+func ExternalSecretRef(backend, ref string) (string, bool) {
+	if ref == "" || strings.HasPrefix(ref, keiManagedRefPrefix) {
+		return "", false
+	}
+	if secrets.ValidateRef(backend, ref) == nil {
+		return ref, true
+	}
+	if strings.Contains(ref, "://") {
+		return "", false
+	}
+	var canonical string
+	switch backend {
+	case "aws-secrets-manager":
+		canonical = "aws-secrets-manager:///" + strings.TrimPrefix(ref, "/")
+	case "azure-key-vault":
+		vault := secrets.ConfiguredAzureVaultURL()
+		if vault == "" || !azureSecretName.MatchString(ref) {
+			return "", false
+		}
+		canonical = vault + "/secrets/" + ref
+	default:
+		return "", false
+	}
+	if secrets.ValidateRef(backend, canonical) != nil {
+		return "", false
+	}
+	return canonical, true
+}
+
+// azureSecretName is a Key Vault secret name: 1-127 letters, digits and dashes.
+var azureSecretName = regexp.MustCompile(`^[0-9A-Za-z-]{1,127}$`)
+
+// needsAzureVaultURL reports whether ref is a bare Azure secret name that only
+// KEI_SECRETS_AZURE_VAULT_URL can qualify, and that variable is unusable.
+func needsAzureVaultURL(backend, ref string) bool {
+	return backend == "azure-key-vault" && secrets.ConfiguredAzureVaultURL() == "" && azureSecretName.MatchString(ref)
 }
 
 // ConnectorIndexPath is the connector reference index kei-proxy credential
@@ -122,7 +252,9 @@ const keiManagedRefPrefix = "kei://connectors/"
 // ResolvedExternalConnectorIDs returns the distinct connector ids whose
 // external credential_ref this runtime has actually resolved through
 // credential sync: the connector reference index records a delivery only
-// after the secret was written to the tenant store and validated. Entries
+// after the secret was written to the tenant store and validated, and an
+// External entry only after the customer's ref was found in the configured
+// store (HAI-1000). Entries
 // whose resolved reference is kei-managed are excluded, so a reported id
 // always names an external credential_ref. A missing index means nothing has
 // resolved yet and yields no ids and no error; an unreadable or unsafe index
@@ -161,6 +293,12 @@ func connectorReferenceKey(connectorID, field string) string { return connectorI
 func validateConnectorReference(entry ConnectorReference) error {
 	if _, err := uuid.Parse(entry.ConnectorID); err != nil || !connectorSecretField.MatchString(entry.Field) || entry.SecretBackend == "" || secrets.ValidateRef(entry.SecretBackend, entry.SecretRef) != nil || entry.Generation < 0 {
 		return errors.New("connector credential reference is invalid")
+	}
+	if entry.External {
+		if strings.HasPrefix(entry.SecretRef, keiManagedRefPrefix) {
+			return errors.New("external connector credential reference is kei-managed")
+		}
+		return nil
 	}
 	if !connectorSecretRefNamesField(entry.SecretRef, entry.ConnectorID, entry.Field) {
 		return errors.New("connector credential reference does not match its field")

@@ -71,14 +71,30 @@ func (r SecretResolver) Resolve(ctx context.Context, c policybundle.Connector) (
 	if contract.CredentialSource(c.CredentialSource) != contract.CredentialSourceOpaqueRef {
 		return "", &SecretError{"descriptor_invalid", "the connector does not use a tenant-stored credential"}
 	}
-	connectorID, field, ok := ParseConnectorRef(c.CredentialRef)
-	if !ok || connectorID != c.ID || c.CredentialBackend == "" {
+	if c.CredentialBackend == "" {
+		return "", &SecretError{"descriptor_invalid", "the descriptor's credential reference does not name this connector"}
+	}
+	var lookup func() (runtimecredentials.ConnectorReference, error)
+	if connectorID, field, ok := ParseConnectorRef(c.CredentialRef); ok {
+		if connectorID != c.ID {
+			return "", &SecretError{"descriptor_invalid", "the descriptor's credential reference does not name this connector"}
+		}
+		lookup = func() (runtimecredentials.ConnectorReference, error) {
+			return runtimecredentials.ReadConnectorReference(r.IndexPath, connectorID, field)
+		}
+	} else if c.CredentialRef != "" && !strings.HasPrefix(c.CredentialRef, connectorRefPrefix) {
+		// An external credential_ref (HAI-1000): the customer's own secret,
+		// found only once credential sync resolved it for this connector.
+		lookup = func() (runtimecredentials.ConnectorReference, error) {
+			return runtimecredentials.ReadExternalConnectorReference(r.IndexPath, c.ID, c.CredentialBackend, c.CredentialRef)
+		}
+	} else {
 		return "", &SecretError{"descriptor_invalid", "the descriptor's credential reference does not name this connector"}
 	}
 	if r.IndexPath == "" || r.Store == nil {
 		return "", &SecretError{"credential_unavailable", "the connector credential is not available"}
 	}
-	entry, err := runtimecredentials.ReadConnectorReference(r.IndexPath, connectorID, field)
+	entry, err := lookup()
 	if errors.Is(err, runtimecredentials.ErrConnectorReferenceMismatch) {
 		return "", &SecretError{"credential_backend_mismatch", "the delivered credential does not match the descriptor"}
 	}

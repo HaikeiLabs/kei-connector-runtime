@@ -568,6 +568,21 @@ never appears in an error or log line.
 - Unknown value: the runtime fails at startup with a clear error naming the
   offending value.
 
+### External credential refs
+
+A connector whose `credential_ref` is external (a secret the customer keeps in
+their own store) arrives from the catalog as a bare name. `kei-proxy credential
+sync` qualifies it from the configured backend and checks it exists (read
+only) before the connector is activated:
+
+- `aws-secrets-manager`: `<name>` reads `aws-secrets-manager:///<name>` in the
+  runtime's default region.
+- `azure-key-vault`: `<name>` reads `<KEI_SECRETS_AZURE_VAULT_URL>/secrets/<name>`.
+  Set `KEI_SECRETS_AZURE_VAULT_URL=https://<vault>.vault.azure.net`; while it
+  is unset the refs stay unresolved and sync prints one warning naming the
+  variable.
+- `gcp-secret-manager`: `projects/<p>/secrets/<s>` is used as is.
+
 ## GCP Secret Manager backend
 
 The runtime's tenant secret store supports `gcp-secret-manager` alongside
