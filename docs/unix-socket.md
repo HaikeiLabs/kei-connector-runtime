@@ -52,6 +52,16 @@ and `resource_id` in the same decision. This is decision-only: it returns no
 credential and does not authorize `connector_binding` tools or provide an
 execution route.
 
+Canonical MCP targets use `tool: "mcp:<connector-slug>.<upstream-tool-name>"`
+on this same decision-only socket. The runtime accepts them only when the
+verified v2 bundle contains that MCP connector and its approved manifest lists
+the exact upstream tool. It then evaluates `harness_policies` using the
+canonical target and the request's harness kind. This is not the generic
+unregistered-tool matcher: an unapproved method, missing connector, or missing
+manifest is denied before policy matching. The harness keeps the MCP client and
+executes the upstream call itself after a permit; the runtime never receives or
+proxies the MCP payload.
+
 (The ADR-035 preflight/consume plan routes were removed with the connector
 invoke path in HAI-724; they are no longer served.)
 

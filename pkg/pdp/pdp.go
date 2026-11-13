@@ -273,6 +273,48 @@ func (e *Evaluator) AuthorizeV2UnregisteredTool(ctx context.Context, req Request
 	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: ReasonCode(d.ReasonCode), DenySource: denySource(ReasonCode(d.ReasonCode)), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
 }
 
+// AuthorizeV2MCP evaluates one canonical MCP slug/tool identity for a live
+// named session. The verified bundle must contain the connector and explicitly
+// approved tool; registry discovery alone never grants permission.
+func (e *Evaluator) AuthorizeV2MCP(ctx context.Context, sessionID, slug, tool, agentID, harnessKind string) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
+	if sessionID == DefaultSession {
+		return Decision{Reason: "v2 MCP authorization requires a named session", ReasonCode: ReasonSessionRequired, DenySource: "identity"}, nil
+	}
+	if live, reason := e.sessionLive(sessionID); !live {
+		return sessionDenial(reason), nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return stateDenial(state), nil
+	}
+	if v.Payload.Schema != "kei.policy-bundle/v2" {
+		return Decision{Reason: "MCP authorization requires a verified v2 policy bundle", ReasonCode: ReasonToolNotRegistered, DenySource: "registry", BundleState: string(state)}, nil
+	}
+	connector, ok := v.MCPConnector(slug)
+	if !ok || connector.MCP == nil || connector.MCP.ApprovedManifestHash == "" {
+		return Decision{Reason: "MCP connector has no approved manifest", ReasonCode: ReasonToolNotRegistered, DenySource: "registry", BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+	}
+	approved := false
+	for _, candidate := range connector.MCP.ApprovedTools {
+		if candidate.Name == tool {
+			approved = true
+			break
+		}
+	}
+	if !approved {
+		return Decision{Reason: "MCP tool is not in the approved manifest", ReasonCode: ReasonToolNotRegistered, DenySource: "registry", BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+	}
+	var subject *policybundle.SessionSubject
+	if current, ok := e.sessions.Get(sessionID); ok {
+		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+	}
+	d := v.EvaluateV2MCP(slug, tool, agentID, harnessKind, subject, e.now().UTC())
+	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: ReasonCode(d.ReasonCode), DenySource: denySource(ReasonCode(d.ReasonCode)), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+}
+
 // IsV2UnregisteredTool reports whether name has no tool registration in the
 // currently verified v2 bundle.
 func (e *Evaluator) IsV2UnregisteredTool(name string) bool {

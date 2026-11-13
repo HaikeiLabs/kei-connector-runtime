@@ -36,6 +36,9 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 			return pdp.Decision{ReasonCode: pdp.ReasonSubjectUnlinked, DenySource: "identity", Reason: "the principal is no longer present for this agent", BundleState: "ready"}, auditTrustedAgent, false, nil
 		}
 	}
+	if strings.HasPrefix(req.Tool, "mcp:") {
+		return l.decideMCPTool(ctx, sessionID, req)
+	}
 	target := pdp.Target{Tool: req.Tool, Action: req.Action, Resource: req.Resource}
 	if req.Connector != nil {
 		target.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
@@ -63,6 +66,59 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		TrustedAgent: l.trustedAgentID(), OwnerSession: l.isOwnerSession(sessionID),
 	})
 	return res.Decision, auditTrustedAgent || res.AuditTrustedAgent, res.Unmatched, err
+}
+
+// decideMCPTool evaluates the canonical mcp:<connector-slug>.<upstream-tool>
+// target against a verified approved manifest and canonical MCP policy. Pi's
+// adapter resolves generated names to this identity before calling the socket.
+func (l *LocalPDP) decideMCPTool(ctx context.Context, sessionID string, req socketAuthorizeRequest) (pdp.Decision, bool, bool, error) {
+	deny := func(code pdp.ReasonCode, reason string) (pdp.Decision, bool, bool, error) {
+		return pdp.Decision{ReasonCode: code, DenySource: "policy", Reason: reason, BundleState: "ready"}, true, false, nil
+	}
+	if req.Action != "" || req.Resource != "" || req.Connector != nil || req.ShellCommand != "" {
+		return deny("invalid_mcp_request", "canonical MCP authorization accepts only an exact tool target")
+	}
+	if !validArgumentDigest(req.ToolArgsDigest) {
+		return deny(pdp.ReasonInvalidToolArgsDigest, "MCP authorization requires a SHA-256 argument digest")
+	}
+	if req.Framework == "" {
+		return deny("invalid_mcp_request", "MCP authorization requires a harness identity")
+	}
+	target := strings.TrimPrefix(req.Tool, "mcp:")
+	slug, tool, ok := strings.Cut(target, ".")
+	if !ok || !validMCPSlug(slug) || !validMCPToolName(tool) {
+		return deny("invalid_mcp_request", "MCP target must name an exact connector slug and tool")
+	}
+	trusted := l.trustedAgentID()
+	if trusted == "" {
+		return deny("agent_mismatch", "runtime installation has no default agent")
+	}
+	d, err := l.evaluator.Load().AuthorizeV2MCP(ctx, sessionID, slug, tool, trusted, req.Framework)
+	return d, true, false, err
+}
+
+func validMCPSlug(value string) bool {
+	if len(value) < 2 || len(value) > 48 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, r := range value[1:] {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPToolName(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // shellKindForTool names the harness kind whose shell command line the local
