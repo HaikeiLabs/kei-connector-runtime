@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -188,10 +189,16 @@ func ReadExternalConnectorReference(path, connectorID, backend, credentialRef st
 }
 
 // ExternalSecretRef returns the store reference for an external credential_ref
-// in backend. A ref the backend already accepts is used as is. A bare AWS
-// Secrets Manager name (no scheme) is the backend's own naming and maps to
-// aws-secrets-manager:///<name> in the runtime's default region. Anything else
-// is not resolvable and reports false.
+// in backend. The catalog sends a bare name (contract.ValidateCredentialRef
+// rejects a URL scheme), which the runtime qualifies from its one configured
+// backend:
+//   - aws-secrets-manager: <name> becomes aws-secrets-manager:///<name> in the
+//     runtime's default region;
+//   - azure-key-vault: <name> becomes <KEI_SECRETS_AZURE_VAULT_URL>/secrets/<name>,
+//     and is unresolvable while that variable is unset;
+//   - gcp-secret-manager: projects/<p>/secrets/<s> is already a store ref.
+//
+// A ref the backend already accepts is used as is. Anything else reports false.
 func ExternalSecretRef(backend, ref string) (string, bool) {
 	if ref == "" || strings.HasPrefix(ref, keiManagedRefPrefix) {
 		return "", false
@@ -199,13 +206,35 @@ func ExternalSecretRef(backend, ref string) (string, bool) {
 	if secrets.ValidateRef(backend, ref) == nil {
 		return ref, true
 	}
-	if backend == "aws-secrets-manager" && !strings.Contains(ref, "://") {
-		canonical := "aws-secrets-manager:///" + strings.TrimPrefix(ref, "/")
-		if secrets.ValidateRef(backend, canonical) == nil {
-			return canonical, true
-		}
+	if strings.Contains(ref, "://") {
+		return "", false
 	}
-	return "", false
+	var canonical string
+	switch backend {
+	case "aws-secrets-manager":
+		canonical = "aws-secrets-manager:///" + strings.TrimPrefix(ref, "/")
+	case "azure-key-vault":
+		vault := secrets.ConfiguredAzureVaultURL()
+		if vault == "" || !azureSecretName.MatchString(ref) {
+			return "", false
+		}
+		canonical = vault + "/secrets/" + ref
+	default:
+		return "", false
+	}
+	if secrets.ValidateRef(backend, canonical) != nil {
+		return "", false
+	}
+	return canonical, true
+}
+
+// azureSecretName is a Key Vault secret name: 1-127 letters, digits and dashes.
+var azureSecretName = regexp.MustCompile(`^[0-9A-Za-z-]{1,127}$`)
+
+// needsAzureVaultURL reports whether ref is a bare Azure secret name that only
+// KEI_SECRETS_AZURE_VAULT_URL can qualify, and that variable is unusable.
+func needsAzureVaultURL(backend, ref string) bool {
+	return backend == "azure-key-vault" && secrets.ConfiguredAzureVaultURL() == "" && azureSecretName.MatchString(ref)
 }
 
 // ConnectorIndexPath is the connector reference index kei-proxy credential

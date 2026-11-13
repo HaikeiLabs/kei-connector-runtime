@@ -9,6 +9,7 @@ package credentials
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -37,6 +38,9 @@ type Config struct {
 	// SecretsBackend is the runtime's one configured secret backend
 	// (KEI_SECRETS_BACKEND). External credential refs resolve only in it.
 	SecretsBackend string
+	// Warnings receives operator warnings that name configuration, never a
+	// ref or a value; nil means os.Stderr.
+	Warnings io.Writer
 }
 
 // connectorIndexPath is cfg's connector reference index, defaulting to the

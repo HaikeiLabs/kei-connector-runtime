@@ -93,3 +93,19 @@ func TestSecretResolverExternalRefFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestSecretResolverReleasesABareAzureExternalRef(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "https://acme.vault.azure.net")
+	const qualified = "https://acme.vault.azure.net/secrets/crm-api-key"
+	index := runtimecredentials.ConnectorIndexPath(filepath.Join(t.TempDir(), "state"))
+	if err := runtimecredentials.WriteConnectorReference(index, runtimecredentials.ConnectorReference{ConnectorID: externalConnectorID, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: qualified, External: true}); err != nil {
+		t.Fatal(err)
+	}
+	store := &externalSecretStore{values: map[string]string{"azure-key-vault|" + qualified: externalValue}}
+	descriptor := externalDescriptor()
+	descriptor.CredentialRef, descriptor.CredentialBackend = "crm-api-key", "azure-key-vault"
+	got, err := SecretResolver{IndexPath: index, Store: store}.Resolve(context.Background(), descriptor)
+	if err != nil || got != externalValue || len(store.reads) != 1 {
+		t.Fatalf("got=%q err=%v reads=%v", got, err, store.reads)
+	}
+}

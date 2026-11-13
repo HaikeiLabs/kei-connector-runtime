@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -13,6 +14,11 @@ import (
 // local bring-your-own harness that authenticates with SSO identity) leaves
 // the variable unset and every store call fails closed.
 const secretsBackendEnvVar = "KEI_SECRETS_BACKEND"
+
+// AzureVaultURLEnvVar optionally names the Key Vault
+// (https://<vault>.vault.azure.net) that a bare external secret name resolves
+// in when KEI_SECRETS_BACKEND is azure-key-vault (HAI-1000).
+const AzureVaultURLEnvVar = "KEI_SECRETS_AZURE_VAULT_URL"
 
 // ValidateBackendName reports whether backend is a legal value for
 // KEI_SECRETS_BACKEND: empty (no secret store) or one of the configured
@@ -31,6 +37,21 @@ func ValidateBackendName(backend string) error {
 // one backend this runtime's store serves, or "" when none is configured.
 func ConfiguredBackendName() string {
 	return strings.TrimSpace(os.Getenv(secretsBackendEnvVar))
+}
+
+// ConfiguredAzureVaultURL returns the KEI_SECRETS_AZURE_VAULT_URL vault origin
+// (https://<host>, no trailing slash), or "" when it is unset or is not a bare
+// https origin.
+func ConfiguredAzureVaultURL() string {
+	raw := strings.TrimRight(strings.TrimSpace(os.Getenv(AzureVaultURLEnvVar)), "/")
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return ""
+	}
+	return "https://" + u.Host
 }
 
 // NewStoreFromEnv builds the runtime's single configured secret store from

@@ -13,9 +13,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -138,7 +140,13 @@ func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (
 	indexPath := connectorIndexPath(cfg)
 	resolved := map[string]ConnectorReference{} // by index key
 	resolvedIDs, unresolvedIDs := map[string]bool{}, map[string]bool{}
+	warnedVaultURL := false
 	for _, ref := range refs {
+		if !warnedVaultURL && needsAzureVaultURL(strings.TrimSpace(cfg.SecretsBackend), ref.CredentialRef) {
+			// One warning per sync, naming the variable and never a ref.
+			warnedVaultURL = true
+			fmt.Fprintf(warningWriter(cfg), "warning: external credential refs are bare Azure Key Vault names; set %s to resolve them\n", secrets.AzureVaultURLEnvVar)
+		}
 		entry, ok := resolveExternalRef(ctx, cfg, store, ref)
 		if !ok {
 			if _, err := uuid.Parse(ref.ConnectorID); err == nil {
@@ -219,6 +227,13 @@ func writeExternalReference(path string, entry ConnectorReference) error {
 		return fmt.Errorf("persist external credential reference failed")
 	}
 	return nil
+}
+
+func warningWriter(cfg Config) io.Writer {
+	if cfg.Warnings != nil {
+		return cfg.Warnings
+	}
+	return os.Stderr
 }
 
 func sortedIDs(set map[string]bool) []string {

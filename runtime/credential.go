@@ -73,6 +73,7 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg CredentialCo
 		PrivateKey:      cfg.SyncPrivateKey(),
 		Timeout:         *timeout,
 		SecretsBackend:  secrets.ConfiguredBackendName(),
+		Warnings:        stderr,
 	}
 	output, err := credentials.Sync(context.Background(), syncConfig, store, func(ctx context.Context) (string, error) {
 		identity, err := runtimeClient.WhoAmI(ctx, cfg.Token())

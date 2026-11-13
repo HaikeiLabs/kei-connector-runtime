@@ -337,3 +337,68 @@ func captureStderr(t *testing.T, fn func()) string {
 	_, _ = buf.ReadFrom(r)
 	return buf.String()
 }
+
+const (
+	azureVaultURL  = "https://acme.vault.azure.net"
+	azureBareName  = "crm-api-key"
+	azureQualified = azureVaultURL + "/secrets/" + azureBareName
+)
+
+func azureCatalog(t *testing.T, names ...string) *externalRefsCatalog {
+	t.Helper()
+	ids := []string{extConnectorA, extConnectorB}
+	page := externalCredentialRefsPage{}
+	for i, name := range names {
+		page.Refs = append(page.Refs, ExternalCredentialRef{ConnectorID: ids[i], Field: "api_key", CredentialRef: name, Status: "pending"})
+	}
+	return &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{"": page}}
+}
+
+func TestResolveExternalRefsQualifiesABareAzureNameWithTheVaultURL(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", azureVaultURL)
+	cfg := externalConfig(t, azureCatalog(t, azureBareName).server(t).URL)
+	cfg.SecretsBackend = "azure-key-vault"
+	store := &refStore{known: map[string]bool{azureQualified: true}}
+	out, err := ResolveExternalRefs(context.Background(), cfg, store)
+	if err != nil || len(out.Resolved) != 1 {
+		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
+	}
+	entry, err := ReadExternalConnectorReference(cfg.ConnectorIndexPath, extConnectorA, "azure-key-vault", azureBareName)
+	if err != nil || entry.SecretRef != azureQualified || !entry.External {
+		t.Fatalf("entry=%+v err=%v", entry, err)
+	}
+}
+
+func TestResolveExternalRefsWarnsOnceWithoutAnAzureVaultURL(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	cfg := externalConfig(t, azureCatalog(t, azureBareName, "billing-api-key").server(t).URL)
+	cfg.SecretsBackend = "azure-key-vault"
+	store := &refStore{known: map[string]bool{azureQualified: true}}
+	var out *ExternalRefsOutput
+	stderr := captureStderr(t, func() {
+		var err error
+		if out, err = ResolveExternalRefs(context.Background(), cfg, store); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(out.Resolved) != 0 || len(out.Unresolved) != 2 || len(store.validated) != 0 {
+		t.Fatalf("out=%+v validated=%v", out, store.validated)
+	}
+	if strings.Count(stderr, "KEI_SECRETS_AZURE_VAULT_URL") != 1 {
+		t.Fatalf("want exactly one warning naming the variable, got %q", stderr)
+	}
+	if strings.Contains(stderr, azureBareName) || strings.Contains(stderr, "billing-api-key") {
+		t.Fatalf("warning leaks a ref: %q", stderr)
+	}
+}
+
+func TestResolveExternalRefsAcceptsAGCPSchemelessRef(t *testing.T) {
+	const gcpRef = "projects/acme-prod/secrets/crm-api-key"
+	cfg := externalConfig(t, azureCatalog(t, gcpRef).server(t).URL)
+	cfg.SecretsBackend = "gcp-secret-manager"
+	store := &refStore{known: map[string]bool{gcpRef: true}}
+	out, err := ResolveExternalRefs(context.Background(), cfg, store)
+	if err != nil || len(out.Resolved) != 1 {
+		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
+	}
+}
