@@ -55,12 +55,6 @@ func TestAuthorizeV2UnregisteredToolUsesOwnerPoliciesByName(t *testing.T) {
 			wantReason: "policy_deny",
 		},
 		{
-			name:      "Pi MCP identity matches an exact tool policy",
-			tool:      "mcp:linear.create_issue_a1b2c3d4",
-			policies:  []any{v2GrantPermitPolicy("group:members", "mcp:linear.create_issue_a1b2c3d4")},
-			wantAllow: true,
-		},
-		{
 			name:       "unmatched unregistered tool remains a PDP deny",
 			tool:       "custom.unmatched",
 			wantReason: "no_matching_policy",

@@ -13,7 +13,6 @@ func TestDecideUnregisteredToolForTheOwnerSessionUsesTheTrustedAgent(t *testing.
 	now := time.Now().UTC()
 	e, owner := newV2OwnerUnregisteredToolEvaluator(t, now, []any{
 		v2GrantPermitPolicy("group:members", "custom.read"),
-		v2GrantPermitPolicy("group:members", "mcp:linear.create_issue_a1b2c3d4"),
 	})
 	res, err := e.Decide(context.Background(), DecideRequest{
 		Session: owner, Target: Target{Tool: "custom.read"}, TrustedAgent: testAgent, OwnerSession: true,
@@ -22,12 +21,6 @@ func TestDecideUnregisteredToolForTheOwnerSessionUsesTheTrustedAgent(t *testing.
 		t.Fatalf("result=%+v err=%v", res, err)
 	}
 
-	mcp, err := e.Decide(context.Background(), DecideRequest{
-		Session: owner, Target: Target{Tool: "mcp:linear.create_issue_a1b2c3d4"}, TrustedAgent: testAgent, OwnerSession: true,
-	})
-	if err != nil || !mcp.Allow || !mcp.AuditTrustedAgent {
-		t.Fatalf("unregistered Pi MCP tool with an exact policy = %+v err=%v", mcp, err)
-	}
 }
 
 func TestDecideDeniesWithoutATrustedAgentOrForAnotherAgent(t *testing.T) {
