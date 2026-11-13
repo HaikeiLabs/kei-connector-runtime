@@ -27,6 +27,12 @@ func ValidateBackendName(backend string) error {
 	return nil
 }
 
+// ConfiguredBackendName returns the trimmed KEI_SECRETS_BACKEND value: the
+// one backend this runtime's store serves, or "" when none is configured.
+func ConfiguredBackendName() string {
+	return strings.TrimSpace(os.Getenv(secretsBackendEnvVar))
+}
+
 // NewStoreFromEnv builds the runtime's single configured secret store from
 // KEI_SECRETS_BACKEND. Unset (or blank) builds a store that fails every call
 // with ErrUnavailable; an unknown value is a startup error.

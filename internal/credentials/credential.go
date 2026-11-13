@@ -10,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -35,6 +34,22 @@ type Config struct {
 	// ConnectorIndexPath is the private runtime-local map from connector fields
 	// to their already delivered secret-store references.
 	ConnectorIndexPath string
+	// SecretsBackend is the runtime's one configured secret backend
+	// (KEI_SECRETS_BACKEND). External credential refs resolve only in it.
+	SecretsBackend string
+}
+
+// connectorIndexPath is cfg's connector reference index, defaulting to the
+// runtime state directory.
+func connectorIndexPath(cfg Config) string {
+	if cfg.ConnectorIndexPath != "" {
+		return cfg.ConnectorIndexPath
+	}
+	stateDir := os.Getenv("KEI_RUNTIME_STATE_DIR")
+	if stateDir == "" {
+		stateDir = statedir.DefaultPathOS()
+	}
+	return ConnectorIndexPath(stateDir)
 }
 
 // InstallationResolver returns the runtime installation the runtime token
@@ -160,6 +175,9 @@ type SyncOutput struct {
 	Success       bool   `json:"success"`
 	Error         string `json:"error,omitempty"` // redacted error class only
 	ProcessedAt   string `json:"processed_at"`
+	// ExternalRefs is the external credential ref resolution that ran with
+	// this sync (HAI-1000); it names connectors, never a ref or a value.
+	ExternalRefs *ExternalRefsOutput `json:"external_refs,omitempty"`
 }
 
 // Sync processes at most one pending delivery. A returned error means the
@@ -313,14 +331,7 @@ func Sync(ctx context.Context, cfg Config, store secrets.Store, installation Ins
 		}, nil
 	}
 	if delivery.OperationKind == operationKindConnectorSecret {
-		if cfg.ConnectorIndexPath == "" {
-			stateDir := os.Getenv("KEI_RUNTIME_STATE_DIR")
-			if stateDir == "" {
-				stateDir = statedir.DefaultPathOS()
-			}
-			cfg.ConnectorIndexPath = filepath.Join(stateDir, "connector-credentials.json")
-		}
-		if err := WriteConnectorReference(cfg.ConnectorIndexPath, ConnectorReference{
+		if err := WriteConnectorReference(connectorIndexPath(cfg), ConnectorReference{
 			ConnectorID: delivery.ConnectorID, Field: delivery.Field,
 			SecretBackend: delivery.SecretBackend, SecretRef: delivery.SecretRef,
 			Generation: delivery.Generation,

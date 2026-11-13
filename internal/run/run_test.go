@@ -403,3 +403,41 @@ func TestAppendRunAuditLogsMarshalError(t *testing.T) {
 		t.Fatalf("expected no stderr on success path, got %q", stderr.String())
 	}
 }
+
+// HAI-1000: kei-proxy run releases an external credential_ref that credential
+// sync resolved, reading the secret at that external ref.
+func TestDeliveredRunResolverReadsAnExternalRef(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000001000"
+	externalRef := "aws-secrets-manager://us-east-1/customer/crm/api-key"
+	index := filepath.Join(t.TempDir(), "connector-credentials.json")
+	if err := credentials.WriteConnectorReference(index, credentials.ConnectorReference{ConnectorID: id, Field: "api_key", SecretBackend: "aws-secrets-manager", SecretRef: externalRef, External: true}); err != nil {
+		t.Fatal(err)
+	}
+	value := "fake-external-value"
+	store := &recordingRunSecretStore{value: value}
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: externalRef, CredentialSource: contract.CredentialSourceOpaqueRef}, CredentialBackend: "aws-secrets-manager"}}}
+	got, _, err := (deliveredRunResolver{cfg: Config{RuntimeStateDir: filepath.Dir(index)}, store: store, authorization: auth}).Resolve(context.Background(), id, "api_key")
+	if err != nil || got != value || len(store.refs) != 1 || store.refs[0] != externalRef {
+		t.Fatalf("resolve=%q err=%v refs=%v", got, err, store.refs)
+	}
+	// Another backend on the descriptor is refused before any read.
+	auth.response.Connector.CredentialBackend = "azure-key-vault"
+	store.refs = nil
+	if _, _, err := (deliveredRunResolver{cfg: Config{RuntimeStateDir: filepath.Dir(index)}, store: store, authorization: auth}).Resolve(context.Background(), id, "api_key"); err == nil || len(store.refs) != 0 {
+		t.Fatalf("backend mismatch: err=%v refs=%v", err, store.refs)
+	}
+}
+
+type recordingRunSecretStore struct {
+	value string
+	refs  []string
+}
+
+func (s *recordingRunSecretStore) Get(_ context.Context, _, ref string) (*string, error) {
+	s.refs = append(s.refs, ref)
+	v := s.value
+	return &v, nil
+}
+func (*recordingRunSecretStore) Put(context.Context, string, string, string) error { return nil }
+func (*recordingRunSecretStore) Delete(context.Context, string, string) error      { return nil }
+func (*recordingRunSecretStore) Validate(context.Context, string, string) error    { return nil }
