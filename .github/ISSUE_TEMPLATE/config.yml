@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: mailto:security@haikeilabs.com
+    about: Report security issues privately by email, not in a public issue.
+  - name: Questions and discussion
+    url: https://discord.gg/g6QaTYWXDa
+    about: Ask questions and discuss larger changes on Discord.
+  - name: Documentation
+    url: https://docs.haikeilabs.com
+    about: Kei and kei-proxy documentation.

@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in kei-proxy does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security issues privately to security@haikeilabs.com, not here. See SECURITY.md.
+        Remove tokens, credentials and customer data from everything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: kei-proxy version
+      description: Output of `kei-proxy version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS arm64, Linux x86_64, container image, ...
+    validations:
+      required: true
+  - type: input
+    id: harness
+    attributes:
+      label: Harness
+      description: The program that runs the agent, if one is involved.
+      placeholder: Claude Code, Codex, OpenCode, Pi, Agentware, Open WebUI, none
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command you ran and what it printed, including the exit code.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: policy-state
+    attributes:
+      label: Policy state
+      description: Output of `kei-proxy policy show`, if the bug involves an allow or deny.
+      render: json
