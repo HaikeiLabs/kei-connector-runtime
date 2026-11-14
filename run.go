@@ -55,6 +55,10 @@ func Main(buildVersion string, args []string) int {
 		return 1
 	}
 
+	if len(args) > 1 && isHelpArg(args[1]) && printCommandHelp(os.Stdout, args[0]) {
+		return 0
+	}
+
 	var code int
 	if args[0] == "authorize" {
 		code = runAuthorize(args[1:])

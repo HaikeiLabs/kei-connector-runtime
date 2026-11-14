@@ -21,8 +21,12 @@ func runCollector(args []string) int {
 	timeout := fs.Int("timeout", 30, "control-plane request timeout in seconds")
 	poll := fs.Bool("poll", false, "poll for new records until terminated")
 	pollInterval := fs.Duration("poll-interval", time.Minute, "poll interval when --poll is enabled")
+	flagUsage(fs, "kei-proxy collector [flags]")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 
