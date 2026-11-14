@@ -12,6 +12,7 @@ package credentials
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -110,6 +111,23 @@ func (c *externalRefsClient) ListExternalCredentialRefs(ctx context.Context, tok
 	return nil, false, fmt.Errorf("list external credential refs exceeded %d pages", maxExternalRefPages)
 }
 
+// UnresolvedReason is a coarse, closed reason an external ref did not resolve.
+type UnresolvedReason string
+
+const (
+	ReasonNotFound         UnresolvedReason = "not_found"
+	ReasonPermissionDenied UnresolvedReason = "permission_denied"
+	ReasonNoBackend        UnresolvedReason = "no_backend"
+	ReasonUnqualifiedName  UnresolvedReason = "unqualified_name"
+	ReasonBackendError     UnresolvedReason = "backend_error"
+)
+
+// UnresolvedExternalRef names an unresolved connector and why.
+type UnresolvedExternalRef struct {
+	ConnectorID string           `json:"connector_id"`
+	Reason      UnresolvedReason `json:"reason"`
+}
+
 // ExternalRefsOutput is the redacted result of one external-ref resolution.
 // It names connectors only, never a ref or a value.
 type ExternalRefsOutput struct {
@@ -118,6 +136,8 @@ type ExternalRefsOutput struct {
 	Listed     bool     `json:"listed"`
 	Resolved   []string `json:"resolved_connector_ids,omitempty"`
 	Unresolved []string `json:"unresolved_connector_ids,omitempty"`
+	// UnresolvedRefs gives each unresolved connector a coarse reason.
+	UnresolvedRefs []UnresolvedExternalRef `json:"unresolved,omitempty"`
 	// Removed counts external index entries removed as stale.
 	Removed int `json:"removed,omitempty"`
 }
@@ -139,7 +159,10 @@ func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (
 	}
 	indexPath := connectorIndexPath(cfg)
 	resolved := map[string]ConnectorReference{} // by index key
-	resolvedIDs, unresolvedIDs := map[string]bool{}, map[string]bool{}
+	resolvedIDs := map[string]bool{}
+	// unresolvedReasons keeps the first reason seen per connector, in the
+	// catalog's order.
+	unresolvedReasons := map[string]UnresolvedReason{}
 	warnedVaultURL := false
 	for _, ref := range refs {
 		if !warnedVaultURL && needsAzureVaultURL(strings.TrimSpace(cfg.SecretsBackend), ref.CredentialRef) {
@@ -147,10 +170,12 @@ func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (
 			warnedVaultURL = true
 			fmt.Fprintf(warningWriter(cfg), "warning: external credential refs are bare Azure Key Vault names; set %s to resolve them\n", secrets.AzureVaultURLEnvVar)
 		}
-		entry, ok := resolveExternalRef(ctx, cfg, store, ref)
-		if !ok {
+		entry, reason := resolveExternalRef(ctx, cfg, store, ref)
+		if reason != "" {
 			if _, err := uuid.Parse(ref.ConnectorID); err == nil {
-				unresolvedIDs[ref.ConnectorID] = true
+				if _, seen := unresolvedReasons[ref.ConnectorID]; !seen {
+					unresolvedReasons[ref.ConnectorID] = reason
+				}
 			}
 			continue
 		}
@@ -172,30 +197,42 @@ func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (
 	out.Removed = removed
 	out.Resolved = sortedIDs(resolvedIDs)
 	for id := range resolvedIDs {
-		delete(unresolvedIDs, id)
+		delete(unresolvedReasons, id)
+	}
+	unresolvedIDs := make(map[string]bool, len(unresolvedReasons))
+	for id := range unresolvedReasons {
+		unresolvedIDs[id] = true
 	}
 	out.Unresolved = sortedIDs(unresolvedIDs)
+	for _, id := range out.Unresolved {
+		out.UnresolvedRefs = append(out.UnresolvedRefs, UnresolvedExternalRef{ConnectorID: id, Reason: unresolvedReasons[id]})
+	}
 	return out, nil
 }
 
 // resolveExternalRef checks that one listed ref exists in the configured
 // store. It only validates the ref; the value is never read into this
-// process's output.
-func resolveExternalRef(ctx context.Context, cfg Config, store secrets.Store, ref ExternalCredentialRef) (ConnectorReference, bool) {
+// process's output. It returns the index entry and an empty reason when the
+// ref resolves, otherwise a coarse reason that never carries the ref.
+func resolveExternalRef(ctx context.Context, cfg Config, store secrets.Store, ref ExternalCredentialRef) (ConnectorReference, UnresolvedReason) {
 	backend := strings.TrimSpace(cfg.SecretsBackend)
 	if backend == "" || store == nil {
-		return ConnectorReference{}, false
+		return ConnectorReference{}, ReasonNoBackend
 	}
 	if _, err := uuid.Parse(ref.ConnectorID); err != nil || !connectorSecretField.MatchString(ref.Field) {
-		return ConnectorReference{}, false
+		// Malformed catalog data: no closer reason fits.
+		return ConnectorReference{}, ReasonBackendError
 	}
 	secretRef, ok := ExternalSecretRef(backend, ref.CredentialRef)
 	if !ok {
-		return ConnectorReference{}, false
+		if refNamesAnotherBackend(backend, ref.CredentialRef) {
+			return ConnectorReference{}, ReasonNoBackend
+		}
+		return ConnectorReference{}, ReasonUnqualifiedName
 	}
 	entry := ConnectorReference{ConnectorID: ref.ConnectorID, Field: ref.Field, SecretBackend: backend, SecretRef: secretRef, External: true}
 	if validateConnectorReference(entry) != nil {
-		return ConnectorReference{}, false
+		return ConnectorReference{}, ReasonUnqualifiedName
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -204,9 +241,34 @@ func resolveExternalRef(ctx context.Context, cfg Config, store secrets.Store, re
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := store.Validate(checkCtx, backend, secretRef); err != nil {
-		return ConnectorReference{}, false
+		return ConnectorReference{}, unresolvedReasonFor(err)
 	}
-	return entry, true
+	return entry, ""
+}
+
+// unresolvedReasonFor maps a store Validate error to a reason. Only the
+// sentinel is inspected; the error text is never used.
+func unresolvedReasonFor(err error) UnresolvedReason {
+	switch {
+	case errors.Is(err, secrets.ErrNotFound):
+		return ReasonNotFound
+	case errors.Is(err, secrets.ErrPermissionDenied):
+		return ReasonPermissionDenied
+	default:
+		return ReasonBackendError
+	}
+}
+
+// refNamesAnotherBackend reports whether ref is a well-formed reference for a
+// built-in backend other than the configured one: the ref needs a backend
+// this runtime does not run.
+func refNamesAnotherBackend(backend, ref string) bool {
+	for _, name := range secrets.DefaultBackendRegistry().Names() {
+		if name != backend && secrets.ValidateRef(name, ref) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // writeExternalReference records entry unless a Kei-delivered entry already

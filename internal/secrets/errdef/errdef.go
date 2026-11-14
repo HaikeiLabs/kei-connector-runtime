@@ -15,4 +15,8 @@ var (
 	ErrUnavailable = errors.New("secret store unavailable")
 	// ErrExists reports a write that conflicts with an existing secret.
 	ErrExists = errors.New("secret already exists")
+	// ErrPermissionDenied reports that the runtime's identity may not read
+	// (or write) the secret. Backends wrap it together with ErrUnavailable,
+	// so callers that only check ErrUnavailable keep failing closed.
+	ErrPermissionDenied = errors.New("secret permission denied")
 )
