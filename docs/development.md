@@ -4,7 +4,7 @@
 > checkout, which runs the Kei control plane (console, policy catalog, OIDC
 > bridge and PostgreSQL). Contributors without it can still build and test
 > the runtime: `go build ./...`, `go vet ./...` and `go test ./...` need no
-> control plane.
+> control plane. See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 `kei-proxy serve` listens on TCP port `8085` by default (next to its Unix
 socket) and requires the runtime installation token

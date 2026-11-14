@@ -106,6 +106,13 @@ Running the full local stack (control plane, runtime and Open WebUI) needs a
 private checkout and is maintainer-only; see
 [docs/development.md](docs/development.md).
 
+## Contributing
+
+Questions and design discussion go on [Discord](https://discord.gg/g6QaTYWXDa);
+bugs and feature requests go in GitHub issues. See
+[CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately; see
+[SECURITY.md](SECURITY.md).
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE).
