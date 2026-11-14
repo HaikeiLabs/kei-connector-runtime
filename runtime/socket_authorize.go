@@ -50,6 +50,8 @@ type socketAuthorizeRequest struct {
 	DelegationDepth int                       `json:"delegation_depth,omitempty"`
 	Framework       string                    `json:"framework,omitempty"`
 	ToolArgsDigest  string                    `json:"tool_args_digest,omitempty"`
+	ToolArgs        json.RawMessage           `json:"tool_args,omitempty"`
+	ToolContext     json.RawMessage           `json:"tool_context,omitempty"`
 	OnBehalfOf      string                    `json:"on_behalf_of,omitempty"`
 	// ShellCommand is accepted only over the tenant-local socket and is used
 	// solely to evaluate shell: policies. It is never copied to audit events.
@@ -887,12 +889,16 @@ func (l *LocalPDP) handlePolicyBundleStatus(w http.ResponseWriter) {
 
 func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, includeEnrollment bool) {
 	var req socketAuthorizeRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != authorizeRequestSchema {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != authorizeRequestSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+authorizeRequestSchema+" object with no unknown fields")
 		return
 	}
 	if (req.Tool == "") == (req.Connector == nil) || (req.Connector != nil && (req.Connector.ConnectorID == "" || req.Connector.Capability == "")) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs exactly one of tool or connector{connector_id, capability}")
+		return
+	}
+	if (len(req.ToolContext) > 0 && len(req.ToolArgs) == 0) || (len(req.ToolArgs) > 0 && !l.isV2ConnectorTool(req.Tool)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "tool_args and tool_context are only valid for a registered connector_binding tool")
 		return
 	}
 	if !validOnBehalfOf(req.OnBehalfOf) {
@@ -984,6 +990,23 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		preq.AgentID = trusted
 		d, err = e.AuthorizeV2UnregisteredTool(ctx, preq)
 		unmatched = d.ReasonCode == "no_matching_policy"
+	case req.Tool != "" && len(req.ToolArgs) > 0 && e.IsV2ConnectorTool(req.Tool):
+		trusted := l.trustedAgentID()
+		auditTrustedAgent = true
+		if trusted == "" {
+			d = pdp.Decision{ReasonCode: "agent_not_assigned", DenySource: "registry", Reason: "the trusted default agent is unavailable"}
+			break
+		}
+		if req.AgentID != "" && req.AgentID != trusted {
+			d = pdp.Decision{ReasonCode: "agent_mismatch", DenySource: "registry", Reason: "the request agent is not this installation's default agent"}
+			break
+		}
+		preq.AgentID = trusted
+		ctxData := req.ToolContext
+		if len(ctxData) == 0 {
+			ctxData = json.RawMessage(`{}`)
+		}
+		d, err = e.AuthorizeV2ConnectorPlan(ctx, preq, req.ToolArgs, ctxData)
 	case e.IsV2HarnessTool(req.Tool):
 		// The request's AgentID is untrusted: decide for the authenticated
 		// runtime identity's default agent, and deny a request that names
@@ -1034,6 +1057,14 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	return d, auditTrustedAgent, unmatched, err
 }
 
+func (l *LocalPDP) isV2ConnectorTool(name string) bool {
+	if l == nil {
+		return false
+	}
+	e := l.evaluator.Load()
+	return e != nil && e.IsV2ConnectorTool(name)
+}
+
 func (l *LocalPDP) isOwnerSession(sessionID string) bool {
 	if sessionID == "" || sessionID == pdp.DefaultSession {
 		return false
@@ -1069,6 +1100,21 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 	if !ok || verified.Payload.Schema != "kei.policy-bundle/v2" {
 		return denied("policy_bundle_invalid", "tool-bound credential release requires a verified v2 bundle")
 	}
+	route, isV2 := e.V2ToolRoute(req.Tool)
+	if !isV2 {
+		return denied("policy_bundle_invalid", "tool-bound credential release requires a verified v2 bundle")
+	}
+	if route == "harness_executor" {
+		d, err := e.AuthorizeV2HarnessToolForTarget(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted}, req.Connector.ConnectorID, req.Connector.Capability, req.Resource)
+		if err != nil {
+			return pdp.Decision{ReasonCode: "request_canceled", DenySource: "runtime_state", Reason: "request canceled", BundleState: "ready"}, true
+		}
+		return d, true
+	}
+	tool, toolOK := verified.V2ConnectorTool(req.Tool, time.Now().UTC())
+	if !toolOK || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID != req.Connector.ConnectorID {
+		return denied("tool_not_registered", "connector tool is not registered for this connector")
+	}
 	connector, ok := verified.Connector(req.Connector.ConnectorID)
 	if !ok {
 		return denied("connector_not_registered", "connector is not described in the verified v2 bundle")
@@ -1086,9 +1132,37 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 	if !capabilityFound {
 		return denied("capability_not_registered", "capability is not declared for the connector")
 	}
-	d, err := e.AuthorizeV2HarnessToolForTarget(ctx, pdp.Request{
+	capabilityRequired := false
+	for _, capability := range tool.RequiredCapabilities {
+		if capability == req.Connector.Capability {
+			capabilityRequired = true
+			break
+		}
+	}
+	if !capabilityRequired || len(req.ToolArgs) == 0 {
+		return denied("operation_plan_invalid", "credential release requires the complete registered tool arguments")
+	}
+	ctxData := req.ToolContext
+	if len(ctxData) == 0 {
+		ctxData = json.RawMessage(`{}`)
+	}
+	operations, planErr := policybundle.BuildV2Operations(tool, req.Connector.ConnectorID, req.ToolArgs, ctxData)
+	if planErr != nil {
+		return denied("operation_plan_invalid", "tool arguments do not satisfy the registered operation plan")
+	}
+	resourceMatches := false
+	for _, operation := range operations {
+		if operation.Capability == req.Connector.Capability && (operation.ProviderResource == req.Resource || operation.CredentialResource == req.Resource) {
+			resourceMatches = true
+			break
+		}
+	}
+	if !resourceMatches {
+		return denied("operation_plan_invalid", "credential resource does not match the registered operation plan")
+	}
+	d, err := e.AuthorizeV2ConnectorPlan(ctx, pdp.Request{
 		Session: sessionID, Tool: req.Tool, AgentID: trusted,
-	}, req.Connector.ConnectorID, req.Connector.Capability, req.Resource)
+	}, req.ToolArgs, ctxData)
 	if err != nil {
 		return pdp.Decision{ReasonCode: "request_canceled", DenySource: "runtime_state", Reason: "request canceled", BundleState: "ready"}, true
 	}
@@ -1104,12 +1178,16 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 // whether a credential was released, never the credential value.
 func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Request) {
 	var req socketAuthorizeRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != credentialReleaseRequestSchema {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != credentialReleaseRequestSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+credentialReleaseRequestSchema+" object with no unknown fields")
 		return
 	}
 	if req.Connector == nil || req.Connector.ConnectorID == "" || req.Connector.Capability == "" {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a connector{connector_id, capability} is required for a credential release")
+		return
+	}
+	if (len(req.ToolContext) > 0 && len(req.ToolArgs) == 0) || (len(req.ToolArgs) > 0 && !l.isV2ConnectorTool(req.Tool)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "tool_args and tool_context are only valid for a registered connector_binding tool")
 		return
 	}
 	if req.Resource == "" {

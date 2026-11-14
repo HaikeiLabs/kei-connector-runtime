@@ -17,6 +17,7 @@ var hints = map[string]string{
 	"no_grant_matched":             "No access grant covers this call. Ask an admin for a grant, or add a policy for this source and target.",
 	"subject_unlinked":             "Link this identity to the installation: open the enrollment link when the response carries one, or link the user on the console Users page.",
 	"preflight_required":           "Register the tool so the active policy bundle lists it (POST /v1/tools:register on the runtime socket, or kei harness sync --harness custom --manifest tools.json), then wait for the next bundle refresh.",
+	"operation_plan_invalid":       "The connector tool arguments or resource do not match the active registered plan; re-sync the tool manifest and retry with valid arguments.",
 }
 
 // Hint returns the next-step hint for a deny reason_code, or "" when the code

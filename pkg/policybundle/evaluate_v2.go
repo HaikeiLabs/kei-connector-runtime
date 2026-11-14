@@ -17,6 +17,8 @@ type Operation struct {
 	Resource           string
 	InputDigest        string
 	ProviderInput      json.RawMessage
+	ProviderResource   string
+	CredentialResource string
 	ResourceType       string
 	ResourceID         string
 	ResourceParent     string

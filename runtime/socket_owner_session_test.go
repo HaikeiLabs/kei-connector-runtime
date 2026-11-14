@@ -304,6 +304,93 @@ func TestSocketCredentialReleaseV2HarnessToolBindsTarget(t *testing.T) {
 	}
 }
 
+func TestSocketAuthorizeConnectorBindingUsesValidatedCompletePlan(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	var auditEvent json.RawMessage
+	local := NewLocalPDP(cfg, func(event json.RawMessage) { auditEvent = append(json.RawMessage(nil), event...) })
+	defer local.Close()
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
+	local.SetIdentity(identity)
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := v2PreflightBundle(t, now)
+	var bundleDoc map[string]any
+	if err := json.Unmarshal(bundle, &bundleDoc); err != nil {
+		t.Fatal(err)
+	}
+	policySet := bundleDoc["policy_set"].(map[string]any)
+	checks := policySet["checks"].([]any)
+	checks[0].(map[string]any)["selector"].(map[string]any)["resource_id"] = "acme/kei"
+	policySet["connectors"] = []any{map[string]any{
+		"id": "conn-fixture-0001", "provider": "github", "credential_source": "oauth", "account_model": "shared",
+		"capabilities": []any{map[string]any{"name": "repository.read", "mutating": false}},
+	}}
+	bundle, err = json.Marshal(bundleDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil || sessionResponse.SessionID == "" {
+		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+	}
+
+	authorize := func(contextData string) socketAuthorizeResponse {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"schema": authorizeRequestSchema, "tool": "github.read_repo", "action": "read",
+			"tool_args": json.RawMessage(`{}`), "tool_context": json.RawMessage(contextData),
+		})
+		req := withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(string(body))), sessionResponse.SessionID)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var response socketAuthorizeResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &response) != nil {
+			t.Fatalf("authorize status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		return response
+	}
+	if got := authorize(`{"repository":"acme/kei"}`); got.Decision != "permit" {
+		t.Fatalf("valid complete plan decision=%+v", got)
+	}
+	if strings.Contains(string(auditEvent), "acme/kei") {
+		t.Fatalf("raw plan arguments leaked into audit event: %s", auditEvent)
+	}
+	if got := authorize(`{"repository":"acme/kei","extra":"value"}`); got.Decision != "deny" || got.ReasonCode != "operation_plan_invalid" {
+		t.Fatalf("arguments outside the registered schema decision=%+v", got)
+	}
+	if got := authorize(`{"repository":"other/repo"}`); got.Decision != "deny" || got.ReasonCode != "no_matching_policy" {
+		t.Fatalf("resource outside the policy decision=%+v", got)
+	}
+	sessionID, err := local.Sessions.Create(pdp.Subject{UserID: "user-alice", Status: pdp.StatusLinked, Source: "discord", ExternalID: "discord-user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseRequest := socketAuthorizeRequest{
+		Tool: "github.read_repo", AgentID: "agent-fixture-0001", Resource: "repos/acme/kei",
+		Connector: &socketAuthorizeConnector{ConnectorID: "conn-fixture-0001", Capability: "repository.read"},
+		ToolArgs:  json.RawMessage(`{}`), ToolContext: json.RawMessage(`{"repository":"acme/kei"}`),
+	}
+	releaseDecision, _ := local.decideCredentialReleaseV2(context.Background(), sessionID, releaseRequest)
+	if !releaseDecision.Allow {
+		t.Fatalf("matching credential release target denied: %+v", releaseDecision)
+	}
+	releaseRequest.Resource = "repos/other/repo"
+	mismatchedRelease, _ := local.decideCredentialReleaseV2(context.Background(), sessionID, releaseRequest)
+	if mismatchedRelease.Allow || mismatchedRelease.ReasonCode != "operation_plan_invalid" {
+		t.Fatalf("credential resource mismatch decision=%+v", mismatchedRelease)
+	}
+}
+
 func TestSocketAuthorizeV2RouteDenialsExplainTheirRegistrationInKeiAudit(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
