@@ -6,7 +6,7 @@ the rule to follow until then.
 
 ## Every connector adapter is compiled into kei-proxy
 
-Tracked as [HAI-320](https://linear.app/haikeilabs/issue/HAI-320/tech-debt-every-connector-adapter-is-compiled-into-kei-proxy-binary).
+Tracked as HAI-320.
 Raised in review of the Grafana adapter (HAI-311). **Resolved 2026-10-27
 (HAI-724 slice 3):** every `internal/connector/<provider>` package, the
 `httpapi` invoker, and their helpers (`input`, `skillsrepo`, `connectortest`,
