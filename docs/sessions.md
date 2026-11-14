@@ -4,6 +4,12 @@ A runtime session is the runtime-held identity context for a request. The reques
 
 For tokenless desktop owner calls, when that mode is enabled and the verified owner subject is available, the runtime creates a pinned named session from the installation-owner subject in the active bundle (`runtime/socket_authorize.go:224-286`). An unauthenticated owner-route request without `X-Kei-Session` is bound to that named owner session before authorization (`runtime/socket_authorize.go:667-704`).
 
+Authorization takes one live-session subject snapshot and uses it for both
+policy evaluation and audit attribution. A session ended before that snapshot
+is denied as `session_not_found`; an end after the snapshot cannot erase the
+subject from the in-flight decision or make it appear `subject_unlinked`.
+
+
 ## Create and lifetime
 
 Use `PUT /v1/session` with a `kei.session/v2` request to create a named session. The runtime resolves the subject from the requested identity source and returns the new session ID; callers send it as `X-Kei-Session` on later requests (`runtime/socket_authorize.go:806-890`). The removed `kei.session/v1` schema is rejected with `invalid_request`. In code, `Sessions.Create` makes an opaque `ks_` ID and an independent session (`pkg/pdp/session.go:182-206`). The daemon-owned installation-owner session uses `CreatePinned` (`runtime/socket_authorize.go:264-275`).

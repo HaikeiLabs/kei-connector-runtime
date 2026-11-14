@@ -74,6 +74,30 @@ func TestAuthorizeV2UnregisteredToolUsesOwnerPoliciesByName(t *testing.T) {
 	}
 }
 
+func TestAuthorizeV2UnregisteredToolUsesSnapshotDuringConcurrentSessionEnd(t *testing.T) {
+	now := time.Now().UTC()
+	e, sessionID := newV2OwnerUnregisteredToolEvaluator(t, now, []any{v2GrantPermitPolicy("group:members", "custom.read")})
+	endDuringLookup := true
+	e.sessions.SetNow(func() time.Time {
+		if endDuringLookup {
+			endDuringLookup = false
+			e.sessions.EndID(sessionID)
+		}
+		return now
+	})
+
+	decision, err := e.AuthorizeV2UnregisteredTool(context.Background(), Request{Session: sessionID, Tool: "custom.read", AgentID: testAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Allow {
+		t.Fatalf("decision=%+v, want permit from the subject snapshot acquired before session end", decision)
+	}
+	if decision.AuditSubject != "user:u-alice" {
+		t.Errorf("decision audit subject = %q, want user:u-alice", decision.AuditSubject)
+	}
+}
+
 func TestAuthorizeV2UnregisteredToolDoesNotDeferForSDKCaller(t *testing.T) {
 	now := time.Now().UTC()
 	e, sessionID := newV2OwnerUnregisteredToolEvaluator(t, now, nil)

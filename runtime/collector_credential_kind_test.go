@@ -118,3 +118,32 @@ func TestCollectorDecisionWithoutCredentialKeepsOlderCatalogFields(t *testing.T)
 		}
 	}
 }
+
+func TestDecisionEventUsesCapturedSubjectAfterSessionEnds(t *testing.T) {
+	sessions := pdp.NewSessions()
+	sessionID, err := sessions.Create(pdp.Subject{UserID: "u-alice", Status: pdp.StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := &LocalPDP{Sessions: sessions}
+	if !sessions.EndID(sessionID) {
+		t.Fatal("session did not end")
+	}
+
+	d := pdp.Decision{AuditSubject: "user:u-alice"}
+	event := parseSpoolLine(t, local.decisionEventJSON(socketAuthorizeRequest{Tool: "custom.read"}, sessionID, d, ""))
+	if event.InvokingSubject != d.AuditSubject {
+		t.Fatalf("invoking_subject=%q, want captured subject %q", event.InvokingSubject, d.AuditSubject)
+	}
+	var fields map[string]json.RawMessage
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exposed := fields["AuditSubject"]; exposed {
+		t.Fatal("audit-only subject appeared in serialized decision")
+	}
+}

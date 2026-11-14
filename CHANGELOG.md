@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed: keep authorization subject stable during session end
+
+Each decision now evaluates and audits the same live-session subject snapshot.
+A concurrent owner-session refresh can no longer turn a successful liveness
+check followed by a second lookup into a false `subject_unlinked` denial.
+
+
 ### Changed: agent-connector bindings no longer gate authorization (HAI-623)
 
 kei-proxy no longer denies a connector call with `agent_not_bound_to_connector`
