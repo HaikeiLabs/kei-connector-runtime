@@ -5,9 +5,12 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 // decideAuthorize computes the /v1/authorize decision for req in sessionID.
@@ -43,6 +46,9 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 	if req.Connector != nil {
 		target.Connector = &pdp.ConnectorTarget{ConnectorID: req.Connector.ConnectorID, Capability: req.Connector.Capability}
 	}
+	if len(req.ToolArgs) > 0 {
+		return l.decideV2ConnectorPlan(ctx, sessionID, req)
+	}
 	if req.Tool != "" && req.Connector != nil {
 		return l.decideHarnessToolForTarget(ctx, sessionID, req)
 	}
@@ -66,6 +72,31 @@ func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req so
 		TrustedAgent: l.trustedAgentID(), OwnerSession: l.isOwnerSession(sessionID),
 	})
 	return res.Decision, auditTrustedAgent || res.AuditTrustedAgent, res.Unmatched, err
+}
+
+// decideV2ConnectorPlan evaluates a connector_binding tool's complete plan
+// using the locally held, verified tool manifest and runtime identity.
+func (l *LocalPDP) decideV2ConnectorPlan(ctx context.Context, sessionID string, req socketAuthorizeRequest) (pdp.Decision, bool, bool, error) {
+	deny := func(code pdp.ReasonCode, reason string) (pdp.Decision, bool, bool, error) {
+		return pdp.Decision{ReasonCode: code, DenySource: "policy", Reason: reason, BundleState: "ready"}, true, false, nil
+	}
+	if req.Connector != nil {
+		return deny("operation_plan_invalid", "connector_binding authorization derives its connector from the registered plan")
+	}
+	e, identity := l.evaluator.Load(), l.identity.Load()
+	if e == nil || identity == nil {
+		return deny(pdp.ReasonPolicyBundleMissing, "runtime identity or policy bundle is unavailable")
+	}
+	trusted := identity.AgentID
+	if trusted == "" || (req.AgentID != "" && req.AgentID != trusted) {
+		return deny("agent_mismatch", "the request agent is not this installation's default agent")
+	}
+	contextData := req.ToolContext
+	if len(contextData) == 0 {
+		contextData = json.RawMessage(`{}`)
+	}
+	d, err := e.AuthorizeV2ConnectorPlan(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted}, req.ToolArgs, contextData)
+	return d, true, false, err
 }
 
 // decideMCPTool evaluates the canonical mcp:<connector-slug>.<upstream-tool>
@@ -132,6 +163,14 @@ func (l *LocalPDP) shellKindForTool(tool string) (string, bool) {
 		return "pi", true
 	}
 	return "", false
+}
+
+func (l *LocalPDP) isV2ConnectorTool(name string) bool {
+	if l == nil {
+		return false
+	}
+	e := l.evaluator.Load()
+	return e != nil && e.IsV2ConnectorTool(name)
 }
 
 func (l *LocalPDP) isOwnerSession(sessionID string) bool {
@@ -215,6 +254,59 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 	connector, ok := verified.Connector(req.Connector.ConnectorID)
 	if !ok {
 		return denied("connector_not_registered", "connector is not described in the verified v2 bundle")
+	}
+	if tool, registered := verified.V2ConnectorTool(req.Tool, time.Now().UTC()); registered && tool.Route.ConnectorBinding != nil {
+		if tool.Route.ConnectorBinding.ConnectorID != req.Connector.ConnectorID {
+			return denied("tool_not_registered", "connector tool is not registered for this connector")
+		}
+		if connector.AccountModel != "shared" && connector.AccountModel != "per_user" {
+			return denied("account_model_not_supported", "tool-bound release requires a shared or per_user connector")
+		}
+		if connector.AccountModel == "per_user" {
+			if subject, ok := l.Sessions.Get(sessionID); !ok || subject.SubjectKind == "service_principal" || subject.UserID == "" {
+				return denied("account_model_not_supported", "per_user credentials require a user-bound session")
+			}
+		}
+		capabilityFound := false
+		for _, capability := range connector.Capabilities {
+			if capability.Name == req.Connector.Capability {
+				capabilityFound = true
+				break
+			}
+		}
+		capabilityRequired := false
+		for _, capability := range tool.RequiredCapabilities {
+			if capability == req.Connector.Capability {
+				capabilityRequired = true
+				break
+			}
+		}
+		if !capabilityFound || !capabilityRequired || len(req.ToolArgs) == 0 {
+			return denied("operation_plan_invalid", "credential release requires the complete registered tool arguments and capability")
+		}
+		contextData := req.ToolContext
+		if len(contextData) == 0 {
+			contextData = json.RawMessage(`{}`)
+		}
+		operations, planErr := policybundle.BuildV2Operations(tool, req.Connector.ConnectorID, req.ToolArgs, contextData)
+		if planErr != nil {
+			return denied("operation_plan_invalid", "tool arguments do not satisfy the registered operation plan")
+		}
+		resourceMatches := false
+		for _, operation := range operations {
+			if operation.Capability == req.Connector.Capability && (operation.ProviderResource == req.Resource || operation.CredentialResource == req.Resource) {
+				resourceMatches = true
+				break
+			}
+		}
+		if !resourceMatches {
+			return denied("operation_plan_invalid", "credential resource does not match the registered operation plan")
+		}
+		d, err := e.AuthorizeV2ConnectorPlan(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted}, req.ToolArgs, contextData)
+		if err != nil {
+			return pdp.Decision{ReasonCode: pdp.ReasonRequestCanceled, DenySource: "runtime_state", Reason: "request canceled", BundleState: "ready"}, true
+		}
+		return d, true
 	}
 	if connector.AccountModel != "shared" && connector.AccountModel != "per_user" {
 		return denied("account_model_not_supported", "tool-bound release requires a shared or per_user connector")
