@@ -74,3 +74,41 @@ func TestAuthorizeHelpIsNotAPermit(t *testing.T) {
 		}
 	}
 }
+
+// TestTopLevelUsageDescriptions pins the command descriptions that used to
+// be stale (serve is the authorize/session daemon, not an OpenAI-compatible
+// listener; authorize is a deprecated fallback that serves no credential) and
+// the examples that were misleading (an ignored --user flag, a bare legacy
+// --user-id authorize, a tab-indented line, a Discord-only --tenant-id).
+func TestTopLevelUsageDescriptions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds kei-proxy")
+	}
+	binary := filepath.Join(t.TempDir(), "kei-proxy")
+	buildKeiProxy(t, binary, "netgo")
+	output, err := exec.Command(binary, "--help").CombinedOutput()
+	if err != nil {
+		t.Fatalf("kei-proxy --help: %v\n%s", err, output)
+	}
+	text := string(output)
+	for _, stale := range []string{
+		"OpenAI-compatible",
+		"serve its credential",
+		"--user U1234ABCD",
+		"--tenant-id guild-id",
+		"\tkei-proxy",
+		"\n  kei-proxy --user-id",
+	} {
+		if strings.Contains(text, stale) {
+			t.Errorf("top-level usage still contains %q", stale)
+		}
+	}
+	for _, want := range []string{
+		"serve        run the local daemon",
+		"authorize    deprecated",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("top-level usage is missing %q", want)
+		}
+	}
+}
