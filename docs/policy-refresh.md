@@ -62,9 +62,7 @@ so its warn line appears on every poll, about once a minute.
 
 ### Why the catalog returns 409
 
-`detail` names the condition. The catalog documents each one with its
-operator fix in
-[When the bundle is not ready (409)](https://github.com/HaikeiLabs/kei-policy-catalog/blob/main/docs/policy-bundle-issuer.md#when-the-bundle-is-not-ready-409).
+`detail` names the condition. The table below lists each one.
 
 | `detail` | Meaning |
 |---|---|

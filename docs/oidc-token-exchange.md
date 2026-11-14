@@ -1,7 +1,7 @@
 # RFC 8693 token exchange in the runtime
 
 Status: **proposal**, 2026-11-10. No code yet. The owner's decisions of
-2026-11-13 ([HAI-977](https://linear.app/haikeilabs/issue/HAI-977)) are recorded in
+2026-11-13 (HAI-977) are recorded in
 [§11](#11-decisions-owner-2026-11-13).
 Audit with citations: [oidc-token-exchange-audit.md](oidc-token-exchange-audit.md)
 (finding IDs `A1`–`A15` below refer to it).
@@ -271,7 +271,7 @@ surfaces (the catalog API and `kei connectors`); there is no
   restriction is the control. Kei keeps no `jti` deny-list and offers no
   introspection. Revocation is future platform work, delivered through the
   approvals page and its endpoints, admin-only
-  ([HAI-983](https://linear.app/haikeilabs/issue/HAI-983)).
+  (HAI-983).
 
 ## 9. Audit
 
@@ -310,7 +310,7 @@ more than when subject tokens rode in the bundle:
 ## 11. Decisions (owner, 2026-11-13)
 
 The owner decided the seven questions this section used to ask
-([HAI-977](https://linear.app/haikeilabs/issue/HAI-977)).
+(HAI-977).
 
 **Q1. Audience registry.** An exchange audience is an attribute of the
 existing connector (its descriptor), not a new `exchange-audiences` catalog
@@ -334,7 +334,7 @@ token carries `act`.
 **Q5. Revocation.** Expiry only: 300 s by default, 900 s at most. Revocation
 is future platform work, delivered through the approvals page and its
 endpoints, admin-only (tracked in
-[HAI-983](https://linear.app/haikeilabs/issue/HAI-983)). There is no `jti`
+HAI-983). There is no `jti`
 deny-list.
 
 **Q6. Bundle token fan-out (A1/A2).** Today the harness identity (a
