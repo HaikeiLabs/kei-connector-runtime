@@ -191,6 +191,32 @@ func (s *Sessions) Get(id string) (Subject, bool) {
 	return copySubject(e.sub), true
 }
 
+func (s *Sessions) getWithReason(id string) (Subject, bool, ReasonCode) {
+	e, reason := s.sessionWithReason(id)
+	if e == nil {
+		return Subject{}, false, reason
+	}
+	e.lastUsed.Store(s.now().UnixNano())
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return copySubject(e.sub), true, ""
+}
+
+func (s *Sessions) sessionWithReason(id string) (*idSession, ReasonCode) {
+	if s.ConsumeRecycled(id) {
+		return nil, ReasonSessionRevalidationRequired
+	}
+	e, ok := s.live(id)
+	if !ok {
+		// live may just have recycled the session.
+		if s.ConsumeRecycled(id) {
+			return nil, ReasonSessionRevalidationRequired
+		}
+		return nil, ReasonSessionNotFound
+	}
+	return e, ""
+}
+
 // Exists reports whether session id is live, without marking it used.
 func (s *Sessions) Exists(id string) bool {
 	_, ok := s.live(id)
@@ -253,25 +279,6 @@ func (s *Sessions) endID(id string, e *idSession) bool {
 func (s *Sessions) ConsumeRecycled(id string) bool {
 	_, loaded := s.recycled.LoadAndDelete(id)
 	return loaded
-}
-
-// liveWithReason checks whether id is live. If the session was recycled (max
-// age exceeded) the caller gets ReasonSessionRevalidationRequired; if it
-// expired from idleness it gets ReasonSessionNotFound.
-func (s *Sessions) liveWithReason(id string) (bool, ReasonCode) {
-	if s.ConsumeRecycled(id) {
-		return false, ReasonSessionRevalidationRequired
-	}
-	live := s.Exists(id)
-	if live {
-		return true, ""
-	}
-	// Exists may have just recycled the session (max age detected during
-	// live()); consume again to catch it.
-	if s.ConsumeRecycled(id) {
-		return false, ReasonSessionRevalidationRequired
-	}
-	return false, ReasonSessionNotFound
 }
 
 // Sweep ends every id session idle past the TTL and returns their ids.

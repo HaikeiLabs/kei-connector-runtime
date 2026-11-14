@@ -452,11 +452,13 @@ func (l *LocalPDP) SetModelConfigHandler(h http.Handler) { l.modelConfigHandler 
 func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp.ConnectorGrant, *Identity, error) {
 	e, id := l.evaluator.Load(), l.identity.Load()
 	if e == nil || id == nil {
-		if req.Session != pdp.DefaultSession && !l.Sessions.Exists(req.Session) {
+		sub, hasSession := l.Sessions.Get(req.Session)
+		if req.Session != pdp.DefaultSession && !hasSession {
 			return pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}}, nil, ctx.Err()
 		}
 		g := pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: pdp.ReasonPolicyBundleMissing, DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}}
-		if sub, ok := l.Sessions.Get(req.Session); ok {
+		if hasSession {
+			g.Decision.AuditSubject = typedSubject(sub)
 			sub.Token, sub.Enrollment = "", nil
 			g.Subject, g.HasSession = sub, true
 		}
@@ -1184,7 +1186,9 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 	} else if d.Allow {
 		e.Decision = "allow"
 	}
-	if subject, ok := l.Sessions.Get(sessionID); ok {
+	if d.AuditSubject != "" {
+		e.InvokingSubject = d.AuditSubject
+	} else if subject, ok := l.Sessions.Get(sessionID); ok {
 		e.InvokingSubject = typedSubject(subject)
 	}
 	// A deny without a resolved subject (no session, unlinked session) must
