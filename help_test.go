@@ -3,6 +3,7 @@ package connectorruntime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,32 @@ func TestSubcommandHelp(t *testing.T) {
 					t.Fatalf("kei-proxy %s %s: output has no %q line:\n%s", command, flag, usageLine, output)
 				}
 			})
+		}
+	}
+}
+
+// TestAuthorizeHelpIsNotAPermit: exit 0 is the deprecated authorize command's
+// permit contract, so its --help prints usage but exits 2 (error), never 0.
+func TestAuthorizeHelpIsNotAPermit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds kei-proxy")
+	}
+	binary := filepath.Join(t.TempDir(), "kei-proxy")
+	buildKeiProxy(t, binary, "netgo")
+	for _, flag := range []string{"--help", "-h"} {
+		cmd := exec.Command(binary, "authorize", flag)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != authorizeExitError {
+			t.Fatalf("authorize %s: err = %v, want exit %d", flag, err, authorizeExitError)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("authorize %s wrote to stdout (the decision stream): %q", flag, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "Usage: kei-proxy authorize") {
+			t.Fatalf("authorize %s: stderr has no usage line:\n%s", flag, stderr.String())
 		}
 	}
 }
