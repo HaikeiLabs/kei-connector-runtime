@@ -277,34 +277,28 @@ func (e *Evaluator) AuthorizeV2ConnectorPlan(ctx context.Context, req Request, a
 	if req.Session == DefaultSession {
 		return Decision{Reason: "v2 connector authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
 	}
-	if live, reason := e.sessionLive(req.Session); !live {
+	current, ok, reason := e.sessionSnapshot(req.Session)
+	if !ok {
 		return sessionDenial(reason), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
-		return stateDenial(state), nil
+		return decisionWithSubject(stateDenial(state), current), nil
 	}
-	var subject *policybundle.SessionSubject
-	if current, ok := e.sessions.Get(req.Session); ok {
-		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
-	}
+	subject := sessionPolicySubject(current)
 	tool, ok := v.V2ConnectorTool(req.Tool, e.now().UTC())
 	if !ok || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" {
 		d := policybundle.Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector tool is not registered for this connector"}
-		return v2PDPDecision(d, v, state), nil
+		return v2Decision(d, v, state, current), nil
 	}
 	connectorID := tool.Route.ConnectorBinding.ConnectorID
 	operations, err := policybundle.BuildV2Operations(tool, connectorID, args, contextData)
 	if err != nil {
 		d := policybundle.Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "tool arguments do not satisfy the registered operation plan"}
-		return v2PDPDecision(d, v, state), nil
+		return v2Decision(d, v, state, current), nil
 	}
 	d := v.EvaluateV2Plan(req.Tool, req.AgentID, subject, operations, e.now().UTC())
-	return v2PDPDecision(d, v, state), nil
-}
-
-func v2PDPDecision(d policybundle.Decision, v *policybundle.Verified, state policybundle.State) Decision {
-	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: ReasonCode(d.ReasonCode), DenySource: denySource(ReasonCode(d.ReasonCode)), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}
+	return v2Decision(d, v, state, current), nil
 }
 
 // AuthorizeV2UnregisteredTool evaluates an unregistered tool name for the
