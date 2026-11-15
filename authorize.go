@@ -67,6 +67,9 @@ func runAuthorize(args []string) int {
 		fs.String(name, "", "ignored: one-shot authorize no longer uses it")
 	}
 
+	// --help still exits authorizeExitError: exit 0 is this command's permit
+	// contract, and a help request must never read as a permit.
+	flagUsage(fs, "kei-proxy authorize --tool <tool> [flags] (deprecated: harnesses use the serve socket)")
 	if err := fs.Parse(args); err != nil {
 		return authorizeExitError
 	}
