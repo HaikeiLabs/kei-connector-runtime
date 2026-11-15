@@ -267,6 +267,40 @@ func (e *Evaluator) AuthorizeV2HarnessToolForTarget(ctx context.Context, req Req
 	return e.authorizeV2HarnessTool(ctx, req, connectorID, capability, resource)
 }
 
+// AuthorizeV2ConnectorPlan authorizes the complete registered connector plan
+// for the live named session. The plan definition is bundle-trusted; raw args
+// and context are schema-validated and used only to derive policy targets.
+func (e *Evaluator) AuthorizeV2ConnectorPlan(ctx context.Context, req Request, args, contextData []byte) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
+	if req.Session == DefaultSession {
+		return Decision{Reason: "v2 connector authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
+	}
+	current, ok, reason := e.sessionSnapshot(req.Session)
+	if !ok {
+		return sessionDenial(reason), nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return decisionWithSubject(stateDenial(state), current), nil
+	}
+	subject := sessionPolicySubject(current)
+	tool, ok := v.V2ConnectorTool(req.Tool, e.now().UTC())
+	if !ok || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" {
+		d := policybundle.Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector tool is not registered for this connector"}
+		return v2Decision(d, v, state, current), nil
+	}
+	connectorID := tool.Route.ConnectorBinding.ConnectorID
+	operations, err := policybundle.BuildV2Operations(tool, connectorID, args, contextData)
+	if err != nil {
+		d := policybundle.Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "tool arguments do not satisfy the registered operation plan"}
+		return v2Decision(d, v, state, current), nil
+	}
+	d := v.EvaluateV2Plan(req.Tool, req.AgentID, subject, operations, e.now().UTC())
+	return v2Decision(d, v, state, current), nil
+}
+
 // AuthorizeV2UnregisteredTool evaluates an unregistered tool name for the
 // verified installation-owner subject held by a live named session.
 func (e *Evaluator) AuthorizeV2UnregisteredTool(ctx context.Context, req Request) (Decision, error) {
@@ -517,6 +551,12 @@ func (e *Evaluator) BundleStatus() (policybundle.Status, error) {
 func (e *Evaluator) IsV2HarnessTool(name string) bool {
 	route, isV2 := e.V2ToolRoute(name)
 	return isV2 && route == "harness_executor"
+}
+
+// IsV2ConnectorTool reports whether name resolves to a registered connector_binding route.
+func (e *Evaluator) IsV2ConnectorTool(name string) bool {
+	route, isV2 := e.V2ToolRoute(name)
+	return isV2 && route == "connector_binding"
 }
 
 // V2ToolRoute reports the route kind for name in the current verified v2
