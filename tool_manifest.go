@@ -11,6 +11,7 @@ type HarnessExecutorRoute = keiruntime.HarnessExecutorRoute
 
 const (
 	ToolManifestSchemaV3        = keiruntime.ToolManifestSchemaV3
+	ToolManifestSchemaV4        = keiruntime.ToolManifestSchemaV4
 	ToolManifestProtocolHeader  = keiruntime.ToolManifestProtocolHeader
 	ToolManifestSupportedHeader = keiruntime.ToolManifestSupportedHeader
 )

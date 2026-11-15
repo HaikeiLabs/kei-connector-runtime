@@ -7,13 +7,23 @@ import (
 	"testing"
 )
 
-func TestLoadToolManifestV3Only(t *testing.T) {
+const validV4ToolManifest = `{"schema":"kei.tool-manifest/v4","sync_mode":"merge","tools":[{"name":"github.get_issue","source":"github","operation_class":"read","service":"github","route":{"connector_binding":{"agent_id":"00000000-0000-0000-0000-000000000001","connector_id":"00000000-0000-0000-0000-000000000002"}},"required_capabilities":["issue.read"],"resource_types":[{"type":"issue","parent_type":"repository"}],"plan":{"args_schema":{"type":"object","properties":{"issue_number":{"type":"integer"}},"required":["issue_number"],"additionalProperties":false},"context_schema":{"type":"object","properties":{"repository":{"type":"string","minLength":1,"maxLength":256,"pattern":"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}},"required":["repository"],"additionalProperties":false},"operations":[{"id":"get-issue","capability":"issue.read","resource":{"type":"issue","id":{"from":"args","pointer":"/issue_number","type":"integer"},"parent":{"type":"repository","id":{"from":"context","field":"repository","type":"string"}}},"provider_resource_template":"repos/{parent.id}/issues/{resource.id}","provider_input":{}}]}}]}`
+
+func TestLoadToolManifestV3AndV4(t *testing.T) {
+	v3 := `{"schema":"kei.tool-manifest/v3","tools":[{"name":"local.echo","service":"harness","source":"local","operation_class":"write","route":{"harness_executor":{"executor":"harness","registration":"echo"}}}]}`
 	cases := []struct {
-		name, raw string
-		wantErr   bool
+		name, raw, wantSchema string
+		wantErr               bool
 	}{
-		{"v3 valid", `{"schema":"kei.tool-manifest/v3","tools":[{"name":"local.echo","service":"harness","source":"local","operation_class":"write","route":{"harness_executor":{"executor":"harness","registration":"echo"}}}]}`, false},
-		{"unknown field closed", `{"schema":"kei.tool-manifest/v3","other":"value","tools":[]}`, true},
+		{"v3 valid", v3, ToolManifestSchemaV3, false},
+		{"v4 valid merge plan", validV4ToolManifest, ToolManifestSchemaV4, false},
+		{"v3 unknown field closed", `{"schema":"kei.tool-manifest/v3","other":"value","tools":[]}`, "", true},
+		{"v3 rejects v4 sync mode", strings.Replace(v3, `"schema":"kei.tool-manifest/v3",`, `"schema":"kei.tool-manifest/v3","sync_mode":"merge",`, 1), "", true},
+		{"v3 rejects v4 plan field", strings.Replace(v3, `"registration":"echo"}}}`, `"registration":"echo"}},"plan":{}}`, 1), "", true},
+		{"v4 unknown field closed", strings.Replace(validV4ToolManifest, `"sync_mode":"merge"`, `"unknown":true,"sync_mode":"merge"`, 1), "", true},
+		{"v4 requires tools", `{"schema":"kei.tool-manifest/v4"}`, "", true},
+		{"v4 rejects invalid sync mode", strings.Replace(validV4ToolManifest, `"sync_mode":"merge"`, `"sync_mode":"append"`, 1), "", true},
+		{"v4 rejects invalid plan", strings.Replace(validV4ToolManifest, `"capability":"issue.read"`, `"capability":"issue.write"`, 1), "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -25,8 +35,11 @@ func TestLoadToolManifestV3Only(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("manifest=%+v err=%v wantErr=%v", manifest, err, tc.wantErr)
 			}
-			if err == nil && tc.name == "v3 valid" && manifest.Schema != ToolManifestSchemaV3 {
-				t.Fatalf("schema=%q", manifest.Schema)
+			if err == nil && manifest.Schema != tc.wantSchema {
+				t.Fatalf("schema=%q, want %q", manifest.Schema, tc.wantSchema)
+			}
+			if err == nil && tc.wantSchema == ToolManifestSchemaV4 && string(manifest.SyncMode) != `"merge"` {
+				t.Fatalf("sync_mode=%s, want merge", manifest.SyncMode)
 			}
 		})
 	}

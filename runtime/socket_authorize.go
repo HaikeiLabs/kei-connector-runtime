@@ -34,10 +34,11 @@ const (
 	credentialReleaseResponseSchema = "kei.credential-release-response/v1"
 	sessionSchema                   = "kei.session/v1"
 	// sessionSchemaV2 creates a named session (multi-session socket API).
-	sessionSchemaV2      = "kei.session/v2"
-	bundleStatusSchema   = "kei.policy-bundle-status/v1"
-	maxSocketRequest     = 64 << 10
-	maxSocketPlanRequest = 192 << 10
+	sessionSchemaV2              = "kei.session/v2"
+	bundleStatusSchema           = "kei.policy-bundle-status/v1"
+	maxSocketRequest             = 64 << 10
+	maxSocketPlanRequest         = 192 << 10
+	maxSocketToolManifestRequest = maxToolManifestBytes
 )
 
 type socketAuthorizeRequest struct {
@@ -649,12 +650,12 @@ func (l *LocalPDP) handleToolRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var manifest ToolManifest
-	if err := decodeSocketJSONLimit(w, r, &manifest, maxSocketPlanRequest); err != nil {
+	if err := decodeSocketJSONLimit(w, r, &manifest, maxSocketToolManifestRequest); err != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "invalid tool manifest JSON")
 		return
 	}
-	if manifest.Schema != ToolManifestSchemaV3 {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", fmt.Sprintf("unsupported tool manifest schema: supported %s, received %q", ToolManifestSchemaV3, manifest.Schema))
+	if manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4 {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", fmt.Sprintf("unsupported tool manifest schema: supported %s and %s, received %q", ToolManifestSchemaV3, ToolManifestSchemaV4, manifest.Schema))
 		return
 	}
 	if len(manifest.Tools) == 0 {

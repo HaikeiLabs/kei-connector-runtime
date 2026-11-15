@@ -81,7 +81,7 @@ Run `kei-proxy <command> --help` for flags.
   the daemon, audit spool, secret backends, heartbeat and releases
 - [Unix socket API](docs/unix-socket.md) and [sessions](docs/sessions.md)
 - [Policy bundles](docs/policy-bundles.md) and [policy refresh](docs/policy-refresh.md)
-- [Tool manifest v3](docs/tool-manifest-v3.md)
+- [Tool manifest v3](docs/tool-manifest-v3.md) and [v4](docs/tool-manifest-v4.md)
 - [Release runbook](docs/release.md)
 
 ## Building from source
