@@ -420,6 +420,23 @@ only) before the connector is activated:
   variable.
 - `gcp-secret-manager`: `projects/<p>/secrets/<s>` is used as is.
 
+The sync output reports each connector whose ref did not resolve under
+`external_refs.unresolved`, as `{"connector_id": "...", "reason": "..."}`.
+`external_refs.unresolved_connector_ids` still lists the same ids for
+existing readers. The reason is coarse and never includes the ref or a
+secret value:
+
+| `reason` | Meaning |
+| --- | --- |
+| `not_found` | The secret does not exist (AWS `ResourceNotFoundException`, Azure 404, GCP `NotFound`). |
+| `permission_denied` | The runtime's identity may not read it (AWS `AccessDeniedException`, Azure 401/403, GCP `PermissionDenied`/`Unauthenticated`). |
+| `no_backend` | `KEI_SECRETS_BACKEND` is unset, or the ref is for a different backend than the configured one. |
+| `unqualified_name` | The ref cannot be qualified for the configured backend, for example a bare Azure name while `KEI_SECRETS_AZURE_VAULT_URL` is unset. |
+| `backend_error` | Anything else: throttling, network, a timeout, or a malformed catalog entry. |
+
+When a connector has several unresolved fields, the reason is that of the
+first one the catalog lists.
+
 ## GCP Secret Manager backend
 
 The runtime's tenant secret store supports `gcp-secret-manager` alongside

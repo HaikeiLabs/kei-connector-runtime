@@ -173,3 +173,25 @@ func TestSecretValueNeverAppearsInLogsOrErrors(t *testing.T) {
 		t.Fatalf("captured log output contains the secret value: %s", logs.String())
 	}
 }
+
+// HAI-1022: Validate classifies a permission failure as ErrPermissionDenied
+// (still ErrUnavailable for existing callers) so credential sync can report it.
+func TestValidatePermissionDeniedIsClassified(t *testing.T) {
+	for _, code := range []codes.Code{codes.PermissionDenied, codes.Unauthenticated} {
+		store := gcp.NewStoreWithClient(&fakeClient{
+			versions: map[string][][]byte{},
+			getErr:   status.Error(code, "denied on "+testRef),
+		})
+		err := store.Validate(context.Background(), "gcp-secret-manager", testRef)
+		if !errors.Is(err, secrets.ErrPermissionDenied) || !errors.Is(err, secrets.ErrUnavailable) {
+			t.Fatalf("Validate(%v) = %v, want ErrPermissionDenied and ErrUnavailable", code, err)
+		}
+		if strings.Contains(err.Error(), testRef) {
+			t.Fatalf("error leaks the reference: %v", err)
+		}
+	}
+	store := gcp.NewStoreWithClient(&fakeClient{versions: map[string][][]byte{}, getErr: status.Error(codes.Internal, "boom")})
+	if err := store.Validate(context.Background(), "gcp-secret-manager", testRef); errors.Is(err, secrets.ErrPermissionDenied) || errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("Validate(Internal) = %v, want neither not found nor permission denied", err)
+	}
+}

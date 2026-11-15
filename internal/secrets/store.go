@@ -27,6 +27,9 @@ var (
 	ErrUnavailable = errdef.ErrUnavailable
 	// ErrExists reports a write that conflicts with an existing secret.
 	ErrExists = errdef.ErrExists
+	// ErrPermissionDenied reports that the runtime's identity is refused
+	// access to the secret. It is always wrapped with ErrUnavailable.
+	ErrPermissionDenied = errdef.ErrPermissionDenied
 )
 
 // Store is the interface for external credential backends.
