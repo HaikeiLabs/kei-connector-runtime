@@ -57,7 +57,11 @@ kei-proxy policy show
   locally, resolves credentials from your own secret store (AWS Secrets
   Manager, Azure Key Vault or GCP Secret Manager), and sends only decisions
   and redacted audit metadata to Kei, never credentials, prompts or tool
-  payloads.
+  payloads. After an allow, the harness gets a connector's credential for
+  that call from `POST /v1/credentials:release` on the daemon socket: an
+  OAuth connection from the identity service, or, for a shared `opaque_ref`
+  connector such as a postgres DSN, the secret from your own store (see
+  [credential release](docs/unix-socket.md#post-v1credentialsrelease-kei_credential_releaseidentity)).
 
 ## Commands
 

@@ -247,6 +247,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		store := connectorSecretStore()
 		secretResolver := invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: store}
 		local.SetCredentialStore(creds)
+		local.SetConnectorSecrets(secretResolver)
 		local.SetCommandRunner(&runcommand.Daemon{
 			Authorize:     local.ConnectorGrant,
 			UseCredential: local.UseCredential,
