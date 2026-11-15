@@ -214,10 +214,14 @@ const (
 )
 
 func toolManifestMediaType(schema string) string {
-	if schema == ToolManifestSchemaV3 {
+	switch schema {
+	case ToolManifestSchemaV3:
 		return "application/vnd.kei.tool-manifest.v3+json"
+	case ToolManifestSchemaV4:
+		return "application/vnd.kei.tool-manifest.v4+json"
+	default:
+		return ""
 	}
-	return ""
 }
 
 // ToolSyncResponse is the catalog response for PUT /api/v1/runtime/tools.
@@ -228,7 +232,7 @@ type ToolSyncResponse struct {
 	Unchanged int `json:"unchanged"`
 }
 
-// SyncTools proposes v3 in Accept and requires explicit catalog acknowledgment.
+// SyncTools proposes the manifest's schema in Accept and requires explicit catalog acknowledgment.
 func (c *runtimeClient) SyncTools(ctx context.Context, token string, manifest *ToolManifest) error {
 	_, err := c.syncTools(ctx, token, manifest, false)
 	return err
@@ -241,7 +245,7 @@ func (c *runtimeClient) SyncToolsWithResponse(ctx context.Context, token string,
 }
 
 func (c *runtimeClient) syncTools(ctx context.Context, token string, manifest *ToolManifest, readCounts bool) (*ToolSyncResponse, error) {
-	if manifest == nil || manifest.Schema != ToolManifestSchemaV3 {
+	if manifest == nil || toolManifestMediaType(manifest.Schema) == "" {
 		return nil, fmt.Errorf("unsupported tool manifest protocol")
 	}
 	body, err := json.Marshal(manifest)

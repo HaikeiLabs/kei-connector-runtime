@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added: v4 tool-manifest registration
+
+kei-proxy accepts strictly validated `kei.tool-manifest/v4` manifests during
+runtime bootstrap and `POST /v1/tools:register`. V4 connector routes require a
+valid operation plan; v4 `sync_mode: merge` is preserved. Runtime sync
+negotiates the v4 media type and requires explicit catalog acknowledgment.
+V3 callers keep their existing replace behavior and must omit v4-only fields.
+Registration remains metadata-only and grants no policy access.
+
 ### Fixed: keep authorization subject stable during session end
 
 Each decision now evaluates and audits the same live-session subject snapshot.
@@ -30,9 +39,9 @@ Profile selection remains scoped to assignments authorized by the runtime API,
 and secret-store credential lookup is unchanged. The serve daemon has no
 `POST /v1/chat/completions` route; model invocation remains `model invoke`.
 
-### Breaking: tool manifest v3 only (HAI-875)
+### Previous release behavior: tool manifest v3 only (HAI-875)
 
-kei-proxy accepts `kei.tool-manifest/v3` only from this release. Manifests v1, v2, and v4 are rejected. Agentware 0.12.0 posts v3 and is unaffected.
+Proxy v0.7.2 accepted `kei.tool-manifest/v3` only and rejected v1, v2, and v4. This release adds negotiated v4 support; v1 and v2 remain rejected. Agentware 0.12.0 continues to post v3.
 
 ### Added: live access grants in the v2 policy bundle (HAI-617)
 
