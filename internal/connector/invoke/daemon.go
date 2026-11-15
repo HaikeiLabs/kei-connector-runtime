@@ -11,29 +11,18 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/HaikeiLabs/kei-connector-contracts/contract"
-	"github.com/HaikeiLabs/kei-connector-contracts/setup"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
-// IsSessionProvider reports whether provider's default credential is the
-// session subject's own OAuth connection, released by I11 under the same
-// name: its kei-connector-contracts setup schema offers oauth with per_user as
-// the default account model. A bundle without connector descriptors (an
-// older catalog) runs only these in the daemon, as before HAI-378; with
-// descriptors, each connector's credential_source and account_model decide.
-func IsSessionProvider(provider string) bool {
-	schema, ok := setup.SetupSchemaFor(contract.Provider(provider))
-	if !ok {
-		return false
-	}
-	for _, auth := range schema.Auth {
-		if auth.CredentialSource == contract.CredentialSourceOAuth && auth.DefaultAccountModel == contract.AccountModelPerUser {
-			return true
-		}
-	}
-	return false
+// IsSessionConnector reports whether connector c's credential is the session
+// subject's own OAuth connection, released by I11 under the provider's name:
+// its bundle descriptor says credential_source oauth and account_model
+// per_user. The bundle alone decides (HAI-1050); a nil connector or one
+// without those fields (a bundle without descriptors, from an older catalog)
+// is not a session connector, so the daemon denies it.
+func IsSessionConnector(c *policybundle.Connector) bool {
+	return c != nil && c.CredentialSource == "oauth" && c.AccountModel == "per_user"
 }
 
 // Grant is the daemon's local decision for one connector call.
@@ -57,8 +46,8 @@ type Grant struct {
 	WorkspaceID  string
 	// Connector is the bundle's descriptor for the connector (HAI-378), from
 	// the same bundle as the decision, or nil. Descriptors reports whether the
-	// bundle carries descriptors at all: without them the daemon keeps its
-	// session-OAuth-only behavior.
+	// bundle carries descriptors at all: without them the bundle does not say
+	// where a credential lives, so the daemon denies credentialed calls.
 	Connector   *policybundle.Connector
 	Descriptors bool
 }

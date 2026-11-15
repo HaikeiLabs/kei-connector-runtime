@@ -264,8 +264,8 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 			switch {
 			case grant.Provider == "":
 				return deny("unresolved_reference", "the policy bundle does not describe this connector", 1, connectorIDs, fields)
-			case !invoke.IsSessionProvider(grant.Provider):
-				return deny("credential_source_not_supported", "the daemon resolves only the session's own OAuth connections", 1, connectorIDs, fields)
+			case !invoke.IsSessionConnector(grant.Connector):
+				return deny("credential_source_not_supported", "the policy bundle does not describe this connector's credential source", 1, connectorIDs, fields)
 			case !sessionCredentialFields[ref.field]:
 				return deny("unresolved_reference", "a session credential provides only the token field", 1, connectorIDs, fields)
 			}
