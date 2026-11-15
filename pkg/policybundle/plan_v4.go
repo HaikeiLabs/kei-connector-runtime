@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/HaikeiLabs/kei-connector-contracts/contract"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -63,7 +62,11 @@ var allowedSchemaKeywords = map[string]bool{
 }
 
 // ValidateV2Plan rejects plans outside the closed declarative v4 profile
-// before a policy bundle can be accepted.
+// before a policy bundle can be accepted. An operation's capability must be
+// one the tool registers in the bundle (required_capabilities); the runtime
+// never consults a provider registry outside the bundle (HAI-1050). Whether
+// the bound connector declares those capabilities is checked against the
+// bundle's connector descriptors when the plan is decided (EvaluateV2Plan).
 func ValidateV2Plan(tool V2Tool) error {
 	if len(tool.Plan) == 0 || len(tool.Plan) > MaxPlanDataBytes {
 		return errors.New("v2 connector tool plan is missing or too large")
@@ -94,7 +97,7 @@ func ValidateV2Plan(tool V2Tool) error {
 	}
 	ids := make(map[string]bool, len(plan.Operations))
 	for _, op := range plan.Operations {
-		if !planOperationID.MatchString(op.ID) || ids[op.ID] || !containsPlanCapability(tool.RequiredCapabilities, op.Capability) || !capabilityRegistered(tool.Source, op.Capability) {
+		if !planOperationID.MatchString(op.ID) || ids[op.ID] || !containsPlanCapability(tool.RequiredCapabilities, op.Capability) {
 			return errors.New("v2 tool plan operation identity or capability is invalid")
 		}
 		ids[op.ID] = true
@@ -559,15 +562,6 @@ func validProviderResourceTemplate(value string, hasResourceID, hasParentID bool
 		}
 	}
 	return true
-}
-
-func capabilityRegistered(source, capability string) bool {
-	for _, definition := range contract.CapabilitiesFor(contract.Provider(source)) {
-		if definition.Name == capability {
-			return true
-		}
-	}
-	return false
 }
 
 func containsPlanCapability(capabilities []string, wanted string) bool {

@@ -265,6 +265,9 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "agent is not assigned to this installation"}
 	}
 	connectorID := tool.Route.ConnectorBinding.ConnectorID
+	if !set.connectorDeclares(connectorID, tool.RequiredCapabilities) {
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "the bound connector does not declare the tool's capabilities in the policy bundle"}
+	}
 	if len(ops) == 0 || len(tool.RequiredCapabilities) == 0 {
 		return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan is empty"}
 	}
@@ -302,6 +305,37 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		}
 	}
 	return Decision{Outcome: "allow", ReasonCode: "policy_permit"}
+}
+
+// connectorDeclares reports whether the policy set registers every capability
+// for connectorID (HAI-1050: the bundle alone decides). A set with a
+// connectors section must carry a descriptor for the connector that declares
+// each capability; a set without one (an older catalog) registers a tool's
+// capabilities only through its required_capabilities, which every operation
+// is already checked against.
+func (s v2PolicySet) connectorDeclares(connectorID string, capabilities []string) bool {
+	if s.Connectors == nil {
+		return true
+	}
+	for _, c := range s.Connectors {
+		if c.ID != connectorID {
+			continue
+		}
+		for _, wanted := range capabilities {
+			declared := false
+			for _, capability := range c.Capabilities {
+				if capability.Name == wanted {
+					declared = true
+					break
+				}
+			}
+			if !declared {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool {
