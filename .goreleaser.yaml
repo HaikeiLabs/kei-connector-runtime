@@ -46,6 +46,7 @@ archives:
       {{- end }}
     files:
       - LICENSE
+      - NOTICE
 
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"

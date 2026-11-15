@@ -41,16 +41,22 @@ any other agent, including another agent assigned to the installation, is
 denied with `agent_mismatch`, and the audit event records the resolved agent.
 A v2 tool absent from the bundle's `harness_executor` routes is denied as
 `tool_not_registered`; the response and audit `policy_reason` direct the operator
-to re-sync the harness manifest. A tool registered with `connector_binding`
-remains denied on this decision-only endpoint as `preflight_required`, with an
-audit reason that identifies the connector route and complete-plan requirement. A trusted
-`harness_executor` may instead request an exact-target decision by including
-`connector: {connector_id, capability}` and a non-empty `resource` alongside
-`tool`. The runtime verifies the connector and capability against the local
-v2 bundle, then evaluates the tool policy with `connector_id`, `capability`,
-and `resource_id` in the same decision. This is decision-only: it returns no
-credential and does not authorize `connector_binding` tools or provide an
-execution route.
+to re-sync the harness manifest. For a registered `connector_binding` tool,
+the request may include `tool_args` and `tool_context`; the runtime validates
+them against the bundle's closed plan schemas, derives every operation locally,
+and evaluates the complete plan before returning a decision. Inputs are accepted
+only on this tenant-local socket and are never sent to the control plane or
+copied to audit. Missing, malformed, or incomplete plan data denies. The harness
+still executes the provider call; this endpoint returns no preflight handle,
+provider result, or credential.
+
+A trusted `harness_executor` may instead request an exact-target decision by
+including `connector: {connector_id, capability}` and a non-empty `resource`
+alongside `tool`. The runtime verifies the connector and capability against
+the local v2 bundle, then evaluates the tool policy with `connector_id`,
+`capability`, and `resource_id` in the same decision. This is decision-only: it
+returns no credential and does not authorize `connector_binding` tools or
+provide an execution route.
 
 Canonical MCP targets use `tool: "mcp:<connector-slug>.<upstream-tool-name>"`
 on this same decision-only socket. The runtime accepts them only when the
@@ -62,8 +68,8 @@ manifest is denied before policy matching. The harness keeps the MCP client and
 executes the upstream call itself after a permit; the runtime never receives or
 proxies the MCP payload.
 
-(The ADR-035 preflight/consume plan routes were removed with the connector
-invoke path in HAI-724; they are no longer served.)
+(The ADR-035 preflight/consume plan routes remain removed; complete-plan
+authorization is a local decision, not a replacement invoke path.)
 
 V1 socket behavior is
 unchanged, and one-shot `kei-proxy authorize` forwards a v2 decision to the
@@ -317,12 +323,12 @@ harness-executor tool, include both `tool` and
 `connector{connector_id, capability}`; the daemon checks the named tool against
 the trusted installation agent and live named session, verifies the connector
 and capability in the v2 bundle, and evaluates the tool policy with the exact
-connector/capability/resource context. `shared` and `per_user` connector
-credentials may be released only when the session-held credential's account
-model matches the verified bundle. A `per_user` credential is fetched using
-that named session's subject token and can only be used by the same session
-subject; the fresh policy decision binds the exact tool/connector/capability/
-resource tuple. Unsupported models, any tuple or audience mismatch, a deny, or
+connector/capability/resource context. For a v2 `connector_binding` tool,
+include the same `tool_args` and `tool_context` used for authorization. The
+runtime re-derives and re-evaluates the complete registered plan and verifies
+that the requested credential resource is the planned resource or its declared
+parent scope. `shared` and `per_user` credentials retain their existing
+session/audience constraints; mismatches, unsupported models, a deny, or
 unavailable credentials return no credential. Optional `on_behalf_of` is forwarded only
 for audit attribution and never affects authorization. The request is
 `kei.credential-release-request/v1` (the session in `X-Kei-Session`); the answer is

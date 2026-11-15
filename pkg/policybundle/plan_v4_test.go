@@ -18,6 +18,53 @@ func v4ArrayTool(refType string) V2Tool {
 	return tool
 }
 
+func TestBuildV2OperationsDerivesStructuredPolicyTargetsFromValidatedArgs(t *testing.T) {
+	plan, _ := json.Marshal(map[string]any{
+		"args_schema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"repository":   map[string]any{"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+				"issue_number": map[string]any{"type": "integer", "minimum": 1},
+			},
+			"required": []any{"repository", "issue_number"}, "additionalProperties": false,
+		},
+		"context_schema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		"operations": []any{map[string]any{
+			"id": "read-issue", "capability": "repository.read",
+			"resource": map[string]any{
+				"type": "issue", "id": map[string]any{"from": "args", "pointer": "/issue_number", "type": "integer"},
+				"parent": map[string]any{"type": "repository", "id": map[string]any{"from": "args", "pointer": "/repository", "type": "string"}},
+			},
+			"provider_resource_template": "repos/{parent.id}/issues/{resource.id}",
+			"provider_input":             map[string]any{},
+		}},
+	})
+	tool := V2Tool{
+		Name: "github.get_issue", Source: "github", RequiredCapabilities: []string{"repository.read"},
+		ResourceTypes: []V2ResourceType{{Type: "issue", ParentType: "repository"}}, Plan: plan,
+	}
+	tool.Route.ConnectorBinding = &struct {
+		ConnectorID string `json:"connector_id"`
+	}{ConnectorID: "conn-github"}
+	operations, err := BuildV2Operations(tool, "conn-github", []byte(`{"repository":"acme/kei","issue_number":7}`), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("BuildV2Operations: %v", err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("operations = %#v", operations)
+	}
+	got := operations[0]
+	if got.ConnectorID != "conn-github" || got.Capability != "repository.read" || got.ResourceType != "issue" || got.ResourceID != "7" || got.ResourceParentType != "repository" || got.ResourceParent != "acme/kei" || got.ProviderResource != "repos/acme/kei/issues/7" || got.CredentialResource != "repos/acme/kei" {
+		t.Fatalf("derived operation = %#v", got)
+	}
+	if _, err := BuildV2Operations(tool, "other-connector", []byte(`{"repository":"acme/kei","issue_number":7}`), []byte(`{}`)); err == nil {
+		t.Fatal("mismatched connector accepted")
+	}
+	if _, err := BuildV2Operations(tool, "conn-github", []byte(`{"repository":"acme/kei","issue_number":0}`), []byte(`{}`)); err == nil {
+		t.Fatal("invalid tool args accepted")
+	}
+}
+
 func TestV4ProviderInputAllowsTypedCompositeRefsAndRejectsMismatch(t *testing.T) {
 	tool := v4ArrayTool("array")
 	if err := ValidateV2Plan(tool); err != nil {

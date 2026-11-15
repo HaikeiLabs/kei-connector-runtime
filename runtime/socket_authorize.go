@@ -52,6 +52,8 @@ type socketAuthorizeRequest struct {
 	DelegationDepth int                       `json:"delegation_depth,omitempty"`
 	Framework       string                    `json:"framework,omitempty"`
 	ToolArgsDigest  string                    `json:"tool_args_digest,omitempty"`
+	ToolArgs        json.RawMessage           `json:"tool_args,omitempty"`
+	ToolContext     json.RawMessage           `json:"tool_context,omitempty"`
 	OnBehalfOf      string                    `json:"on_behalf_of,omitempty"`
 	// ShellCommand is accepted only over the tenant-local socket and is used
 	// solely to evaluate shell: policies. It is never copied to audit events.
@@ -906,12 +908,16 @@ func (l *LocalPDP) handlePolicyBundleStatus(w http.ResponseWriter) {
 
 func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, includeEnrollment bool) {
 	var req socketAuthorizeRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != authorizeRequestSchema {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != authorizeRequestSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+authorizeRequestSchema+" object with no unknown fields")
 		return
 	}
 	if (req.Tool == "" && req.Connector == nil) || (req.Connector != nil && (req.Connector.ConnectorID == "" || req.Connector.Capability == "")) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs a tool, connector, or tool with connector{connector_id, capability}")
+		return
+	}
+	if (len(req.ToolContext) > 0 && len(req.ToolArgs) == 0) || (len(req.ToolArgs) > 0 && !l.isV2ConnectorTool(req.Tool)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "tool_args and tool_context are only valid for a registered connector_binding tool")
 		return
 	}
 	if !validOnBehalfOf(req.OnBehalfOf) {
@@ -955,12 +961,16 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 // whether a credential was released, never the credential value.
 func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Request) {
 	var req socketAuthorizeRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != credentialReleaseRequestSchema {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != credentialReleaseRequestSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+credentialReleaseRequestSchema+" object with no unknown fields")
 		return
 	}
 	if req.Connector == nil || req.Connector.ConnectorID == "" || req.Connector.Capability == "" {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a connector{connector_id, capability} is required for a credential release")
+		return
+	}
+	if (len(req.ToolContext) > 0 && len(req.ToolArgs) == 0) || (len(req.ToolArgs) > 0 && !l.isV2ConnectorTool(req.Tool)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "tool_args and tool_context are only valid for a registered connector_binding tool")
 		return
 	}
 	if req.Resource == "" {

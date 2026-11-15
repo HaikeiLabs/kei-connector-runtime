@@ -1,0 +1,47 @@
+kei-proxy (kei-connector-runtime)
+Copyright 2026 Haikei Labs
+
+This product includes software developed at Haikei Labs
+(https://haikeilabs.com/).
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+------------------------------------------------------------------------
+
+Bundled third-party software
+
+The kei-proxy release binaries are statically linked Go programs. They
+include third-party Go modules under their own licenses (Apache-2.0,
+BSD-3-Clause and MIT); go.mod and go.sum list every module and version.
+No third-party source is vendored or copied into this repository.
+
+The following Apache-2.0 modules ship NOTICE files, reproduced here as
+section 4(d) of the Apache License requires.
+
+AWS SDK for Go v2 (github.com/aws/aws-sdk-go-v2):
+
+  AWS SDK for Go
+  Copyright 2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  Copyright 2014-2015 Stripe, Inc.
+
+Smithy Go (github.com/aws/smithy-go):
+
+  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+gRPC-Go (google.golang.org/grpc):
+
+  Copyright 2014 gRPC authors.
+
+kei-connector-contracts (github.com/HaikeiLabs/kei-connector-contracts):
+
+  Copyright 2026 Haikei Labs

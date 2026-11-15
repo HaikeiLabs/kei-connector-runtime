@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/contract"
@@ -195,6 +196,107 @@ func ValidatePlanData(tool V2Tool, argsRaw, contextRaw []byte) (args, context []
 		return nil, nil, errors.New("tool context does not match the declared schema")
 	}
 	return args, context, nil
+}
+
+// BuildV2Operations validates caller-supplied plan data and derives the exact
+// policy operations from the trusted tool plan. Provider inputs are excluded:
+// this function creates authorization targets only and never executes them.
+func BuildV2Operations(tool V2Tool, connectorID string, argsRaw, contextRaw []byte) ([]Operation, error) {
+	if tool.Route.ConnectorBinding == nil || connectorID == "" || tool.Route.ConnectorBinding.ConnectorID != connectorID {
+		return nil, errors.New("connector binding does not match the registered tool")
+	}
+	args, context, err := ValidatePlanData(tool, argsRaw, contextRaw)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := ParseV2Plan(tool)
+	if err != nil {
+		return nil, err
+	}
+	argValues, err := planObjectValues(args)
+	if err != nil {
+		return nil, err
+	}
+	contextValues, err := planObjectValues(context)
+	if err != nil {
+		return nil, err
+	}
+	operations := make([]Operation, 0, len(plan.Operations))
+	for _, planned := range plan.Operations {
+		op := Operation{ID: planned.ID, ConnectorID: connectorID, Capability: planned.Capability, Action: "call", ProviderResource: planned.ProviderResourceTemplate}
+		if planned.Resource != nil {
+			op.ResourceType = planned.Resource.Type
+			if planned.Resource.ID != nil {
+				op.ResourceID, err = planReferenceValue(*planned.Resource.ID, argValues, contextValues)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if parent := planned.Resource.Parent; parent != nil {
+				op.ResourceParentType = parent.Type
+				if parent.ID != nil {
+					op.ResourceParent, err = planReferenceValue(*parent.ID, argValues, contextValues)
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+		if op.ResourceID != "" {
+			op.ProviderResource = strings.ReplaceAll(op.ProviderResource, "{resource.id}", op.ResourceID)
+		}
+		if op.ResourceParent != "" {
+			op.ProviderResource = strings.ReplaceAll(op.ProviderResource, "{parent.id}", op.ResourceParent)
+			if marker := strings.Index(planned.ProviderResourceTemplate, "{parent.id}"); marker >= 0 {
+				parentTemplate := planned.ProviderResourceTemplate[:marker+len("{parent.id}")]
+				op.CredentialResource = strings.ReplaceAll(parentTemplate, "{parent.id}", op.ResourceParent)
+			}
+		}
+		if op.CredentialResource == "" {
+			op.CredentialResource = op.ProviderResource
+		}
+		operations = append(operations, op)
+	}
+	return operations, nil
+}
+
+func planObjectValues(raw []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var values map[string]any
+	if err := decoder.Decode(&values); err != nil || values == nil {
+		return nil, errors.New("plan data is invalid")
+	}
+	return values, nil
+}
+
+func planReferenceValue(ref V2PlanReference, args, context map[string]any) (string, error) {
+	var values map[string]any
+	var key string
+	switch ref.From {
+	case "args":
+		values = args
+		key = decodePointerSegment(strings.TrimPrefix(ref.Pointer, "/"))
+	case "context":
+		values = context
+		key = ref.Field
+	default:
+		return "", errors.New("plan reference source is invalid")
+	}
+	value, ok := values[key]
+	if !ok {
+		return "", errors.New("plan reference value is missing")
+	}
+	switch scalar := value.(type) {
+	case string:
+		return scalar, nil
+	case json.Number:
+		return scalar.String(), nil
+	case bool:
+		return strconv.FormatBool(scalar), nil
+	default:
+		return "", errors.New("plan reference value is not scalar")
+	}
 }
 
 func canonicalPlanObject(raw []byte) ([]byte, any, error) {
