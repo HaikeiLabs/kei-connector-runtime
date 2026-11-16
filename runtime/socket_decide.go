@@ -343,7 +343,7 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 	if !capabilityFound {
 		return denied("capability_not_registered", "capability is not declared for the connector")
 	}
-	d, err := e.AuthorizeV2HarnessToolForTarget(ctx, pdp.Request{
+	d, err := e.AuthorizeV2HarnessToolRelease(ctx, pdp.Request{
 		Session: sessionID, Tool: req.Tool, AgentID: trusted,
 	}, req.Connector.ConnectorID, req.Connector.Capability, req.Resource)
 	if err != nil {
