@@ -12,7 +12,12 @@ on for local desktop installs and off for server deployments; set it to `false`
 to disable. When enabled, the mode-0600 socket binds requests that omit a
 session to a named session for the v2 bundle's verified installation subject.
 The tokenless routes are `POST /v1/authorize` and
-`/v1/credentials:release`. The subject is
+`/v1/credentials:release`. The Unix socket also accepts tokenless
+`POST /v1/mcp-manifests:sync` from the local harness: it accepts MCP tool
+metadata only, resolves the connector from the verified bundle, and submits a
+candidate with the runtime credential. It never grants access; an admin must
+approve the candidate and the refreshed bundle must contain that exact hash
+before calls are permitted. This route is not served on TCP. The subject is
 rebound on bundle refresh and its session is ended if the subject disappears
 or changes. If the current v2 bundle
 does not provide a usable subject, tokenless calls fail closed with
@@ -59,14 +64,15 @@ returns no credential and does not authorize `connector_binding` tools or
 provide an execution route.
 
 Canonical MCP targets use `tool: "mcp:<connector-slug>.<upstream-tool-name>"`
-on this same decision-only socket. The runtime accepts them only when the
-verified v2 bundle contains that MCP connector and its approved manifest lists
-the exact upstream tool. It then evaluates `harness_policies` using the
-canonical target and the request's harness kind. This is not the generic
-unregistered-tool matcher: an unapproved method, missing connector, or missing
-manifest is denied before policy matching. The harness keeps the MCP client and
-executes the upstream call itself after a permit; the runtime never receives or
-proxies the MCP payload.
+on this same decision-only socket, with `mcp_manifest_hash` set to the hash of
+the currently discovered tool list. The runtime accepts them only when the
+verified v2 bundle contains that MCP connector, the supplied hash exactly
+matches its approved manifest, and that manifest lists the exact upstream
+tool. It then evaluates `harness_policies` using the canonical target and the
+request's harness kind. A missing/unapproved manifest or hash drift is denied
+before policy matching. The harness keeps the MCP client and executes the
+upstream call itself after a permit; the runtime receives only tool metadata
+for catalog registration and never receives or proxies MCP call payloads.
 
 (The ADR-035 preflight/consume plan routes remain removed; complete-plan
 authorization is a local decision, not a replacement invoke path.)
@@ -120,6 +126,7 @@ This daemon-socket model brings three benefits:
 
 The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
 `POST /v1/authorize`, `POST /v1/credentials:release`,
+`POST /v1/mcp-manifests:sync` (Unix socket only),
 `PUT/DELETE/GET /v1/session`, and the opt-in
 `POST /v1/session:subjectToken` (see below). Session creation accepts only `kei.session/v2`;
 the legacy `kei.session/v1` request is rejected. GET or DELETE without

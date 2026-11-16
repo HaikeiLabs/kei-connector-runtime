@@ -115,6 +115,9 @@ func (l *LocalPDP) decideMCPTool(ctx context.Context, sessionID string, req sock
 	if req.Framework == "" {
 		return deny("invalid_mcp_request", "MCP authorization requires a harness identity")
 	}
+	if !validMCPManifestHash(req.MCPManifestHash) {
+		return deny("invalid_mcp_request", "MCP authorization requires the hash of the discovered tool manifest")
+	}
 	target := strings.TrimPrefix(req.Tool, "mcp:")
 	slug, tool, ok := strings.Cut(target, ".")
 	if !ok || !validMCPSlug(slug) || !validMCPToolName(tool) {
@@ -123,6 +126,20 @@ func (l *LocalPDP) decideMCPTool(ctx context.Context, sessionID string, req sock
 	trusted := l.trustedAgentID()
 	if trusted == "" {
 		return deny("agent_mismatch", "runtime installation has no default agent")
+	}
+	verified, ok := l.evaluator.Load().Bundle()
+	if !ok {
+		return deny(pdp.ReasonPolicyBundleMissing, "verified policy bundle is unavailable")
+	}
+	connector, ok := verified.MCPConnector(slug)
+	if !ok || connector.MCP == nil {
+		return deny("connector_not_registered", "MCP connector is not in the verified policy bundle")
+	}
+	if connector.MCP.ApprovedManifestHash == "" {
+		return deny("mcp_manifest_unapproved", "the connector has no approved MCP tool manifest")
+	}
+	if req.MCPManifestHash != connector.MCP.ApprovedManifestHash {
+		return deny("mcp_manifest_drift", "the discovered MCP tool manifest differs from the approved manifest")
 	}
 	d, err := l.evaluator.Load().AuthorizeV2MCP(ctx, sessionID, slug, tool, trusted, req.Framework)
 	return d, true, false, err

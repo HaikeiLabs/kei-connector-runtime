@@ -57,6 +57,7 @@ type socketAuthorizeRequest struct {
 	ToolArgsDigest  string                    `json:"tool_args_digest,omitempty"`
 	ToolArgs        json.RawMessage           `json:"tool_args,omitempty"`
 	ToolContext     json.RawMessage           `json:"tool_context,omitempty"`
+	MCPManifestHash string                    `json:"mcp_manifest_hash,omitempty"`
 	OnBehalfOf      string                    `json:"on_behalf_of,omitempty"`
 	// ShellCommand is accepted only over the tenant-local socket and is used
 	// solely to evaluate shell: policies. It is never copied to audit events.
@@ -195,6 +196,7 @@ type LocalPDP struct {
 	sessionCreds          sync.Map
 	runner                http.Handler
 	toolRegistrar         ToolRegistrar
+	mcpManifestRegistrar  mcpManifestSubmitter
 	modelConfigHandler    http.Handler
 	stopSweep             chan struct{}
 	closeOnce             sync.Once
@@ -213,7 +215,9 @@ type LocalPDP struct {
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, stopSweep: make(chan struct{})}
 	if cfg != nil && cfg.ControlPlaneURL() != "" {
-		l.toolRegistrar = runtimeToolRegistrar{client: &runtimeClient{baseURL: strings.TrimRight(cfg.ControlPlaneURL(), "/"), client: &http.Client{Timeout: 15 * time.Second}}}
+		client := &runtimeClient{baseURL: strings.TrimRight(cfg.ControlPlaneURL(), "/"), client: &http.Client{Timeout: 15 * time.Second}}
+		l.toolRegistrar = runtimeToolRegistrar{client: client}
+		l.mcpManifestRegistrar = client
 	}
 	// A named session's credentials go with it, however it ends.
 	l.Sessions.OnEnd(l.sessionEnded)
@@ -580,6 +584,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		case r.URL.Path == "/v1/credentials:release" && r.Method == http.MethodPost && l.creds != nil:
 		case r.URL.Path == "/v1/tools:register" && r.Method == http.MethodPost:
+		case r.URL.Path == mcpManifestSyncPath && r.Method == http.MethodPost && allowUnauthenticatedAuthorize:
 		case r.URL.Path == "/v1/model-config" && r.Method == http.MethodGet && l.modelConfigHandler != nil:
 		// Owner-only Unix socket only, never a TCP listener, and always
 		// token-authenticated (not a tokenless owner route).
@@ -598,7 +603,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		ownerID, ownerEnabled, ownerUnavailable := l.ownerID, l.tokenlessOwnerSession, l.ownerUnavailable
 		l.ownerMu.RUnlock()
 		unauthenticatedOwner := allowUnauthenticatedAuthorize && routeAllowsOwner && ownerEnabled && ownerID != "" && !authenticated && session.FromRequest(r) == pdp.DefaultSession
-		if !authenticated && !unauthenticatedOwner && !(allowUnauthenticatedAuthorize && ownerEnabled && routeAllowsOwner && !authenticated && ownerUnavailable) {
+		localManifestSync := allowUnauthenticatedAuthorize && r.Method == http.MethodPost && r.URL.Path == mcpManifestSyncPath && !authenticated
+		if !authenticated && !unauthenticatedOwner && !localManifestSync && !(allowUnauthenticatedAuthorize && ownerEnabled && routeAllowsOwner && !authenticated && ownerUnavailable) {
 			writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
 			return
 		}
@@ -623,6 +629,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.runner.ServeHTTP(w, r)
 		case r.URL.Path == "/v1/tools:register":
 			l.handleToolRegistration(w, r)
+		case r.URL.Path == mcpManifestSyncPath:
+			l.handleMCPManifestSync(w, r)
 		case r.URL.Path == "/v1/credentials:release":
 			l.handleCredentialRelease(w, r)
 		case r.URL.Path == "/v1/model-config":
