@@ -1,17 +1,14 @@
 # Standalone kei-connector-runtime release workflow.
 #
-# Triggered by pushing a proxy-vX.Y.Z tag, or manually with a version bump.
-# Manual dispatches first create the calculated tag, then release it in the
-# same run so the version is persisted for future increments.
+# Manually dispatched by a repository or organization owner with a version
+# bump. The release-tag GitHub App creates the calculated tag, then the same
+# run publishes it.
 # The workflow mirrors the kei-cli release flow while keeping runtime-daemon
 # artifacts under their own S3 prefix.
 
 name: Release kei-proxy
 
 on:
-  push:
-    tags:
-      - 'proxy-v*'
   workflow_dispatch:
     inputs:
       bump:
@@ -41,7 +38,7 @@ jobs:
   authorize_manual_release:
     name: Authorize manual release
     if: github.event_name == 'workflow_dispatch'
-    runs-on: kei-proxy-release
+    runs-on: ubuntu-latest
     steps:
       - name: Require repository or organization owner
         uses: actions/github-script@v7
@@ -61,10 +58,8 @@ jobs:
   validate-tag:
     name: Validate tag
     needs: [authorize_manual_release]
-    # A skipped authorization is only acceptable on tag pushes; a manual
-    # dispatch must pass the owner check.
-    if: always() && (needs.authorize_manual_release.result == 'success' || (github.event_name == 'push' && needs.authorize_manual_release.result == 'skipped'))
-    runs-on: kei-proxy-release
+    if: needs.authorize_manual_release.result == 'success'
+    runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.parse.outputs.tag }}
       version: ${{ steps.parse.outputs.version }}
@@ -128,15 +123,22 @@ jobs:
   release:
     name: Release
     needs: [validate-tag]
-    # validate-tag depends on authorize_manual_release, which is skipped on tag
-    # pushes. Without an explicit if:, the implicit success() sees that skip in
-    # the needs chain and skips this job too, so tag pushes never released.
-    if: ${{ always() && needs.validate-tag.result == 'success' }}
+    if: github.ref == 'refs/heads/main' && needs.validate-tag.result == 'success'
     runs-on: kei-proxy-release
     permissions:
       contents: write
     environment: release
     steps:
+      - name: Create release tag token
+        if: github.event_name == 'workflow_dispatch'
+        id: release-tag-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: HaikeiLabs
+          repositories: kei-connector-runtime
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -146,11 +148,18 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+          RELEASE_APP_TOKEN: ${{ steps.release-tag-token.outputs.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag "$RELEASE_TAG" "$GITHUB_SHA"
-          git push origin "refs/tags/$RELEASE_TAG"
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${RELEASE_APP_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "{\"ref\":\"refs/tags/${RELEASE_TAG}\",\"sha\":\"${GITHUB_SHA}\"}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs"
 
       - name: Create local GoReleaser semver tag
         env:
