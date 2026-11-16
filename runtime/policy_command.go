@@ -15,9 +15,10 @@ import (
 // RunPolicySync fetches the installation's bundle once over HTTPS with the
 // runtime token, validates it against kei.policy-bundle/v2 and persists it
 // atomically (0600) in KEI_RUNTIME_STATE_DIR, then prints `policy show`.
-func RunPolicySync(ctx context.Context, args []string, stdout, stderr io.Writer, cfg PolicyConfig, identityFunc IdentityFunc, syncBundle SyncBundleFunc, checkRevocation func(error) bool, revokeState func()) int {
+func RunPolicySync(ctx context.Context, args []string, stdout, stderr io.Writer, cfg PolicyConfig, identityFunc IdentityFunc, syncBundle SyncBundleFunc, checkRevocation func(error) bool, revokeState func(), forceSyncBundle ...SyncBundleFunc) int {
 	fs := flag.NewFlagSet("policy sync", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	force := fs.Bool("force", false, "request a fresh policy bundle from the catalog")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -37,7 +38,16 @@ func RunPolicySync(ctx context.Context, args []string, stdout, stderr io.Writer,
 		fmt.Fprintf(stderr, "Error: runtime identity unavailable: %v\n", err)
 		return 1
 	}
-	syncErr := syncBundle(identity)
+	var syncErr error
+	if *force {
+		if len(forceSyncBundle) == 0 || forceSyncBundle[0] == nil {
+			fmt.Fprintln(stderr, "Error: forced policy refresh is unavailable")
+			return 1
+		}
+		syncErr = forceSyncBundle[0](identity)
+	} else {
+		syncErr = syncBundle(identity)
+	}
 	if syncErr != nil {
 		fmt.Fprintf(stderr, "Error: policy bundle sync failed: %v\n", syncErr)
 	}

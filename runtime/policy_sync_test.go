@@ -37,6 +37,7 @@ type fakePolicyCatalog struct {
 	badETag     bool
 	whoamiCode  int
 	bundleCalls int
+	forceCalls  int
 }
 
 func (f *fakePolicyCatalog) set(body []byte, status int, badETag bool) {
@@ -59,7 +60,17 @@ func (f *fakePolicyCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(policyTestIdentity)
-	case "/api/v1/runtime/policy-bundles/current":
+	case "/api/v1/runtime/policy-bundles/current", "/api/v1/runtime/policy-bundles/current:refresh":
+		if r.URL.Path == "/api/v1/runtime/policy-bundles/current:refresh" {
+			if r.Method != http.MethodPost || r.Header.Get("If-None-Match") != "" {
+				http.Error(w, "invalid force refresh request", http.StatusBadRequest)
+				return
+			}
+			f.forceCalls++
+		} else if r.Method != http.MethodGet {
+			http.Error(w, "invalid bundle request", http.StatusMethodNotAllowed)
+			return
+		}
 		f.bundleCalls++
 		if f.status != 0 && f.status != http.StatusOK {
 			w.WriteHeader(f.status)
@@ -195,6 +206,66 @@ func TestPolicySyncPersistsSchemaExampleAndShowReadsItOffline(t *testing.T) {
 	}
 	if bytes.Contains(stdout.Bytes(), []byte("src_pattern")) {
 		t.Fatal("policy show printed bundle contents")
+	}
+}
+
+func TestForceRefreshPolicyBundleUsesInstallationScopedRefreshEndpoint(t *testing.T) {
+	now := time.Now().UTC()
+	catalog := &fakePolicyCatalog{body: bundleWithVersion(t, now, 42)}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+	cfg := policyTestConfig(server.URL, t.TempDir())
+	identity := &keiruntime.Identity{ID: policyTestIdentity.ID, OrgID: policyTestIdentity.OrgID, WorkspaceID: policyTestIdentity.WorkspaceID}
+	if err := connectorruntime.SyncPolicyBundle(context.Background(), cfg, &connectorruntime.RuntimeIdentity{ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	catalog.set(bundleWithVersion(t, now, 43), http.StatusOK, false)
+	var stdout, stderr bytes.Buffer
+	syncBundle := func(id *keiruntime.Identity) error {
+		return keiruntime.SyncPolicyBundle(context.Background(), cfg, id, time.Second)
+	}
+	forceBundle := func(id *keiruntime.Identity) error {
+		return keiruntime.ForceRefreshPolicyBundle(context.Background(), cfg, id, time.Second)
+	}
+	if code := keiruntime.RunPolicySync(context.Background(), []string{"--force"}, &stdout, &stderr, cfg, func() (*keiruntime.Identity, error) { return identity, nil }, syncBundle, connectorruntime.IsRuntimeRevocation, func() { connectorruntime.RevokePolicyState(cfg) }, forceBundle); code != 0 {
+		t.Fatalf("forced policy sync exit=%d stderr=%s", code, stderr.String())
+	}
+	catalog.mu.Lock()
+	forceCalls := catalog.forceCalls
+	catalog.mu.Unlock()
+	if forceCalls != 1 {
+		t.Fatalf("force endpoint calls = %d, want 1", forceCalls)
+	}
+	status, err := keiruntime.PolicyStatus(cfg)
+	if err != nil || status.BundleVersion != 43 || status.State != policybundle.Active {
+		t.Fatalf("post-refresh status = %+v, err=%v", status, err)
+	}
+}
+
+func TestForceRefreshFailureReturnsErrorAndKeepsActiveBundle(t *testing.T) {
+	now := time.Now().UTC()
+	catalog := &fakePolicyCatalog{body: bundleWithVersion(t, now, 42)}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+	cfg := policyTestConfig(server.URL, t.TempDir())
+	identity := &keiruntime.Identity{ID: policyTestIdentity.ID, OrgID: policyTestIdentity.OrgID, WorkspaceID: policyTestIdentity.WorkspaceID}
+	rootIdentity := &connectorruntime.RuntimeIdentity{ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID}
+	if err := connectorruntime.SyncPolicyBundle(context.Background(), cfg, rootIdentity, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	catalog.set(nil, http.StatusConflict, false)
+	var stdout, stderr bytes.Buffer
+	forceBundle := func(id *keiruntime.Identity) error {
+		return keiruntime.ForceRefreshPolicyBundle(context.Background(), cfg, id, time.Second)
+	}
+	if code := keiruntime.RunPolicySync(context.Background(), []string{"--force"}, &stdout, &stderr, cfg, func() (*keiruntime.Identity, error) { return identity, nil }, func(id *keiruntime.Identity) error {
+		return keiruntime.SyncPolicyBundle(context.Background(), cfg, id, time.Second)
+	}, connectorruntime.IsRuntimeRevocation, func() { connectorruntime.RevokePolicyState(cfg) }, forceBundle); code == 0 {
+		t.Fatal("forced refresh command succeeded on catalog 409")
+	}
+	status, err := keiruntime.PolicyStatus(cfg)
+	if err != nil || status.BundleVersion != 42 || status.State != policybundle.Active {
+		t.Fatalf("failed force refresh changed active status: %+v, err=%v", status, err)
 	}
 }
 
