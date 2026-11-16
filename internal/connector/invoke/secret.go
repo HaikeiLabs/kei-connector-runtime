@@ -65,6 +65,39 @@ func ParseConnectorRef(ref string) (connectorID, field string, ok bool) {
 	return connectorID, field, true
 }
 
+// IsExternalRef reports whether a descriptor credential_ref is the
+// customer's own secret (an external credential_ref, HAI-1000) rather than a
+// kei://connectors reference.
+func IsExternalRef(ref string) bool {
+	return ref != "" && !strings.HasPrefix(ref, connectorRefPrefix)
+}
+
+// CheckExternalField reports whether field of descriptor c, whose
+// credential_ref is external, was resolved by credential sync: the connector
+// reference index must hold an External entry for exactly that connector and
+// field, in the descriptor's backend, naming the descriptor's ref. Otherwise
+// it returns a *SecretError (unresolved_reference, credential_backend_mismatch
+// or credential_unavailable). It reads no secret value.
+func (r SecretResolver) CheckExternalField(c policybundle.Connector, field string) error {
+	if !IsExternalRef(c.CredentialRef) || c.CredentialBackend == "" {
+		return &SecretError{"unresolved_reference", "the reference does not name the connector's credential field"}
+	}
+	if r.IndexPath == "" {
+		return &SecretError{"credential_unavailable", "the connector credential is not available"}
+	}
+	entry, err := runtimecredentials.ReadConnectorReference(r.IndexPath, c.ID, field)
+	if err != nil || !entry.External {
+		return &SecretError{"unresolved_reference", "the reference does not name a credential resolved for this connector"}
+	}
+	if entry.SecretBackend != c.CredentialBackend {
+		return &SecretError{"credential_backend_mismatch", "the delivered credential does not match the descriptor"}
+	}
+	if canonical, ok := runtimecredentials.ExternalSecretRef(entry.SecretBackend, c.CredentialRef); !ok || canonical != entry.SecretRef {
+		return &SecretError{"unresolved_reference", "the reference does not name a credential resolved for this connector"}
+	}
+	return nil
+}
+
 // Resolve returns the credential value for descriptor c, or a *SecretError.
 // Nothing is retried, and no other backend is tried.
 func (r SecretResolver) Resolve(ctx context.Context, c policybundle.Connector) (string, error) {

@@ -343,6 +343,42 @@ harness-provided type-prefixed `on_behalf_of`.
 release, answers `404`. The value is held in session memory and flushed when
 the session ends; it is never logged or printed.
 
+#### Tenant-stored (`opaque_ref`) credentials (HAI-1066)
+
+When the connector's bundle descriptor has `credential_source: opaque_ref`
+(for example a postgres DSN), the daemon does not ask the identity service.
+After the same full decision (and plan re-evaluation for a `connector_binding`
+tool), it reads the secret from the runtime's own secret store
+(`KEI_SECRETS_BACKEND`) using the descriptor's credential reference:
+
+- a `kei://connectors/<id>/<field>` reference is looked up in the connector
+  reference index that `kei-proxy credential sync` wrote (in
+  `KEI_RUNTIME_STATE_DIR`). The entry is either a secret Kei delivered or an
+  external `credential_ref` (the customer's own secret name, HAI-1000) that
+  sync found in the configured store;
+- the index entry's backend must equal the descriptor's `credential_backend`.
+
+The response has the same shape as an OAuth release: `credential.connector_id`,
+`account_model` (`shared`), and the value in `access_token`. `issuer` and
+`expires_at` are empty, because a tenant-stored secret has neither, so request
+it again for each call. Only a tool-bound request (`tool` plus `connector`)
+for a `shared` connector is released. Secret-store connectors use the shared
+account model only (owner decision 2026-11-15). Every failure denies with no
+credential:
+
+| `reason_code` | When |
+|---|---|
+| `connector_not_registered` | The bundle has no descriptor for the connector |
+| `account_model_not_supported` | The descriptor's `account_model` is missing, `domain_delegation`, or `per_user` (a tenant-stored secret is one shared account) |
+| `credential_source_not_supported` | The request names no `tool` |
+| `credential_unavailable` | The secret was never delivered or resolved, `credential sync` ran with another state directory, no secret store is configured, or the read failed |
+| `credential_backend_mismatch` | The index entry is for another backend, or names another connector or field |
+| `descriptor_invalid` | The descriptor's reference does not name this connector |
+
+The value and its secret reference are never logged, never written to an audit
+record, and never part of a reason. The audit record of a release has
+`credential_kind: secret_store`.
+
 ### `POST /v1/session:subjectToken` (opt-in, `KEI_EXPORTABLE_SERVICE_PRINCIPALS`)
 
 Returns the subject token of a bound service principal to a caller that holds

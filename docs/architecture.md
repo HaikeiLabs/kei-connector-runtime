@@ -353,7 +353,13 @@ also serves `POST /v1/credentials:release`: after an allow decision, the
 daemon re-runs the same decision and, only on allow, returns the session-held
 connector credential value with its expiry; a deny returns a typed
 `reason_code` and no credential. The value is held in session memory, flushed
-when the session ends, and is never logged or printed.
+when the session ends, and is never logged or printed. For a shared
+`opaque_ref` connector (for example a postgres DSN), the daemon reads the
+credential from its own secret store (`KEI_SECRETS_BACKEND`) through the
+connector reference index that `kei-proxy credential sync` wrote, including
+external `credential_ref`s that sync resolved, and never asks the identity
+service. See [unix-socket.md](unix-socket.md#tenant-stored-opaque_ref-credentials-hai-1066)
+for the reason codes.
 Setting `KEI_EXPORTABLE_SERVICE_PRINCIPALS` (comma-separated service
 principal names; unset or empty by default, which refuses every request)
 enables `POST /v1/session:subjectToken`: a caller holding a principal session

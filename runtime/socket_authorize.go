@@ -18,6 +18,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/authorizerequest"
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
@@ -189,6 +191,7 @@ type LocalPDP struct {
 
 	// creds creates per-session credential stores held in sessionCreds.
 	creds                 *credrelease.Store
+	secrets               *invoke.SecretResolver
 	sessionCreds          sync.Map
 	runner                http.Handler
 	toolRegistrar         ToolRegistrar
@@ -345,6 +348,13 @@ func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
 // identities. Each session has its own store and every session end flushes it.
 // Without a store (legacy) sessions hold no credentials.
 func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = store }
+
+// SetConnectorSecrets sets the tenant secret store reader that
+// POST /v1/credentials:release uses for a shared opaque_ref connector
+// (HAI-1066): the connector reference index that `kei-proxy credential sync`
+// wrote, and the KEI_SECRETS_BACKEND store. Without one, those releases deny
+// credential_unavailable.
+func (l *LocalPDP) SetConnectorSecrets(r invoke.SecretResolver) { l.secrets = &r }
 
 // errCredentialReleaseOff is returned by UseCredential in legacy mode.
 var errCredentialReleaseOff = errors.New("session credential release is not enabled")
@@ -1015,33 +1025,38 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		if req.Tool != "" {
 			credentialResource = l.connectorCredentialResource(req.Connector.ConnectorID)
 		}
+		descriptor, hasDescriptor := l.bundleConnector(req.Connector.ConnectorID)
 		var expectedAccountModel string
-		if req.Tool != "" {
-			if e := l.evaluator.Load(); e != nil {
-				if verified, ok := e.Bundle(); ok {
-					if connector, found := verified.Connector(req.Connector.ConnectorID); found {
-						expectedAccountModel = connector.AccountModel
-					}
-				}
-			}
+		if req.Tool != "" && hasDescriptor {
+			expectedAccountModel = descriptor.AccountModel
 		}
 		var cred *socketCredentialReleaseCred
-		releaseErr := l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, credentialResource, func(c credrelease.ConnectorCredential) error {
-			if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != credentialResource) {
-				return errCredentialAudienceMismatch
-			}
-			if req.Tool != "" && (expectedAccountModel == "" || c.AccountModel != expectedAccountModel || (c.AccountModel != "shared" && c.AccountModel != "per_user")) {
-				return errCredentialAccountModelUnsupported
-			}
-			cred = &socketCredentialReleaseCred{
-				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
-				AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
-			}
-			return nil
-		})
+		var releaseErr error
+		if hasDescriptor && contract.CredentialSource(descriptor.CredentialSource) == contract.CredentialSourceOpaqueRef {
+			// A tenant-stored credential (HAI-1066): read from the runtime's
+			// secret store, never from the identity service.
+			cred, releaseErr = l.releaseTenantSecret(r.Context(), req.Tool != "", descriptor, credentialResource)
+		} else {
+			releaseErr = l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, credentialResource, func(c credrelease.ConnectorCredential) error {
+				if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != credentialResource) {
+					return errCredentialAudienceMismatch
+				}
+				if req.Tool != "" && (expectedAccountModel == "" || c.AccountModel != expectedAccountModel || (c.AccountModel != "shared" && c.AccountModel != "per_user")) {
+					return errCredentialAccountModelUnsupported
+				}
+				cred = &socketCredentialReleaseCred{
+					ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
+					AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
+				}
+				return nil
+			})
+		}
 		if releaseErr != nil {
 			var denied *credrelease.DeniedError
-			if errors.As(releaseErr, &denied) {
+			var secretErr *invoke.SecretError
+			if errors.As(releaseErr, &secretErr) {
+				resp.ReasonCode = secretErr.Code
+			} else if errors.As(releaseErr, &denied) {
 				resp.ReasonCode = credentialReleaseReason(denied.Reason)
 			} else if errors.Is(releaseErr, errCredentialAccountModelUnsupported) {
 				resp.ReasonCode = "account_model_not_supported"
@@ -1085,6 +1100,50 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// bundleConnector is connectorID's descriptor in the verified bundle.
+func (l *LocalPDP) bundleConnector(connectorID string) (policybundle.Connector, bool) {
+	e := l.evaluator.Load()
+	if e == nil {
+		return policybundle.Connector{}, false
+	}
+	verified, ok := e.Bundle()
+	if !ok {
+		return policybundle.Connector{}, false
+	}
+	return verified.Connector(connectorID)
+}
+
+// releaseTenantSecret reads an opaque_ref connector's credential from the
+// tenant secret store (HAI-1066, ADR-039), after the release decision allowed
+// the call. Only a tool-bound request for a shared connector is released: a
+// tenant-stored secret is one account for every caller, so a per_user (or any
+// other) account model denies account_model_not_supported (owner decision
+// 2026-11-15: secret_ref connectors are shared only). The value is returned
+// only in the release response; it and its reference are never logged,
+// audited or part of an error.
+func (l *LocalPDP) releaseTenantSecret(ctx context.Context, toolBound bool, c policybundle.Connector, resource string) (*socketCredentialReleaseCred, error) {
+	if !toolBound {
+		return nil, &invoke.SecretError{Code: "credential_source_not_supported", Reason: "a tenant-stored credential is released only for a tool-bound request"}
+	}
+	if contract.AccountModel(c.AccountModel) != contract.AccountModelShared {
+		return nil, &invoke.SecretError{Code: "account_model_not_supported", Reason: "a tenant-stored credential is released only for a shared connector"}
+	}
+	if l.secrets == nil {
+		return nil, &invoke.SecretError{Code: "credential_unavailable", Reason: "the connector credential is not available"}
+	}
+	value, err := l.secrets.Resolve(ctx, c)
+	if err != nil {
+		var secretErr *invoke.SecretError
+		if errors.As(err, &secretErr) {
+			return nil, err
+		}
+		return nil, &invoke.SecretError{Code: "credential_unavailable", Reason: "the connector credential is not available"}
+	}
+	// A tenant-stored secret has no issuer and no expiry: the harness asks
+	// for it again on every call.
+	return &socketCredentialReleaseCred{ConnectorID: c.ID, Resource: resource, AccountModel: c.AccountModel, AccessToken: value}, nil
 }
 
 // connectorCredentialResource is the audience the identity service issued
