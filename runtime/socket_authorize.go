@@ -191,8 +191,13 @@ type LocalPDP struct {
 	keychain  SessionKeychain
 
 	// creds creates per-session credential stores held in sessionCreds.
-	creds                 *credrelease.Store
-	secrets               *invoke.SecretResolver
+	creds *credrelease.Store
+	// secrets holds shared opaque_ref connector credentials in memory
+	// (HAI-1071); see connector_secrets.go.
+	secretsMu             sync.Mutex
+	secrets               *invoke.SecretCache
+	stopSecrets           context.CancelFunc
+	secretsDigest         string
 	sessionCreds          sync.Map
 	runner                http.Handler
 	toolRegistrar         ToolRegistrar
@@ -249,6 +254,7 @@ func (l *LocalPDP) SetTokenlessOwnerSession(enabled bool) {
 	}
 	if !enabled {
 		l.endOwnerSessionLocked()
+		l.releaseOwnerSecretsLocked()
 		l.ownerUnavailable = false
 	}
 	l.ownerMu.Unlock()
@@ -264,6 +270,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	if e == nil {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -271,6 +278,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	if !ok {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -288,6 +296,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	id, err := l.Sessions.CreatePinned(sub)
 	if err != nil {
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -299,6 +308,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 			l.dropSessionCredentials(id)
 			l.ownerID = ""
 			l.ownerUnavailable = true
+			l.releaseOwnerSecretsLocked()
 			l.ownerMu.Unlock()
 			return
 		}
@@ -309,6 +319,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 		// A concurrent bundle refresh ends this session and flushes a late load.
 		l.loadCredentials(context.Background(), id, sub)
 	}
+	l.prefetchSharedSecrets(context.Background(), ownerSecretHolder)
 }
 
 func (l *LocalPDP) endOwnerSessionLocked() {
@@ -316,6 +327,13 @@ func (l *LocalPDP) endOwnerSessionLocked() {
 		l.Sessions.EndID(l.ownerID)
 		l.ownerID = ""
 	}
+}
+
+// releaseOwnerSecretsLocked releases the owner session's hold on the shared
+// connector credentials when the owner session stops being available (not
+// when it is only recreated by a refresh).
+func (l *LocalPDP) releaseOwnerSecretsLocked() {
+	l.releaseSharedSecrets(ownerSecretHolder)
 }
 
 // SweepSessions ends idle named sessions until ctx is done or Close. The
@@ -352,13 +370,6 @@ func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
 // identities. Each session has its own store and every session end flushes it.
 // Without a store (legacy) sessions hold no credentials.
 func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = store }
-
-// SetConnectorSecrets sets the tenant secret store reader that
-// POST /v1/credentials:release uses for a shared opaque_ref connector
-// (HAI-1066): the connector reference index that `kei-proxy credential sync`
-// wrote, and the KEI_SECRETS_BACKEND store. Without one, those releases deny
-// credential_unavailable.
-func (l *LocalPDP) SetConnectorSecrets(r invoke.SecretResolver) { l.secrets = &r }
 
 // errCredentialReleaseOff is returned by UseCredential in legacy mode.
 var errCredentialReleaseOff = errors.New("session credential release is not enabled")
@@ -437,6 +448,7 @@ func (l *LocalPDP) OnSessionEnd(fn func(id string)) {
 
 func (l *LocalPDP) sessionEnded(id string) {
 	l.dropSessionCredentials(id)
+	l.releaseSharedSecrets(id)
 	l.endHooksMu.Lock()
 	hooks := append([]func(string){}, l.endHooks...)
 	l.endHooksMu.Unlock()
@@ -503,6 +515,7 @@ func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
 func (l *LocalPDP) Close() {
 	l.closeOnce.Do(func() { close(l.stopSweep) })
 	l.flushCredentials()
+	l.stopConnectorSecrets()
 }
 
 // flushCredentials flushes every session's credentials.
@@ -510,6 +523,7 @@ func (l *LocalPDP) flushCredentials() {
 	if l.creds != nil {
 		l.creds.Flush()
 	}
+	l.flushConnectorSecrets()
 	l.sessionCreds.Range(func(k, _ any) bool {
 		l.dropSessionCredentials(k.(string))
 		return true
@@ -548,6 +562,7 @@ func (l *LocalPDP) AfterSync(err error) {
 	if e == nil {
 		l.ownerMu.Lock()
 		l.endOwnerSessionLocked()
+		l.releaseOwnerSecretsLocked()
 		l.ownerUnavailable = l.tokenlessOwnerSession
 		l.ownerMu.Unlock()
 	}
@@ -562,6 +577,9 @@ func (l *LocalPDP) AfterSync(err error) {
 	if sub, ok := l.Sessions.Current(); !ok || sub.Status != pdp.StatusLinked {
 		l.flushSession(pdp.DefaultSession)
 	}
+	// A changed bundle refreshes shared connector credentials at once and
+	// drops those of removed or re-pointed connectors (HAI-1071).
+	l.syncSecretConnectors()
 }
 
 func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, checkAuth func(*http.Request) bool) http.Handler {
@@ -766,6 +784,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		l.loadCredentials(r.Context(), id, sub)
+		l.prefetchSharedSecrets(r.Context(), id)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(socketSessionResponse{Schema: sessionSchemaV2, SessionID: id, ServicePrincipalID: principal.ServicePrincipalID, SubjectType: "service_principal", IdleTTLSeconds: l.idleTTLSeconds()})
@@ -822,6 +841,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	l.loadCredentials(r.Context(), id, sub)
+	l.prefetchSharedSecrets(r.Context(), id)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(socketSessionResponse{
@@ -1138,10 +1158,12 @@ func (l *LocalPDP) releaseTenantSecret(ctx context.Context, toolBound bool, c po
 	if contract.AccountModel(c.AccountModel) != contract.AccountModelShared {
 		return nil, &invoke.SecretError{Code: "account_model_not_supported", Reason: "a tenant-stored credential is released only for a shared connector"}
 	}
-	if l.secrets == nil {
+	// Served from daemon memory (HAI-1071): this never reads the store.
+	secrets := l.ConnectorSecrets()
+	if secrets == nil {
 		return nil, &invoke.SecretError{Code: "credential_unavailable", Reason: "the connector credential is not available"}
 	}
-	value, err := l.secrets.Resolve(ctx, c)
+	value, err := secrets.Resolve(ctx, c)
 	if err != nil {
 		var secretErr *invoke.SecretError
 		if errors.As(err, &secretErr) {

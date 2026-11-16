@@ -279,7 +279,8 @@ unresolved. The daemon:
    it.
 2. **Resolves each reference.** With connector descriptors in the bundle,
    an `opaque_ref` reference must equal the descriptor's `credential_ref` and
-   resolves from the tenant secret store inside the daemon, with the same deny
+   resolves from the tenant secret store inside the daemon (from daemon
+   memory for a `shared` connector, see HAI-1071 below), with the same deny
    codes; a `per_user`
    `oauth` reference resolves from the session-held credential. Without
    descriptors, only the `token`/`access_token` field of a session OAuth
@@ -385,6 +386,38 @@ credential:
 The value and its secret reference are never logged, never written to an audit
 record, and never part of a reason. The audit record of a release has
 `credential_kind: secret_store`.
+
+#### Served from daemon memory (HAI-1071)
+
+An allowed release never waits on the secret store. The serve daemon keeps the
+credentials of `shared` `opaque_ref` connectors in memory and reads that
+memory on the call path:
+
+- **Prefetch.** When a session starts (`PUT /v1/session`, and the tokenless
+  owner session), the daemon loads every `shared` `opaque_ref` connector in
+  the verified bundle that it does not hold yet, before answering the session
+  request. Each read is bounded by the store timeout (5s) and the reads run in
+  parallel. When the bundle changes, the new connectors load in the
+  background.
+- **Calls.** A release reads memory only. A connector whose load failed, or
+  that is not loaded yet, denies at once with the load's reason code
+  (`credential_unavailable` for a store failure); the call never blocks.
+- **Refresh.** A background loop reloads each value every 5 minutes, and at
+  once when the bundle changes, so a rotated secret is picked up. A failed
+  load is retried with exponential backoff (1s, doubling, up to 5 minutes).
+  If a refresh fails with `credential_unavailable` (a store outage), the
+  value already loaded keeps being served, so running sessions are not
+  broken by an outage.
+- **Drop.** A value is dropped when its connector leaves the bundle, when its
+  `credential_ref` or `credential_backend` changes, when the last live
+  session ends, when the installation is revoked, and on daemon exit.
+- **Never persisted.** Values live only in the daemon's memory: never on
+  disk, in a log line (load failures log only the connector ID, reason code
+  and failure count), or in an error.
+
+The audit record of a release is unchanged: one row per call, with
+`credential_kind: secret_store`. `POST /v1/commands:run` reads the same
+memory for a `shared` `opaque_ref` reference.
 
 ### `POST /v1/session:subjectToken` (opt-in, `KEI_EXPORTABLE_SERVICE_PRINCIPALS`)
 

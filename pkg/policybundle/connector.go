@@ -1,6 +1,8 @@
 package policybundle
 
 import (
+	"encoding/json"
+
 	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
 )
 
@@ -30,6 +32,21 @@ type ConnectorCapability = bundle.ConnectorCapability
 // Connector returns the bundle's connector entry with id.
 func (v *Verified) Connector(id string) (Connector, bool) {
 	return v.toBundle().Connector(id)
+}
+
+// Connectors returns every policy_set.connectors entry of the bundle, or nil
+// when the policy set has none or does not decode.
+func (v *Verified) Connectors() []Connector {
+	if v == nil {
+		return nil
+	}
+	var set struct {
+		Connectors []Connector `json:"connectors"`
+	}
+	if json.Unmarshal(v.Payload.PolicySet, &set) != nil {
+		return nil
+	}
+	return set.Connectors
 }
 
 // CarriesConnectorDescriptors reports whether the bundle is v2 and its policy

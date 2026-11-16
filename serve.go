@@ -251,7 +251,7 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		local.SetCommandRunner(&runcommand.Daemon{
 			Authorize:     local.ConnectorGrant,
 			UseCredential: local.UseCredential,
-			Secrets:       secretResolver,
+			Secrets:       local.ConnectorSecrets(),
 			AppendAudit: func(record []byte) error {
 				emitFunc(record)
 				return nil

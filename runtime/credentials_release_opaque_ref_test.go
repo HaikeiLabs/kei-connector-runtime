@@ -48,14 +48,25 @@ type pgSecretStore struct {
 	mu     sync.Mutex
 	values map[string]string
 	reads  int
+	// fail and sleep simulate a store outage (HAI-1071).
+	fail  bool
+	sleep time.Duration
 }
 
-func (s *pgSecretStore) Get(_ context.Context, backend, ref string) (*string, error) {
+func (s *pgSecretStore) Get(ctx context.Context, backend, ref string) (*string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.reads++
 	v, ok := s.values[backend+"|"+ref]
-	if !ok {
+	fail, sleep := s.fail, s.sleep
+	s.mu.Unlock()
+	if sleep > 0 {
+		select {
+		case <-time.After(sleep):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if !ok || fail {
 		return nil, errors.New("secret not found")
 	}
 	return &v, nil
@@ -148,6 +159,8 @@ type pgRig struct {
 	mu       sync.Mutex
 	audit    []string
 	logs     *bytes.Buffer
+	pdp      *keiruntime.LocalPDP
+	dir      string
 }
 
 func (r *pgRig) auditText() string {
@@ -202,6 +215,7 @@ func newPGRig(t *testing.T, opts pgRigOptions) *pgRig {
 		l.SetConnectorSecrets(invoke.SecretResolver{IndexPath: index, Store: rig.store})
 	}
 	rig.h = sessionHandler(t, l)
+	rig.pdp, rig.dir = l, dir
 	return rig
 }
 
