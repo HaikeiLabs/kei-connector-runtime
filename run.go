@@ -35,7 +35,12 @@ func runPolicy(args []string) int {
 				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID, AgentID: identity.AgentID,
 			}, 30*time.Second)
 		}
-		return keiruntime.RunPolicySync(context.Background(), args[1:], os.Stdout, os.Stderr, cfg, identityFunc, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) })
+		forceSyncBundle := func(identity *keiruntime.Identity) error {
+			return ForceRefreshPolicyBundle(context.Background(), cfg, &RuntimeIdentity{
+				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID, AgentID: identity.AgentID,
+			}, 30*time.Second)
+		}
+		return keiruntime.RunPolicySync(context.Background(), args[1:], os.Stdout, os.Stderr, cfg, identityFunc, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, forceSyncBundle)
 	case "show":
 		return keiruntime.RunPolicyShow(args[1:], os.Stdout, os.Stderr, cfg)
 	}
@@ -197,7 +202,7 @@ Usage:
 Commands:
   serve        run the local daemon: sessions, policy decisions, model profiles, audit
   runtime      check the installation credential (bootstrap) or report liveness (heartbeat)
-  policy sync  fetch, validate and persist the installation's policy bundle
+  policy sync [--force]  fetch, validate and persist the installation's policy bundle; --force requests fresh issuance
   policy show  print the persisted policy bundle's version and enforcement state
   credential   sync connector credentials into the configured secret store
   model        model profile and invocation commands
