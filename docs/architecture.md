@@ -560,48 +560,40 @@ is skipped or fails), see [release.md](release.md).
 
 ### How a release runs
 
-1. **Authorize manual release.** Runs only for `workflow_dispatch`. It fails
-   unless the person dispatching has `admin` on the repository (a repository
-   or organization owner). It is skipped on tag pushes.
+1. **Authorize manual release.** Runs for the only supported trigger,
+   `workflow_dispatch`. It fails unless the person dispatching has `admin` on
+   the repository (a repository or organization owner).
 2. **Validate tag.** Requires `proxy-vMAJOR.MINOR.PATCH[-prerelease]`. It
    sets the channel: `prerelease` for `-rc.`, `-alpha.`, or `-beta.`, and
    `stable` otherwise. On a dispatch it also fails if the calculated tag
    already exists.
-3. **Release.** Runs only when Validate tag succeeded. On a dispatch it first
-   creates and pushes the calculated tag. It then creates a local `vX.Y.Z`
-   tag for GoReleaser, which only parses `v`-prefixed semver; that tag is
-   never pushed. Next it imports the GPG key, checks the runner's AWS
-   identity and bucket access, and runs GoReleaser to build, sign, and
-   upload. Finally it uploads `install.sh`, checks the published checksums
-   and installer for leaked credentials, and, for stable releases only,
-   writes `latest.txt`.
+3. **Release.** Runs only when Validate tag succeeded. It creates the
+   calculated tag using the dedicated release-tag GitHub App, then creates a
+   local `vX.Y.Z` tag for GoReleaser, which only parses `v`-prefixed semver;
+   that local tag is never pushed. The workflow has no tag-push trigger, so
+   creating the remote tag does not start another release run. Release imports
+   the GPG key, checks the runner's AWS identity and bucket access, and runs
+   GoReleaser to build, sign, and upload. Finally it uploads `install.sh`,
+   checks the published checksums and installer for leaked credentials, and,
+   for stable releases only, writes `latest.txt`.
 
-Validate tag and Release run on the self-hosted `kei-proxy-release` runner,
-whose runner group admits only this repository. The runner Pod gets AWS
-access from its IRSA role (write on `kei-proxy/*` only),
-so no AWS credentials are stored in the repository or the workflow. The
-Release job runs in the `release` environment, which holds the
-`GORELEASER_SIGNING_KEY` secret (the GPG key for
-`kei-cli-releases@haikeilabs.com`). The environment has no required reviewers
-or branch policy; the owner check lives in the workflow. The optional
-repository variables `AWS_REGION` (default `us-east-1`) and
-`AWS_S3_RELEASES_BUCKET` (default `kei-cli-releases`) are not set today.
+Authorize manual release and Validate tag run on GitHub-hosted runners. Only
+Release uses the self-hosted `kei-proxy-release` runner, whose runner group is
+restricted to this workflow on `main`. The runner Pod gets AWS access from its
+IRSA role (write on `kei-proxy/*` only), so no AWS credentials are stored in
+the repository or workflow. The `release` environment is restricted to `main`
+and holds the `GORELEASER_SIGNING_KEY` secret, the `RELEASE_APP_ID` variable,
+and the `RELEASE_APP_PRIVATE_KEY` secret. The release-tag app is installed
+only on this repository with `Contents: read/write`; its bypass is limited to
+the creation-only `proxy-v*` tag ruleset. The optional repository variables
+`AWS_REGION` (default `us-east-1`) and `AWS_S3_RELEASES_BUCKET` (default
+`kei-cli-releases`) are not set today.
 
 ### Cutting a release
 
-**Tag push:**
-
-```sh
-git fetch origin
-git tag proxy-vX.Y.Z origin/main
-git push origin proxy-vX.Y.Z
-```
-
-A tag push releases.
-
 **Manual dispatch** (repository or organization owners only). The workflow
 bumps the highest stable `proxy-vX.Y.Z` tag, then creates and pushes the new
-tag itself:
+tag with the release-tag GitHub App:
 
 ```sh
 gh workflow run release.yaml -R HaikeiLabs/kei-connector-runtime -f bump=patch   # or minor, major
