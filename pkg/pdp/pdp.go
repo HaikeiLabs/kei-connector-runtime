@@ -16,7 +16,8 @@ import (
 )
 
 // Audience is the runtime installation the bundle must be issued to. It comes
-// from whoami once, when the process starts.
+// from WhoAmI at startup and is refreshed when a persisted bundle shows that
+// the same installation moved to another workspace.
 type Audience struct {
 	InstallationID string
 	OrgID          string
