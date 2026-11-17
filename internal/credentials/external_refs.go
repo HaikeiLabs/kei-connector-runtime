@@ -43,6 +43,8 @@ type ExternalCredentialRef struct {
 	Field         string `json:"field"`
 	CredentialRef string `json:"credential_ref"`
 	Status        string `json:"status"`
+	SecretRef     string `json:"secret_ref,omitempty"`
+	SecretBackend string `json:"secret_backend,omitempty"`
 }
 
 type externalCredentialRefsPage struct {
@@ -165,7 +167,7 @@ func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (
 	unresolvedReasons := map[string]UnresolvedReason{}
 	warnedVaultURL := false
 	for _, ref := range refs {
-		if !warnedVaultURL && needsAzureVaultURL(strings.TrimSpace(cfg.SecretsBackend), ref.CredentialRef) {
+		if !warnedVaultURL && ref.SecretRef == "" && needsAzureVaultURL(strings.TrimSpace(cfg.SecretsBackend), ref.CredentialRef) {
 			// One warning per sync, naming the variable and never a ref.
 			warnedVaultURL = true
 			fmt.Fprintf(warningWriter(cfg), "warning: external credential refs are bare Azure Key Vault names; set %s to resolve them\n", secrets.AzureVaultURLEnvVar)
@@ -223,14 +225,11 @@ func resolveExternalRef(ctx context.Context, cfg Config, store secrets.Store, re
 		// Malformed catalog data: no closer reason fits.
 		return ConnectorReference{}, ReasonBackendError
 	}
-	secretRef, ok := ExternalSecretRef(backend, ref.CredentialRef)
-	if !ok {
-		if refNamesAnotherBackend(backend, ref.CredentialRef) {
-			return ConnectorReference{}, ReasonNoBackend
-		}
-		return ConnectorReference{}, ReasonUnqualifiedName
+	secretRef, reason := externalStoreRef(backend, ref)
+	if reason != "" {
+		return ConnectorReference{}, reason
 	}
-	entry := ConnectorReference{ConnectorID: ref.ConnectorID, Field: ref.Field, SecretBackend: backend, SecretRef: secretRef, External: true}
+	entry := ConnectorReference{ConnectorID: ref.ConnectorID, Field: ref.Field, SecretBackend: backend, SecretRef: secretRef, CredentialRef: ref.CredentialRef, External: true}
 	if validateConnectorReference(entry) != nil {
 		return ConnectorReference{}, ReasonUnqualifiedName
 	}
@@ -244,6 +243,38 @@ func resolveExternalRef(ctx context.Context, cfg Config, store secrets.Store, re
 		return ConnectorReference{}, unresolvedReasonFor(err)
 	}
 	return entry, ""
+}
+
+// externalStoreRef returns the store reference for a listed ref in the
+// configured backend. A catalog that knows the org/workspace credential store
+// sends secret_ref already qualified (HAI-1023); it is used as is, and one
+// for another backend is no_backend before any store call. An older catalog
+// omits it, and the bare credential_ref is qualified locally
+// (ExternalSecretRef).
+func externalStoreRef(backend string, ref ExternalCredentialRef) (string, UnresolvedReason) {
+	if secretRef := strings.TrimSpace(ref.SecretRef); secretRef != "" {
+		if ref.SecretBackend != "" && ref.SecretBackend != backend {
+			return "", ReasonNoBackend
+		}
+		if strings.HasPrefix(secretRef, keiManagedRefPrefix) {
+			return "", ReasonUnqualifiedName
+		}
+		if secrets.ValidateRef(backend, secretRef) != nil {
+			if refNamesAnotherBackend(backend, secretRef) {
+				return "", ReasonNoBackend
+			}
+			return "", ReasonUnqualifiedName
+		}
+		return secretRef, ""
+	}
+	secretRef, ok := ExternalSecretRef(backend, ref.CredentialRef)
+	if !ok {
+		if refNamesAnotherBackend(backend, ref.CredentialRef) {
+			return "", ReasonNoBackend
+		}
+		return "", ReasonUnqualifiedName
+	}
+	return secretRef, ""
 }
 
 // unresolvedReasonFor maps a store Validate error to a reason. Only the

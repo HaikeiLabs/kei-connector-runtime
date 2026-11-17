@@ -96,7 +96,7 @@ func (r deliveredRunResolver) Resolve(ctx context.Context, connectorID, field st
 	if entry.External {
 		// An external credential_ref (HAI-1000) resolved by credential sync:
 		// the descriptor names the customer's own secret.
-		if externalRef, ok := credentials.ExternalSecretRef(entry.SecretBackend, response.Connector.CredentialRef); !ok || externalRef != entry.SecretRef {
+		if !credentials.ExternalReferenceNames(entry, response.Connector.CredentialRef) {
 			return "", "", runReasonError{"unresolved_reference"}
 		}
 	} else if entry.SecretRef != response.Connector.CredentialSecretRef || !strings.HasSuffix(entry.SecretRef, "/"+response.Connector.CredentialRef) {

@@ -146,7 +146,7 @@ func TestResolveExternalRefsWritesExternalEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := ConnectorReference{ConnectorID: extConnectorA, Field: "api_key", SecretBackend: "aws-secrets-manager", SecretRef: extRefA, External: true}
+	want := ConnectorReference{ConnectorID: extConnectorA, Field: "api_key", SecretBackend: "aws-secrets-manager", SecretRef: extRefA, CredentialRef: extRefA, External: true}
 	if entry != want {
 		t.Fatalf("entry = %+v, want %+v", entry, want)
 	}
@@ -400,5 +400,126 @@ func TestResolveExternalRefsAcceptsAGCPSchemelessRef(t *testing.T) {
 	out, err := ResolveExternalRefs(context.Background(), cfg, store)
 	if err != nil || len(out.Resolved) != 1 {
 		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
+	}
+}
+
+// HAI-1023: the catalog qualifies external refs from the org/workspace
+// credential store and sends secret_ref; the runtime prefers it and keeps the
+// bare-name logic only for an older catalog that omits it.
+
+func TestResolveExternalRef_UsesCatalogSecretRef(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	catalog := &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{
+		"": {Refs: []ExternalCredentialRef{{ConnectorID: extConnectorA, Field: "api_key", CredentialRef: azureBareName, SecretRef: azureQualified, SecretBackend: "azure-key-vault", Status: "pending"}}},
+	}}
+	cfg := externalConfig(t, catalog.server(t).URL)
+	cfg.SecretsBackend = "azure-key-vault"
+	var warnings bytes.Buffer
+	cfg.Warnings = &warnings
+	store := &refStore{known: map[string]bool{azureQualified: true}}
+	out, err := ResolveExternalRefs(context.Background(), cfg, store)
+	if err != nil || len(out.Resolved) != 1 || len(out.Unresolved) != 0 {
+		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("no vault warning expected when the catalog qualifies the ref: %q", warnings.String())
+	}
+	entry, err := ReadConnectorReference(cfg.ConnectorIndexPath, extConnectorA, "api_key")
+	want := ConnectorReference{ConnectorID: extConnectorA, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: azureQualified, CredentialRef: azureBareName, External: true}
+	if err != nil || entry != want {
+		t.Fatalf("entry=%+v err=%v, want %+v", entry, err, want)
+	}
+}
+
+func TestResolveExternalRef_RejectsSecretRefForOtherBackend(t *testing.T) {
+	for name, ref := range map[string]ExternalCredentialRef{
+		"azure secret_ref":       {CredentialRef: azureBareName, SecretRef: azureQualified, SecretBackend: "azure-key-vault"},
+		"azure ref, no backend":  {CredentialRef: azureBareName, SecretRef: azureQualified},
+		"aws ref, other backend": {CredentialRef: "customer/crm/api-key", SecretRef: extRefA, SecretBackend: "azure-key-vault"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ref.ConnectorID, ref.Field, ref.Status = extConnectorA, "api_key", "pending"
+			catalog := &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{"": {Refs: []ExternalCredentialRef{ref}}}}
+			cfg := externalConfig(t, catalog.server(t).URL) // aws-secrets-manager
+			store := &refStore{known: map[string]bool{azureQualified: true, extRefA: true}}
+			out, err := ResolveExternalRefs(context.Background(), cfg, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out.Resolved) != 0 || len(out.UnresolvedRefs) != 1 || out.UnresolvedRefs[0].Reason != ReasonNoBackend {
+				t.Fatalf("out=%+v", out)
+			}
+			if len(store.validated) != 0 || store.gets != 0 {
+				t.Fatalf("store called for another backend's ref: validated=%v gets=%d", store.validated, store.gets)
+			}
+		})
+	}
+}
+
+func TestResolveExternalRef_FallsBackWhenSecretRefAbsent(t *testing.T) {
+	catalog := &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{
+		"": {Refs: []ExternalCredentialRef{{ConnectorID: extConnectorA, Field: "api_key", CredentialRef: "customer/crm/api-key", Status: "pending"}}},
+	}}
+	cfg := externalConfig(t, catalog.server(t).URL)
+	store := &refStore{known: map[string]bool{"aws-secrets-manager:///customer/crm/api-key": true}}
+	out, err := ResolveExternalRefs(context.Background(), cfg, store)
+	if err != nil || len(out.Resolved) != 1 {
+		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
+	}
+	entry, err := ReadExternalConnectorReference(cfg.ConnectorIndexPath, extConnectorA, "aws-secrets-manager", "customer/crm/api-key")
+	if err != nil || entry.SecretRef != "aws-secrets-manager:///customer/crm/api-key" || entry.CredentialRef != "customer/crm/api-key" {
+		t.Fatalf("entry=%+v err=%v", entry, err)
+	}
+}
+
+func TestReadExternalConnectorReference_MatchesByBareCredentialRef(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	path := filepath.Join(t.TempDir(), "runtime", "connector-credentials.json")
+	entry := ConnectorReference{ConnectorID: extConnectorA, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: azureQualified, CredentialRef: azureBareName, External: true}
+	if err := WriteConnectorReference(path, entry); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadExternalConnectorReference(path, extConnectorA, "azure-key-vault", azureBareName)
+	if err != nil || got != entry {
+		t.Fatalf("bare lookup got=%+v err=%v", got, err)
+	}
+	if _, err := ReadExternalConnectorReference(path, extConnectorA, "azure-key-vault", "billing-api-key"); !errors.Is(err, ErrConnectorReferenceNotFound) {
+		t.Fatalf("another bare ref: err=%v", err)
+	}
+	if _, err := ReadExternalConnectorReference(path, extConnectorA, "aws-secrets-manager", azureBareName); !errors.Is(err, ErrConnectorReferenceMismatch) {
+		t.Fatalf("another backend: err=%v", err)
+	}
+	if !ExternalReferenceNames(entry, azureBareName) || ExternalReferenceNames(entry, "billing-api-key") {
+		t.Fatal("ExternalReferenceNames must match exactly the bare credential_ref")
+	}
+}
+
+func TestConnectorIndex_ReadsPreChangeEntry(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runtime")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "connector-credentials.json")
+	// An index written before entries carried credential_ref.
+	const preChange = `{"version":1,"entries":{"` + extConnectorA + `/api_key":{"connector_id":"` + extConnectorA + `","field":"api_key","secret_backend":"aws-secrets-manager","secret_ref":"aws-secrets-manager:///customer/crm/api-key","generation":0,"external":true}}}`
+	if err := os.WriteFile(path, []byte(preChange), 0600); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := ReadConnectorReference(path, extConnectorA, "api_key")
+	if err != nil || entry.CredentialRef != "" || !entry.External {
+		t.Fatalf("entry=%+v err=%v", entry, err)
+	}
+	if _, err := ReadExternalConnectorReference(path, extConnectorA, "aws-secrets-manager", "customer/crm/api-key"); err != nil {
+		t.Fatalf("pre-change entry no longer matches its bare ref: %v", err)
+	}
+	// A sync with the new catalog upgrades the entry in place.
+	upgraded := entry
+	upgraded.CredentialRef = "customer/crm/api-key"
+	if err := writeExternalReference(path, upgraded); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadConnectorReference(path, extConnectorA, "api_key")
+	if err != nil || got != upgraded {
+		t.Fatalf("upgraded=%+v err=%v", got, err)
 	}
 }

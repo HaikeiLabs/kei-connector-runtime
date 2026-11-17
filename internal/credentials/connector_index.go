@@ -31,6 +31,11 @@ type ConnectorReference struct {
 	// writes it after checking the ref exists in the configured store; Kei
 	// never delivered it, so the ref does not name the connector field.
 	External bool `json:"external,omitempty"`
+	// CredentialRef is the catalog's bare external credential_ref an
+	// External entry was resolved from (HAI-1023), so verification compares
+	// it instead of re-qualifying the descriptor's ref. Entries written before
+	// it existed omit it and still read.
+	CredentialRef string `json:"credential_ref,omitempty"`
 }
 
 type connectorReferenceIndex struct {
@@ -146,8 +151,7 @@ func ReadConnectorReference(path, connectorID, field string) (ConnectorReference
 
 // ReadExternalConnectorReference returns the external entry credential sync
 // resolved for connectorID at credentialRef, the external credential_ref a
-// bundle descriptor names. credentialRef may be the backend's bare name
-// (ExternalSecretRef). An entry for that ref under another backend is
+// bundle descriptor names, matched by ExternalReferenceNames. An entry for that ref under another backend is
 // ErrConnectorReferenceMismatch; no resolved entry is
 // ErrConnectorReferenceNotFound.
 func ReadExternalConnectorReference(path, connectorID, backend, credentialRef string) (ConnectorReference, error) {
@@ -169,8 +173,7 @@ func ReadExternalConnectorReference(path, connectorID, backend, credentialRef st
 		if !entry.External || entry.ConnectorID != connectorID || connectorReferenceKey(entry.ConnectorID, entry.Field) != key {
 			continue
 		}
-		canonical, ok := ExternalSecretRef(entry.SecretBackend, credentialRef)
-		if !ok || canonical != entry.SecretRef {
+		if !ExternalReferenceNames(entry, credentialRef) {
 			continue
 		}
 		if entry.SecretBackend != backend {
@@ -294,8 +297,11 @@ func validateConnectorReference(entry ConnectorReference) error {
 	if _, err := uuid.Parse(entry.ConnectorID); err != nil || !connectorSecretField.MatchString(entry.Field) || entry.SecretBackend == "" || secrets.ValidateRef(entry.SecretBackend, entry.SecretRef) != nil || entry.Generation < 0 {
 		return errors.New("connector credential reference is invalid")
 	}
+	if !entry.External && entry.CredentialRef != "" {
+		return errors.New("connector credential reference is invalid")
+	}
 	if entry.External {
-		if strings.HasPrefix(entry.SecretRef, keiManagedRefPrefix) {
+		if strings.HasPrefix(entry.SecretRef, keiManagedRefPrefix) || strings.HasPrefix(entry.CredentialRef, keiManagedRefPrefix) {
 			return errors.New("external connector credential reference is kei-managed")
 		}
 		return nil
@@ -383,4 +389,22 @@ func writePrivateAtomic(path string, data []byte) error {
 		return errors.New("sync credential index directory failed")
 	}
 	return nil
+}
+
+// ExternalReferenceNames reports whether external entry is the one credential
+// sync resolved for credentialRef, the credential_ref a bundle descriptor
+// names. An entry written since HAI-1023 records the catalog's bare
+// credential_ref and is matched by equality (or by its exact store ref), so no
+// local qualification such as KEI_SECRETS_AZURE_VAULT_URL is needed. An entry
+// written before carries no credential_ref and is matched by qualifying
+// credentialRef in the entry's backend, as before.
+func ExternalReferenceNames(entry ConnectorReference, credentialRef string) bool {
+	if !entry.External || credentialRef == "" || strings.HasPrefix(credentialRef, keiManagedRefPrefix) {
+		return false
+	}
+	if entry.CredentialRef != "" {
+		return credentialRef == entry.CredentialRef || credentialRef == entry.SecretRef
+	}
+	canonical, ok := ExternalSecretRef(entry.SecretBackend, credentialRef)
+	return ok && canonical == entry.SecretRef
 }
