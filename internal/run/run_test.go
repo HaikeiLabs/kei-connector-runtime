@@ -449,7 +449,7 @@ func TestDeliveredRunResolverVerifiesCatalogSecretRefWithoutVaultEnv(t *testing.
 	const id = "00000000-0000-4000-8000-000000001000"
 	const qualified = "https://acme.vault.azure.net/secrets/crm-api-key"
 	index := filepath.Join(t.TempDir(), "connector-credentials.json")
-	if err := credentials.WriteConnectorReference(index, credentials.ConnectorReference{ConnectorID: id, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: qualified, CredentialRef: "crm-api-key", External: true}); err != nil {
+	if err := credentials.WriteExternalConnectorReference(index, credentials.ConnectorReference{ConnectorID: id, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: qualified, External: true}, "crm-api-key"); err != nil {
 		t.Fatal(err)
 	}
 	store := &recordingRunSecretStore{value: "fake-external-value"}

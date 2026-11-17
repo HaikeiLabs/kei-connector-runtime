@@ -117,7 +117,7 @@ func TestInvokeSecret_VerifiesWithoutVaultEnv(t *testing.T) {
 	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
 	const qualified = "https://acme.vault.azure.net/secrets/crm-api-key"
 	index := runtimecredentials.ConnectorIndexPath(filepath.Join(t.TempDir(), "state"))
-	if err := runtimecredentials.WriteConnectorReference(index, runtimecredentials.ConnectorReference{ConnectorID: externalConnectorID, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: qualified, CredentialRef: "crm-api-key", External: true}); err != nil {
+	if err := runtimecredentials.WriteExternalConnectorReference(index, runtimecredentials.ConnectorReference{ConnectorID: externalConnectorID, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: qualified, External: true}, "crm-api-key"); err != nil {
 		t.Fatal(err)
 	}
 	store := &externalSecretStore{values: map[string]string{"azure-key-vault|" + qualified: externalValue}}

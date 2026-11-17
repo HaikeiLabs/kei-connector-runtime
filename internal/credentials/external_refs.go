@@ -160,7 +160,7 @@ func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (
 		return out, nil
 	}
 	indexPath := connectorIndexPath(cfg)
-	resolved := map[string]ConnectorReference{} // by index key
+	resolved := map[string]resolvedExternalRef{} // by index key
 	resolvedIDs := map[string]bool{}
 	// unresolvedReasons keeps the first reason seen per connector, in the
 	// catalog's order.
@@ -181,11 +181,11 @@ func ResolveExternalRefs(ctx context.Context, cfg Config, store secrets.Store) (
 			}
 			continue
 		}
-		resolved[connectorReferenceKey(entry.ConnectorID, entry.Field)] = entry
+		resolved[connectorReferenceKey(entry.ConnectorID, entry.Field)] = resolvedExternalRef{entry: entry, credentialRef: ref.CredentialRef}
 		resolvedIDs[entry.ConnectorID] = true
 	}
-	for _, entry := range resolved {
-		if err := writeExternalReference(indexPath, entry); err != nil {
+	for _, r := range resolved {
+		if err := WriteExternalConnectorReference(indexPath, r.entry, r.credentialRef); err != nil {
 			return nil, err
 		}
 	}
@@ -229,7 +229,7 @@ func resolveExternalRef(ctx context.Context, cfg Config, store secrets.Store, re
 	if reason != "" {
 		return ConnectorReference{}, reason
 	}
-	entry := ConnectorReference{ConnectorID: ref.ConnectorID, Field: ref.Field, SecretBackend: backend, SecretRef: secretRef, CredentialRef: ref.CredentialRef, External: true}
+	entry := ConnectorReference{ConnectorID: ref.ConnectorID, Field: ref.Field, SecretBackend: backend, SecretRef: secretRef, External: true}
 	if validateConnectorReference(entry) != nil {
 		return ConnectorReference{}, ReasonUnqualifiedName
 	}
@@ -302,24 +302,11 @@ func refNamesAnotherBackend(backend, ref string) bool {
 	return false
 }
 
-// writeExternalReference records entry unless a Kei-delivered entry already
-// holds that connector field, which external resolution never replaces.
-func writeExternalReference(path string, entry ConnectorReference) error {
-	if err := validateConnectorReference(entry); err != nil {
-		return err
-	}
-	err := updateConnectorReferenceIndex(path, func(index *connectorReferenceIndex) bool {
-		key := connectorReferenceKey(entry.ConnectorID, entry.Field)
-		if existing, ok := index.Entries[key]; ok && (!existing.External || existing == entry) {
-			return false
-		}
-		index.Entries[key] = entry
-		return true
-	})
-	if err != nil {
-		return fmt.Errorf("persist external credential reference failed")
-	}
-	return nil
+// resolvedExternalRef is an index entry and the catalog's bare
+// credential_ref it was resolved from.
+type resolvedExternalRef struct {
+	entry         ConnectorReference
+	credentialRef string
 }
 
 func warningWriter(cfg Config) io.Writer {
