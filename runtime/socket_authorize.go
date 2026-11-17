@@ -758,6 +758,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" object with no unknown fields")
 		return
 	}
+	l.refreshIdentityForBundle(r.Context())
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(body, &fields)
 	_, hasPrincipalID := fields["service_principal_id"]
