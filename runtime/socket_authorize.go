@@ -183,12 +183,14 @@ type SessionKeychain interface {
 }
 
 type LocalPDP struct {
-	cfg       PolicyConfig
-	Sessions  *pdp.Sessions
-	evaluator atomic.Pointer[pdp.Evaluator]
-	identity  atomic.Pointer[Identity]
-	emit      EmitAuditFunc
-	keychain  SessionKeychain
+	cfg               PolicyConfig
+	Sessions          *pdp.Sessions
+	evaluator         atomic.Pointer[pdp.Evaluator]
+	identity          atomic.Pointer[Identity]
+	identityRefreshMu sync.Mutex
+	identityResolver  func(context.Context) (*Identity, error)
+	emit              EmitAuditFunc
+	keychain          SessionKeychain
 
 	// creds creates per-session credential stores held in sessionCreds.
 	creds                 *credrelease.Store
@@ -467,6 +469,7 @@ func (l *LocalPDP) SetModelConfigHandler(h http.Handler) { l.modelConfigHandler 
 // Before the identity resolves, every call denies policy_bundle_missing. The
 // error is non-nil only when ctx is done.
 func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp.ConnectorGrant, *Identity, error) {
+	l.refreshIdentityForBundle(ctx)
 	e, id := l.evaluator.Load(), l.identity.Load()
 	if e == nil || id == nil {
 		sub, hasSession := l.Sessions.Get(req.Session)
@@ -527,6 +530,44 @@ func (l *LocalPDP) SetIdentity(identity *Identity) {
 	}
 	l.identity.Store(identity)
 	l.evaluator.Store(e)
+}
+
+// SetIdentityResolver installs the daemon's control-plane identity lookup.
+// It is used on demand when a bundle for the same installation has moved to
+// another workspace since the evaluator was last built.
+func (l *LocalPDP) SetIdentityResolver(resolve func(context.Context) (*Identity, error)) {
+	l.identityRefreshMu.Lock()
+	l.identityResolver = resolve
+	l.identityRefreshMu.Unlock()
+}
+
+// refreshIdentityForBundle follows a workspace move without weakening the
+// installation boundary. A bundle for another installation is never used to
+// select a new identity; ordinary evaluator validation continues to fail it
+// closed.
+func (l *LocalPDP) refreshIdentityForBundle(ctx context.Context) {
+	l.identityRefreshMu.Lock()
+	defer l.identityRefreshMu.Unlock()
+	current, evaluator, resolve := l.identity.Load(), l.evaluator.Load(), l.identityResolver
+	if current == nil || current.WorkspaceID == nil || evaluator == nil || resolve == nil {
+		return
+	}
+	status, err := evaluator.BundleStatus()
+	if err != nil || status.Audience == nil {
+		return
+	}
+	audience := status.Audience
+	if audience.InstallationID != current.ID || audience.OrgID != current.OrgID || audience.WorkspaceID == *current.WorkspaceID {
+		return
+	}
+	refreshed, err := resolve(ctx)
+	if err != nil || refreshed == nil || refreshed.WorkspaceID == nil {
+		return
+	}
+	if refreshed.ID != current.ID || refreshed.OrgID != current.OrgID || *refreshed.WorkspaceID != audience.WorkspaceID {
+		return
+	}
+	l.SetIdentity(refreshed)
 }
 
 func (l *LocalPDP) AfterSync(err error) {

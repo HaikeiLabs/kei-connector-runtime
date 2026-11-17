@@ -13,9 +13,110 @@ import (
 	"time"
 
 	connectorruntime "github.com/HaikeiLabs/kei-connector-runtime"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/pdp"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	keiruntime "github.com/HaikeiLabs/kei-connector-runtime/runtime"
 )
+
+func TestLocalPDPRefreshesIdentityForSameInstallationWorkspaceMove(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	bundle := unsignedExampleBundle(t, now)
+	store, err := policybundle.OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	movedBundle := replaceBundleWorkspace(t, bundle, "ws-fixture-0002")
+	if _, err := store.Activate(movedBundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0002", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	local := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeStateDir: dir}, nil)
+	defer local.Close()
+	oldWorkspace := "ws-fixture-0001"
+	local.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &oldWorkspace})
+	var resolutions atomic.Int32
+	newWorkspace := "ws-fixture-0002"
+	local.SetIdentityResolver(func(context.Context) (*keiruntime.Identity, error) {
+		resolutions.Add(1)
+		return &keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &newWorkspace}, nil
+	})
+	sessionID, err := local.Sessions.Create(pdp.Subject{UserID: "user-1", Status: pdp.StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, _, err := local.AuthorizeConnector(context.Background(), pdp.Request{Session: sessionID, Connector: &pdp.ConnectorTarget{ConnectorID: "connector-1", Capability: "read"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gotWorkspace, gotInstallation := local.AuditScope()
+	if gotWorkspace != newWorkspace || gotInstallation != "inst-fixture-0001" || resolutions.Load() != 1 || grant.Decision.ReasonCode == pdp.ReasonPolicyBundleInvalid {
+		t.Fatalf("refreshed scope = (%q, %q), decision = %+v, resolver calls = %d", gotWorkspace, gotInstallation, grant.Decision, resolutions.Load())
+	}
+}
+
+func TestLocalPDPDoesNotFollowDifferentInstallationBundle(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	bundle := unsignedExampleBundle(t, now)
+	store, err := policybundle.OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, "inst-fixture-0001", "org-fixture-0001", "ws-fixture-0001", now); err != nil {
+		t.Fatal(err)
+	}
+	different := replaceBundleAudience(t, bundle, "inst-other-0001", "org-fixture-0001", "ws-fixture-0002")
+	if _, err := store.Activate(different, "inst-other-0001", "org-fixture-0001", "ws-fixture-0002", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	local := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeStateDir: dir}, nil)
+	defer local.Close()
+	workspace := "ws-fixture-0001"
+	local.SetIdentity(&keiruntime.Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: &workspace})
+	var resolutions atomic.Int32
+	local.SetIdentityResolver(func(context.Context) (*keiruntime.Identity, error) {
+		resolutions.Add(1)
+		return &keiruntime.Identity{ID: "inst-other-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0002")}, nil
+	})
+	sessionID, err := local.Sessions.Create(pdp.Subject{UserID: "user-1", Status: pdp.StatusLinked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, _, err := local.AuthorizeConnector(context.Background(), pdp.Request{Session: sessionID, Connector: &pdp.ConnectorTarget{ConnectorID: "connector-1", Capability: "read"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gotWorkspace, gotInstallation := local.AuditScope()
+	if gotWorkspace != workspace || gotInstallation != "inst-fixture-0001" || resolutions.Load() != 0 || grant.Decision.ReasonCode != pdp.ReasonPolicyBundleInvalid {
+		t.Fatalf("identity crossed installation boundary or mismatch was not denied: decision = %+v, scope = (%q, %q), resolver calls = %d", grant.Decision, gotWorkspace, gotInstallation, resolutions.Load())
+	}
+}
+
+func replaceBundleWorkspace(t *testing.T, bundle []byte, workspace string) []byte {
+	t.Helper()
+	return replaceBundleAudience(t, bundle, "inst-fixture-0001", "org-fixture-0001", workspace)
+}
+
+func replaceBundleAudience(t *testing.T, bundle []byte, installation, org, workspace string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(bundle, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["audience"] = map[string]any{"installation_id": installation, "org_id": org, "workspace_id": workspace}
+	policySet := doc["policy_set"].(map[string]any)
+	policySet["org_id"], policySet["workspace_id"] = org, workspace
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
 
 func TestStartPolicyRefresherNoopWhenNotRuntime(t *testing.T) {
 	stop := keiruntime.StartPolicyRefresher(
