@@ -362,6 +362,13 @@ nothing. `connector_binding` tools are unchanged: the bundle binds each one to
 exactly one connector, and its release re-evaluates the complete plan for that
 connector.
 
+**Known limitation.** Time-bound (JIT) access grants cannot name a connector
+from the CLI or console yet, so they allow the tool call but release no
+connector credential (`connector_not_named`). The catalog can already store a
+grant's `connector_id` (catalog#530); setting it from the CLI and console is
+tracked as tech debt in HAI-1072. Until then, use group policy grants that name
+the connector.
+
 #### Tenant-stored (`opaque_ref`) credentials (HAI-1066)
 
 When the connector's bundle descriptor has `credential_source: opaque_ref`
