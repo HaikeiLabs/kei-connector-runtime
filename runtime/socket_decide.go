@@ -19,6 +19,7 @@ import (
 // identity's default agent (the audit records that agent instead of the
 // request's). The error is non-nil only when ctx is done.
 func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
+	l.refreshIdentityForBundle(ctx)
 	d = pdp.Decision{ReasonCode: pdp.ReasonPolicyBundleMissing, DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
 	shellKind, isShell := l.shellKindForTool(req.Tool)
 	auditTrustedAgent = isShell
