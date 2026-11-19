@@ -363,6 +363,25 @@ harness-provided type-prefixed `on_behalf_of`.
 release, answers `404`. The value is held in session memory and flushed when
 the session ends; it is never logged or printed.
 
+For a v2 harness-executor tool, a credential is released only when the tool
+policy that permitted the call has a selector whose `connector_id` is exactly
+the requested connector (HAI-1070). A tool-only permit (no `connector_id`) and
+an access grant (its target names only the tool) still permit the tool call on
+`/v1/authorize`, but the release denies with `connector_not_named` and no
+credential; the audit record is the same deny record as any other release
+deny. The check reads only the in-memory bundle. A direct capability permit
+(a check with no `tool` selector) never permits a harness tool, so it releases
+nothing. `connector_binding` tools are unchanged: the bundle binds each one to
+exactly one connector, and its release re-evaluates the complete plan for that
+connector.
+
+**Known limitation.** Time-bound (JIT) access grants cannot name a connector
+from the CLI or console yet, so they allow the tool call but release no
+connector credential (`connector_not_named`). The catalog can already store a
+grant's `connector_id` (catalog#530); setting it from the CLI and console is
+tracked as tech debt in HAI-1072. Until then, use group policy grants that name
+the connector.
+
 #### Tenant-stored (`opaque_ref`) credentials (HAI-1066)
 
 When the connector's bundle descriptor has `credential_source: opaque_ref`
