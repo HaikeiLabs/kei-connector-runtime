@@ -32,9 +32,12 @@ func (e *Evaluator) AuthorizeShellForKind(ctx context.Context, sessionID, kind, 
 	if agentID == "" {
 		return decisionWithSubject(Decision{ReasonCode: ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}, current), nil
 	}
-	stages, ok := shellpolicy.Parse(command)
-	if !ok {
-		return decisionWithSubject(Decision{ReasonCode: ReasonUnsupportedShellSyntax, DenySource: "policy", Reason: unsupportedShellReason}, current), nil
+	stages, syntaxCode := shellpolicy.ParseWithDiagnostic(command)
+	if syntaxCode != "" {
+		return decisionWithSubject(Decision{
+			ReasonCode: ReasonUnsupportedShellSyntax, SyntaxCode: string(syntaxCode),
+			DenySource: "policy", Reason: unsupportedShellReason,
+		}, current), nil
 	}
 	v, state, err := e.check()
 	if err != nil {

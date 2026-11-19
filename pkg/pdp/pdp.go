@@ -50,6 +50,7 @@ type Decision struct {
 	Allow          bool
 	Reason         string
 	ReasonCode     ReasonCode
+	SyntaxCode     string // bounded shellpolicy diagnostic; never contains command text
 	DenySource     string // runtime_state | registry | identity | policy
 	PolicyID       string
 	BundleVersion  int64
