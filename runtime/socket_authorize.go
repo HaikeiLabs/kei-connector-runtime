@@ -76,6 +76,7 @@ type socketAuthorizeResponse struct {
 	Schema              string          `json:"schema"`
 	Decision            string          `json:"decision"` // permit | deny | unmatched
 	ReasonCode          string          `json:"reason_code,omitempty"`
+	SyntaxCode          string          `json:"syntax_code,omitempty"`
 	Hint                string          `json:"hint,omitempty"`
 	DenySource          string          `json:"deny_source,omitempty"`
 	Reason              string          `json:"reason,omitempty"`
@@ -152,6 +153,7 @@ type socketDecisionEvent struct {
 	Decision            string   `json:"decision"`
 	DenySource          string   `json:"deny_source"`
 	ReasonCode          string   `json:"reason_code"`
+	SyntaxCode          string   `json:"syntax_code,omitempty"`
 	PolicyID            *string  `json:"policy_id,omitempty"`
 	PolicyReason        *string  `json:"policy_reason,omitempty"`
 	PolicyBundleVersion *int64   `json:"policy_bundle_version,omitempty"`
@@ -1245,10 +1247,18 @@ func credentialReleaseReason(reason string) string {
 	}
 }
 
+func authorizeHint(d pdp.Decision) string {
+	if d.ReasonCode == pdp.ReasonUnsupportedShellSyntax {
+		return denyhint.ShellSyntaxHint(d.SyntaxCode)
+	}
+	return denyhint.Hint(string(d.ReasonCode))
+}
+
 func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {
 	resp := socketAuthorizeResponse{
 		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: string(d.ReasonCode),
-		Hint: denyhint.Hint(string(d.ReasonCode)), DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
+		SyntaxCode: d.SyntaxCode, Hint: authorizeHint(d), DenySource: d.DenySource,
+		Reason: d.Reason, PolicyID: d.PolicyID,
 		BundleState: d.BundleState,
 	}
 	if d.Allow {
@@ -1299,7 +1309,7 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: string(d.ReasonCode),
-		CredentialKind: credentialKind,
+		SyntaxCode: d.SyntaxCode, CredentialKind: credentialKind,
 	}
 	if unmatched && d.ReasonCode == "no_matching_policy" {
 		e.Decision = "unmatched"

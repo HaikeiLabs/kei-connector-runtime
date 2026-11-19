@@ -148,8 +148,21 @@ The `kei.authorize-response/v1` `decision` is `permit`, `deny`, or `unmatched`.
 applicable policy; it is not a permit and the runtime does not defer execution.
 An adapter may choose its own native decision for unmatched calls, including a
 Pi shell command with no matching shell policy, while SDK and connector callers
-remain on their existing non-permit paths. A matching
-explicit deny remains `deny` with `reason_code: policy_deny`.
+remain on their existing non-permit paths. A matching explicit deny remains
+`deny` with `reason_code: policy_deny`.
+
+A shell parser rejection remains `deny` with the compatibility code
+`unsupported_shell_syntax`; it is never returned as `unmatched`. The response
+may also carry a bounded `syntax_code` category (for example,
+`unsupported_redirection`) and a static `hint`. The bounded categories cover
+expansions/substitutions, redirections, grouping, globs, background execution,
+tilde/history/comment syntax, quoting, control characters, invalid command
+structure/input, and parser size limits. These fields identify only the
+construct category and safe next step: neither response nor audit includes the
+command, a snippet, an offset, or parsed arguments. The command digest remains
+for audit correlation. `policy_deny` and `no_matching_policy` continue to mean
+authorization outcomes, not parser failures. Rewriting a command does not
+change policy and every revised command is independently authorized.
 
 For a v2 bundle, a named verified installation-owner session may authorize a
 tool by its name against `tool_policies` even when the catalog has no tool
