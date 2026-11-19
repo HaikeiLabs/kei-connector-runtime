@@ -40,6 +40,23 @@ func TestShellCommandIsExcludedFromSocketAuditEvent(t *testing.T) {
 	if !strings.Contains(string(response), `"reason_code":"unsupported_shell_syntax"`) || !strings.Contains(string(response), `"syntax_code":"unsupported_redirection"`) || !strings.Contains(string(response), `"hint":"`) {
 		t.Fatalf("syntax denial response lacks compatibility fields/remediation: %s", response)
 	}
+	const unknownCategory = "private-command-fragment"
+	unknownResponse, err := json.Marshal(socketAuthorizeResponseForDecision(pdp.Decision{
+		ReasonCode: pdp.ReasonUnsupportedShellSyntax, SyntaxCode: unknownCategory,
+	}, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownAudit := local.decisionEventJSON(socketAuthorizeRequest{
+		Tool: "shell", ShellCommand: command,
+	}, pdp.DefaultSession, pdp.Decision{
+		ReasonCode: pdp.ReasonUnsupportedShellSyntax, SyntaxCode: unknownCategory,
+	}, "")
+	for surface, data := range map[string][]byte{"response": unknownResponse, "audit": unknownAudit} {
+		if strings.Contains(string(data), unknownCategory) {
+			t.Fatalf("unknown syntax category leaked into %s: %s", surface, data)
+		}
+	}
 }
 
 func TestValidArgumentDigest(t *testing.T) {

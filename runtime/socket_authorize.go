@@ -1247,9 +1247,16 @@ func credentialReleaseReason(reason string) string {
 	}
 }
 
+func authorizeSyntaxCode(d pdp.Decision) string {
+	if d.ReasonCode != pdp.ReasonUnsupportedShellSyntax || denyhint.ShellSyntaxHint(d.SyntaxCode) == "" {
+		return ""
+	}
+	return d.SyntaxCode
+}
+
 func authorizeHint(d pdp.Decision) string {
 	if d.ReasonCode == pdp.ReasonUnsupportedShellSyntax {
-		return denyhint.ShellSyntaxHint(d.SyntaxCode)
+		return denyhint.ShellSyntaxHint(authorizeSyntaxCode(d))
 	}
 	return denyhint.Hint(string(d.ReasonCode))
 }
@@ -1257,7 +1264,7 @@ func authorizeHint(d pdp.Decision) string {
 func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {
 	resp := socketAuthorizeResponse{
 		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: string(d.ReasonCode),
-		SyntaxCode: d.SyntaxCode, Hint: authorizeHint(d), DenySource: d.DenySource,
+		SyntaxCode: authorizeSyntaxCode(d), Hint: authorizeHint(d), DenySource: d.DenySource,
 		Reason: d.Reason, PolicyID: d.PolicyID,
 		BundleState: d.BundleState,
 	}
@@ -1309,7 +1316,7 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: string(d.ReasonCode),
-		SyntaxCode: d.SyntaxCode, CredentialKind: credentialKind,
+		SyntaxCode: authorizeSyntaxCode(d), CredentialKind: credentialKind,
 	}
 	if unmatched && d.ReasonCode == "no_matching_policy" {
 		e.Decision = "unmatched"

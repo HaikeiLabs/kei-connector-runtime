@@ -148,7 +148,7 @@ func TestParseWithDiagnosticReturnsBoundedCategories(t *testing.T) {
 			if got != tc.want || stages != nil {
 				t.Fatalf("ParseWithDiagnostic(input) = %#v, %q; want nil, %q", stages, got, tc.want)
 			}
-			if strings.Contains(string(got), tc.input) {
+			if tc.input != "" && strings.Contains(string(got), tc.input) {
 				t.Fatalf("diagnostic echoed input: %q", got)
 			}
 		})
