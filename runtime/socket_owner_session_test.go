@@ -726,17 +726,17 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
 	tests := []struct {
-		name         string
-		effect       string
-		tool         string
-		shell        string
-		shellEffect  string
-		shellDst     string // shell policy destination command; defaults to "git log"
-		wireTool      string // tool name sent with shell_command; defaults to "shell"
-		wantDecision  string
-		wantReason    string
+		name           string
+		effect         string
+		tool           string
+		shell          string
+		shellEffect    string
+		shellDst       string // shell policy destination command; defaults to "git log"
+		wireTool       string // tool name sent with shell_command; defaults to "shell"
+		wantDecision   string
+		wantReason     string
 		wantSyntaxCode string
-		wantPolicyID  string
+		wantPolicyID   string
 	}{
 		{name: "group permit", effect: "permit", tool: "custom.read", wantDecision: "permit", wantPolicyID: "tool-policy"},
 		{name: "group deny", effect: "deny", tool: "custom.write", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "tool-policy"},

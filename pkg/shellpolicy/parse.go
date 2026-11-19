@@ -60,17 +60,17 @@ func Evaluate[D any](stages [][]string, eval func(argv []string) (D, Verdict)) D
 type DiagnosticCode string
 
 const (
-	DiagnosticInvalidInput               DiagnosticCode = "invalid_input"
+	DiagnosticInvalidInput                DiagnosticCode = "invalid_input"
 	DiagnosticInputTooLarge               DiagnosticCode = "input_too_large"
 	DiagnosticControlCharacter            DiagnosticCode = "control_character"
 	DiagnosticMalformedQuoting            DiagnosticCode = "malformed_quoting"
 	DiagnosticParameterExpansion          DiagnosticCode = "parameter_expansion"
 	DiagnosticCommandSubstitution         DiagnosticCode = "command_substitution"
 	DiagnosticBacktickSubstitution        DiagnosticCode = "backtick_substitution"
-	DiagnosticUnsupportedRedirection     DiagnosticCode = "unsupported_redirection"
+	DiagnosticUnsupportedRedirection      DiagnosticCode = "unsupported_redirection"
 	DiagnosticUnsupportedGrouping         DiagnosticCode = "unsupported_grouping"
 	DiagnosticUnsupportedGlob             DiagnosticCode = "unsupported_glob"
-	DiagnosticUnsupportedBackground      DiagnosticCode = "unsupported_background"
+	DiagnosticUnsupportedBackground       DiagnosticCode = "unsupported_background"
 	DiagnosticUnsupportedTildeExpansion   DiagnosticCode = "tilde_expansion"
 	DiagnosticUnsupportedHistoryExpansion DiagnosticCode = "history_expansion"
 	DiagnosticUnsupportedShellComment     DiagnosticCode = "shell_comment"
