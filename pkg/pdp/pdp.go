@@ -16,7 +16,8 @@ import (
 )
 
 // Audience is the runtime installation the bundle must be issued to. It comes
-// from whoami once, when the process starts.
+// from WhoAmI at startup and is refreshed when a persisted bundle shows that
+// the same installation moved to another workspace.
 type Audience struct {
 	InstallationID string
 	OrgID          string
@@ -49,6 +50,7 @@ type Decision struct {
 	Allow          bool
 	Reason         string
 	ReasonCode     ReasonCode
+	SyntaxCode     string // bounded shellpolicy diagnostic; never contains command text
 	DenySource     string // runtime_state | registry | identity | policy
 	PolicyID       string
 	BundleVersion  int64
@@ -267,6 +269,16 @@ func (e *Evaluator) AuthorizeV2HarnessToolForTarget(ctx context.Context, req Req
 	return e.authorizeV2HarnessTool(ctx, req, connectorID, capability, resource)
 }
 
+// AuthorizeV2HarnessToolRelease decides a connector credential release for a
+// harness-executed tool: the target decision, plus the rule that only a permit
+// whose selector names connectorID releases (HAI-1070). It reads only the
+// in-memory bundle.
+func (e *Evaluator) AuthorizeV2HarnessToolRelease(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
+	return e.authorizeV2HarnessToolWith(ctx, req, func(v *policybundle.Verified, subject *policybundle.SessionSubject, now time.Time) policybundle.Decision {
+		return v.EvaluateV2HarnessToolRelease(req.Tool, req.AgentID, connectorID, capability, resource, subject, now)
+	})
+}
+
 // AuthorizeV2ConnectorPlan authorizes the complete registered connector plan
 // for the live named session. The plan definition is bundle-trusted; raw args
 // and context are schema-validated and used only to derive policy targets.
@@ -369,6 +381,12 @@ func (e *Evaluator) IsV2UnregisteredTool(name string) bool {
 }
 
 func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
+	return e.authorizeV2HarnessToolWith(ctx, req, func(v *policybundle.Verified, subject *policybundle.SessionSubject, now time.Time) policybundle.Decision {
+		return v.EvaluateV2HarnessToolForTarget(req.Tool, req.AgentID, connectorID, capability, resource, subject, now)
+	})
+}
+
+func (e *Evaluator) authorizeV2HarnessToolWith(ctx context.Context, req Request, evaluate func(*policybundle.Verified, *policybundle.SessionSubject, time.Time) policybundle.Decision) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
@@ -383,7 +401,7 @@ func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, con
 	if err != nil {
 		return decisionWithSubject(stateDenial(state), current), nil
 	}
-	d := v.EvaluateV2HarnessToolForTarget(req.Tool, req.AgentID, connectorID, capability, resource, sessionPolicySubject(current), e.now().UTC())
+	d := evaluate(v, sessionPolicySubject(current), e.now().UTC())
 	return v2Decision(d, v, state, current), nil
 }
 

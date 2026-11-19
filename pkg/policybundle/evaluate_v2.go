@@ -161,12 +161,41 @@ func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *Sess
 // capability, or resource; omitted selector dimensions remain governed by the
 // tool's ordinary authorization policy.
 func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource string, subject *SessionSubject, now time.Time) Decision {
-	if decision, denied := v.v2SubjectDenial(subject, now); denied {
+	decision, _ := v.evaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource, subject, now)
+	return decision
+}
+
+// ReasonConnectorNotNamed is the deny reason for a credential release whose
+// call a permit allowed without naming the requested connector (HAI-1070).
+const ReasonConnectorNotNamed = "connector_not_named"
+
+// EvaluateV2HarnessToolRelease decides a connector credential release for a
+// harness tool. It is EvaluateV2HarnessToolForTarget plus one rule: the
+// credential is released only when the permit that allowed the call has a
+// selector whose connector_id is exactly connectorID. A tool-only permit, or an
+// access grant (whose target names only the tool), still permits the tool call
+// through EvaluateV2HarnessTool but never releases a credential. The check is
+// local to the verified bundle.
+func (v *Verified) EvaluateV2HarnessToolRelease(toolName, agentID, connectorID, capability, resource string, subject *SessionSubject, now time.Time) Decision {
+	decision, winner := v.evaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource, subject, now)
+	if decision.Outcome != "allow" {
 		return decision
+	}
+	if connectorID == "" || winner == nil || winner.Selector["connector_id"] != connectorID {
+		return Decision{Outcome: "deny", PolicyID: decision.PolicyID, ReasonCode: ReasonConnectorNotNamed, Reason: "the permit that allowed the call does not name this connector"}
+	}
+	return decision
+}
+
+// evaluateV2HarnessToolForTarget returns the decision and, when a tool policy
+// decided it, that winning check. An access-grant decision has no check.
+func (v *Verified) evaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource string, subject *SessionSubject, now time.Time) (Decision, *v2Check) {
+	if decision, denied := v.v2SubjectDenial(subject, now); denied {
+		return decision, nil
 	}
 	var set v2PolicySet
 	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
-		return invalidDecision()
+		return invalidDecision(), nil
 	}
 	var registered *V2Tool
 	for i := range set.Tools {
@@ -176,7 +205,7 @@ func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 		}
 	}
 	if registered == nil || registered.Route.HarnessExecutor == nil || registered.Route.ConnectorBinding != nil {
-		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "harness tool is not registered in the policy bundle"}
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "harness tool is not registered in the policy bundle"}, nil
 	}
 	request := map[string]string{"tool": registered.Name, "source": registered.Source}
 	if connectorID != "" {
@@ -189,10 +218,13 @@ func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 		request["resource_id"] = resource
 	}
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
-	decision := evaluateV2Check(set.denyOverrides(), set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
-	// A rule that matched decided the call. Where no rule matched, a live
-	// access grant may still open it (ADR-038 §2).
-	return v.v2GrantOrRule(decision, v2ToolTarget(registered.Name), subject, groups, now)
+	decision, winner := evaluateV2CheckWinner(set.denyOverrides(), set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	if winner != nil {
+		return decision, winner
+	}
+	// No rule matched. A live access grant may still open the call
+	// (ADR-038 §2); it decides without a check.
+	return v.v2GrantOrRule(decision, v2ToolTarget(registered.Name), subject, groups, now), nil
 }
 
 // V2ToolRegistered reports whether a v2 policy set has a catalog registration
@@ -361,6 +393,13 @@ func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool 
 // not read, and policy id ascending breaks ties (contracts policy.Precedence);
 // otherwise the highest priority decides, then deny before permit, then id.
 func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) Decision {
+	decision, _ := evaluateV2CheckWinner(denyOverrides, checks, request, subject, groups, roles, agentID, orgID, workspaceID)
+	return decision
+}
+
+// evaluateV2CheckWinner is evaluateV2Check that also returns the winning
+// check, or nil when no check matched.
+func evaluateV2CheckWinner(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) (Decision, *v2Check) {
 	matching := make([]v2Check, 0, len(checks))
 	call := Call{AgentID: agentID, UserID: subject.UserID, Email: subject.Email}
 	for _, check := range checks {
@@ -379,7 +418,7 @@ func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]st
 		matching = append(matching, check)
 	}
 	if len(matching) == 0 {
-		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no policy check matched the operation"}
+		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no policy check matched the operation"}, nil
 	}
 	sort.Slice(matching, func(i, j int) bool {
 		if denyOverrides {
@@ -395,9 +434,9 @@ func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]st
 	})
 	winner := matching[0]
 	if winner.Effect == "deny" {
-		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}
+		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}, &winner
 	}
-	return Decision{Outcome: "allow", PolicyID: winner.PolicyID}
+	return Decision{Outcome: "allow", PolicyID: winner.PolicyID}, &winner
 }
 
 // v2CheckRule is the part of a check that deny-overrides precedence reads.

@@ -726,16 +726,17 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
 	tests := []struct {
-		name         string
-		effect       string
-		tool         string
-		shell        string
-		shellEffect  string
-		shellDst     string // shell policy destination command; defaults to "git log"
-		wireTool     string // tool name sent with shell_command; defaults to "shell"
-		wantDecision string
-		wantReason   string
-		wantPolicyID string
+		name           string
+		effect         string
+		tool           string
+		shell          string
+		shellEffect    string
+		shellDst       string // shell policy destination command; defaults to "git log"
+		wireTool       string // tool name sent with shell_command; defaults to "shell"
+		wantDecision   string
+		wantReason     string
+		wantSyntaxCode string
+		wantPolicyID   string
 	}{
 		{name: "group permit", effect: "permit", tool: "custom.read", wantDecision: "permit", wantPolicyID: "tool-policy"},
 		{name: "group deny", effect: "deny", tool: "custom.write", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "tool-policy"},
@@ -745,8 +746,8 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		{name: "matching shell deny", tool: "shell", shell: "git log", shellEffect: "deny", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
 		{name: "compound shell command with no policies is unmatched", tool: "shell", shell: "git status && whoami", wantDecision: "unmatched", wantReason: "no_matching_policy"},
 		{name: "compound shell command is denied by an explicit deny on one stage", tool: "shell", shell: "git status && whoami", shellEffect: "deny", shellDst: "whoami", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
-		{name: "unsupported shell syntax remains denied", tool: "shell", shell: "git status > out", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
-		{name: "command substitution remains denied", tool: "shell", shell: "git status $(whoami)", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+		{name: "unsupported shell syntax remains denied", tool: "shell", shell: "git status > out", wantDecision: "deny", wantReason: "unsupported_shell_syntax", wantSyntaxCode: "unsupported_redirection"},
+		{name: "command substitution remains denied", tool: "shell", shell: "git status $(whoami)", wantDecision: "deny", wantReason: "unsupported_shell_syntax", wantSyntaxCode: "command_substitution"},
 		{name: "legacy pi.bash tool name is not a shell tool", tool: "shell", wireTool: "pi.bash", shell: "git log", wantDecision: "deny", wantReason: "invalid_shell_request"},
 	}
 	for _, tc := range tests {
@@ -813,8 +814,21 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
 			h.ServeHTTP(rec, req)
 			var response socketAuthorizeResponse
-			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK || response.Decision != tc.wantDecision || response.ReasonCode != tc.wantReason || response.PolicyID != tc.wantPolicyID {
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK || response.Decision != tc.wantDecision || response.ReasonCode != tc.wantReason || response.SyntaxCode != tc.wantSyntaxCode || response.PolicyID != tc.wantPolicyID {
 				t.Fatalf("tool authorization status=%d response=%+v err=%v", rec.Code, response, err)
+			}
+			if tc.wantSyntaxCode != "" {
+				var event struct {
+					Decision   string `json:"decision"`
+					ReasonCode string `json:"reason_code"`
+					SyntaxCode string `json:"syntax_code"`
+				}
+				if err := json.Unmarshal(audit, &event); err != nil || event.Decision != "deny" || event.ReasonCode != "unsupported_shell_syntax" || event.SyntaxCode != tc.wantSyntaxCode {
+					t.Fatalf("syntax audit event=%s err=%v; want deny/unsupported_shell_syntax/%s", audit, err, tc.wantSyntaxCode)
+				}
+				if response.Hint == "" {
+					t.Fatalf("syntax denial response lacks actionable hint: %+v", response)
+				}
 			}
 			if tc.wantDecision == "unmatched" {
 				var event struct {

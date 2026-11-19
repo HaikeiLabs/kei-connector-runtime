@@ -121,6 +121,43 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseWithDiagnosticReturnsBoundedCategories(t *testing.T) {
+	tests := []struct {
+		input string
+		want  DiagnosticCode
+	}{
+		{"echo $HOME", DiagnosticParameterExpansion},
+		{"$(id)", DiagnosticCommandSubstitution},
+		{"echo `id`", DiagnosticBacktickSubstitution},
+		{"echo hi > file", DiagnosticUnsupportedRedirection},
+		{"(echo hi)", DiagnosticUnsupportedGrouping},
+		{"echo *.go", DiagnosticUnsupportedGlob},
+		{"sleep 1 &", DiagnosticUnsupportedBackground},
+		{"echo ~", DiagnosticUnsupportedTildeExpansion},
+		{"echo !!", DiagnosticUnsupportedHistoryExpansion},
+		{"echo # comment", DiagnosticUnsupportedShellComment},
+		{"echo 'unfinished", DiagnosticMalformedQuoting},
+		{"echo a\nb", DiagnosticControlCharacter},
+		{"a &&", DiagnosticInvalidCommandStructure},
+		{"", DiagnosticInvalidInput},
+		{"echo " + strings.Repeat("a", MaxCommandBytes), DiagnosticInputTooLarge},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.want), func(t *testing.T) {
+			stages, got := ParseWithDiagnostic(tc.input)
+			if got != tc.want || stages != nil {
+				t.Fatalf("ParseWithDiagnostic(input) = %#v, %q; want nil, %q", stages, got, tc.want)
+			}
+			if tc.input != "" && strings.Contains(string(got), tc.input) {
+				t.Fatalf("diagnostic echoed input: %q", got)
+			}
+		})
+	}
+	if stages, got := ParseWithDiagnostic("git status && whoami"); got != "" || len(stages) != 2 {
+		t.Fatalf("supported command = %#v, %q; want two stages and no diagnostic", stages, got)
+	}
+}
+
 func TestParseRejectsControlCharactersInsideQuotes(t *testing.T) {
 	for _, command := range []string{"echo 'a\nb'", "echo \"a\nb\"", "echo 'a\x00b'", "echo \"a\rb\""} {
 		if got, ok := Parse(command); ok {

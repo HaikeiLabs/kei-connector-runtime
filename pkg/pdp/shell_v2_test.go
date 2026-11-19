@@ -245,7 +245,7 @@ func TestAuthorizeShellUnsupportedSyntaxReasonSaysWhatIsSupported(t *testing.T) 
 		t.Fatal(err)
 	}
 	want := "use one command, or commands joined with && || ; |; redirects other than 2>&1 and /dev/null, subshells, substitutions and globs are not supported"
-	if d.Allow || d.ReasonCode != "unsupported_shell_syntax" || d.Reason != want {
+	if d.Allow || d.ReasonCode != ReasonUnsupportedShellSyntax || d.SyntaxCode != "unsupported_redirection" || d.Reason != want {
 		t.Fatalf("decision=%+v; want reason %q", d, want)
 	}
 }

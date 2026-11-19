@@ -79,6 +79,13 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		return 1
 	}
 	defer local.Close()
+	local.SetIdentityResolver(func(ctx context.Context) (*keiruntime.Identity, error) {
+		root, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+		if err != nil {
+			return nil, err
+		}
+		return identityFromRoot(root), nil
+	})
 	unixListener, err := socket.Listen(socketPath)
 	if err != nil {
 		slog.Error("runtime_unix_listener_failed", "path", socketPath, "error", err)

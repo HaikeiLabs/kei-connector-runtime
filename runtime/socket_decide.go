@@ -19,6 +19,7 @@ import (
 // identity's default agent (the audit records that agent instead of the
 // request's). The error is non-nil only when ctx is done.
 func (l *LocalPDP) decideAuthorize(ctx context.Context, sessionID string, req socketAuthorizeRequest) (d pdp.Decision, auditTrustedAgent, unmatched bool, err error) {
+	l.refreshIdentityForBundle(ctx)
 	d = pdp.Decision{ReasonCode: pdp.ReasonPolicyBundleMissing, DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}
 	shellKind, isShell := l.shellKindForTool(req.Tool)
 	auditTrustedAgent = isShell
@@ -343,7 +344,7 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 	if !capabilityFound {
 		return denied("capability_not_registered", "capability is not declared for the connector")
 	}
-	d, err := e.AuthorizeV2HarnessToolForTarget(ctx, pdp.Request{
+	d, err := e.AuthorizeV2HarnessToolRelease(ctx, pdp.Request{
 		Session: sessionID, Tool: req.Tool, AgentID: trusted,
 	}, req.Connector.ConnectorID, req.Connector.Capability, req.Resource)
 	if err != nil {
