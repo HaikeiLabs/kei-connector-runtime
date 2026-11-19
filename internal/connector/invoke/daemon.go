@@ -111,7 +111,10 @@ func credentialDenial(err error) (*denial, *json.RawMessage) {
 
 // UseSecret runs fn with descriptor c's tenant-stored credential. The value
 // is in scope only while fn runs.
-func UseSecret(ctx context.Context, r SecretResolver, c policybundle.Connector, fn func(value string) error) error {
+func UseSecret(ctx context.Context, r Secrets, c policybundle.Connector, fn func(value string) error) error {
+	if r == nil {
+		return &SecretError{"credential_unavailable", "the connector credential is not available"}
+	}
 	value, err := r.Resolve(ctx, c)
 	if err != nil {
 		return err
