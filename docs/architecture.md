@@ -443,6 +443,19 @@ secret value:
 When a connector has several unresolved fields, the reason is that of the
 first one the catalog lists.
 
+### Shared credentials in daemon memory
+
+`kei-proxy serve` does not read the secret store on an allowed call. It keeps
+the credentials of `shared` `opaque_ref` connectors (a postgres, MySQL or SQL
+Server DSN, for example) in memory: it loads them when a session starts and
+when the policy bundle changes, refreshes them in the background (every 5
+minutes, failed loads retried with backoff), and drops them when the last
+session ends, when a connector leaves the bundle or its reference changes, and
+on exit. A store outage keeps serving values already loaded; a connector that
+never loaded denies `credential_unavailable` at once. Values are never written
+to disk or logged. Details: [`unix-socket.md`](unix-socket.md), "Served from
+daemon memory (HAI-1071)".
+
 ## GCP Secret Manager backend
 
 The runtime's tenant secret store supports `gcp-secret-manager` alongside

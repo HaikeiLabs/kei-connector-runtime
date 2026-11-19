@@ -31,6 +31,14 @@ type Descriptor struct {
 	CredentialSecretRef string `json:"credential_secret_ref,omitempty"`
 }
 
+// Secrets resolves opaque_ref descriptor credentials for the serve daemon.
+// SecretResolver reads the tenant secret store on each call; SecretCache
+// (HAI-1071) serves shared connectors from memory.
+type Secrets interface {
+	Resolve(ctx context.Context, c policybundle.Connector) (string, error)
+	CheckExternalField(c policybundle.Connector, field string) error
+}
+
 // SecretResolver resolves an opaque_ref bundle descriptor's credential inside
 // the serve daemon.
 type SecretResolver struct {

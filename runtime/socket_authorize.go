@@ -76,6 +76,7 @@ type socketAuthorizeResponse struct {
 	Schema              string          `json:"schema"`
 	Decision            string          `json:"decision"` // permit | deny | unmatched
 	ReasonCode          string          `json:"reason_code,omitempty"`
+	SyntaxCode          string          `json:"syntax_code,omitempty"`
 	Hint                string          `json:"hint,omitempty"`
 	DenySource          string          `json:"deny_source,omitempty"`
 	Reason              string          `json:"reason,omitempty"`
@@ -152,6 +153,7 @@ type socketDecisionEvent struct {
 	Decision            string   `json:"decision"`
 	DenySource          string   `json:"deny_source"`
 	ReasonCode          string   `json:"reason_code"`
+	SyntaxCode          string   `json:"syntax_code,omitempty"`
 	PolicyID            *string  `json:"policy_id,omitempty"`
 	PolicyReason        *string  `json:"policy_reason,omitempty"`
 	PolicyBundleVersion *int64   `json:"policy_bundle_version,omitempty"`
@@ -183,16 +185,23 @@ type SessionKeychain interface {
 }
 
 type LocalPDP struct {
-	cfg       PolicyConfig
-	Sessions  *pdp.Sessions
-	evaluator atomic.Pointer[pdp.Evaluator]
-	identity  atomic.Pointer[Identity]
-	emit      EmitAuditFunc
-	keychain  SessionKeychain
+	cfg               PolicyConfig
+	Sessions          *pdp.Sessions
+	evaluator         atomic.Pointer[pdp.Evaluator]
+	identity          atomic.Pointer[Identity]
+	identityRefreshMu sync.Mutex
+	identityResolver  func(context.Context) (*Identity, error)
+	emit              EmitAuditFunc
+	keychain          SessionKeychain
 
 	// creds creates per-session credential stores held in sessionCreds.
-	creds                 *credrelease.Store
-	secrets               *invoke.SecretResolver
+	creds *credrelease.Store
+	// secrets holds shared opaque_ref connector credentials in memory
+	// (HAI-1071); see connector_secrets.go.
+	secretsMu             sync.Mutex
+	secrets               *invoke.SecretCache
+	stopSecrets           context.CancelFunc
+	secretsDigest         string
 	sessionCreds          sync.Map
 	runner                http.Handler
 	toolRegistrar         ToolRegistrar
@@ -249,6 +258,7 @@ func (l *LocalPDP) SetTokenlessOwnerSession(enabled bool) {
 	}
 	if !enabled {
 		l.endOwnerSessionLocked()
+		l.releaseOwnerSecretsLocked()
 		l.ownerUnavailable = false
 	}
 	l.ownerMu.Unlock()
@@ -264,6 +274,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	if e == nil {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -271,6 +282,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	if !ok {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -288,6 +300,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	id, err := l.Sessions.CreatePinned(sub)
 	if err != nil {
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -299,6 +312,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 			l.dropSessionCredentials(id)
 			l.ownerID = ""
 			l.ownerUnavailable = true
+			l.releaseOwnerSecretsLocked()
 			l.ownerMu.Unlock()
 			return
 		}
@@ -309,6 +323,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 		// A concurrent bundle refresh ends this session and flushes a late load.
 		l.loadCredentials(context.Background(), id, sub)
 	}
+	l.prefetchSharedSecrets(context.Background(), ownerSecretHolder)
 }
 
 func (l *LocalPDP) endOwnerSessionLocked() {
@@ -316,6 +331,13 @@ func (l *LocalPDP) endOwnerSessionLocked() {
 		l.Sessions.EndID(l.ownerID)
 		l.ownerID = ""
 	}
+}
+
+// releaseOwnerSecretsLocked releases the owner session's hold on the shared
+// connector credentials when the owner session stops being available (not
+// when it is only recreated by a refresh).
+func (l *LocalPDP) releaseOwnerSecretsLocked() {
+	l.releaseSharedSecrets(ownerSecretHolder)
 }
 
 // SweepSessions ends idle named sessions until ctx is done or Close. The
@@ -352,13 +374,6 @@ func (l *LocalPDP) SetKeychain(k SessionKeychain) { l.keychain = k }
 // identities. Each session has its own store and every session end flushes it.
 // Without a store (legacy) sessions hold no credentials.
 func (l *LocalPDP) SetCredentialStore(store *credrelease.Store) { l.creds = store }
-
-// SetConnectorSecrets sets the tenant secret store reader that
-// POST /v1/credentials:release uses for a shared opaque_ref connector
-// (HAI-1066): the connector reference index that `kei-proxy credential sync`
-// wrote, and the KEI_SECRETS_BACKEND store. Without one, those releases deny
-// credential_unavailable.
-func (l *LocalPDP) SetConnectorSecrets(r invoke.SecretResolver) { l.secrets = &r }
 
 // errCredentialReleaseOff is returned by UseCredential in legacy mode.
 var errCredentialReleaseOff = errors.New("session credential release is not enabled")
@@ -437,6 +452,7 @@ func (l *LocalPDP) OnSessionEnd(fn func(id string)) {
 
 func (l *LocalPDP) sessionEnded(id string) {
 	l.dropSessionCredentials(id)
+	l.releaseSharedSecrets(id)
 	l.endHooksMu.Lock()
 	hooks := append([]func(string){}, l.endHooks...)
 	l.endHooksMu.Unlock()
@@ -467,6 +483,7 @@ func (l *LocalPDP) SetModelConfigHandler(h http.Handler) { l.modelConfigHandler 
 // Before the identity resolves, every call denies policy_bundle_missing. The
 // error is non-nil only when ctx is done.
 func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp.ConnectorGrant, *Identity, error) {
+	l.refreshIdentityForBundle(ctx)
 	e, id := l.evaluator.Load(), l.identity.Load()
 	if e == nil || id == nil {
 		sub, hasSession := l.Sessions.Get(req.Session)
@@ -503,6 +520,7 @@ func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
 func (l *LocalPDP) Close() {
 	l.closeOnce.Do(func() { close(l.stopSweep) })
 	l.flushCredentials()
+	l.stopConnectorSecrets()
 }
 
 // flushCredentials flushes every session's credentials.
@@ -510,6 +528,7 @@ func (l *LocalPDP) flushCredentials() {
 	if l.creds != nil {
 		l.creds.Flush()
 	}
+	l.flushConnectorSecrets()
 	l.sessionCreds.Range(func(k, _ any) bool {
 		l.dropSessionCredentials(k.(string))
 		return true
@@ -527,6 +546,44 @@ func (l *LocalPDP) SetIdentity(identity *Identity) {
 	}
 	l.identity.Store(identity)
 	l.evaluator.Store(e)
+}
+
+// SetIdentityResolver installs the daemon's control-plane identity lookup.
+// It is used on demand when a bundle for the same installation has moved to
+// another workspace since the evaluator was last built.
+func (l *LocalPDP) SetIdentityResolver(resolve func(context.Context) (*Identity, error)) {
+	l.identityRefreshMu.Lock()
+	l.identityResolver = resolve
+	l.identityRefreshMu.Unlock()
+}
+
+// refreshIdentityForBundle follows a workspace move without weakening the
+// installation boundary. A bundle for another installation is never used to
+// select a new identity; ordinary evaluator validation continues to fail it
+// closed.
+func (l *LocalPDP) refreshIdentityForBundle(ctx context.Context) {
+	l.identityRefreshMu.Lock()
+	defer l.identityRefreshMu.Unlock()
+	current, evaluator, resolve := l.identity.Load(), l.evaluator.Load(), l.identityResolver
+	if current == nil || current.WorkspaceID == nil || evaluator == nil || resolve == nil {
+		return
+	}
+	status, err := evaluator.BundleStatus()
+	if err != nil || status.Audience == nil {
+		return
+	}
+	audience := status.Audience
+	if audience.InstallationID != current.ID || audience.OrgID != current.OrgID || audience.WorkspaceID == *current.WorkspaceID {
+		return
+	}
+	refreshed, err := resolve(ctx)
+	if err != nil || refreshed == nil || refreshed.WorkspaceID == nil {
+		return
+	}
+	if refreshed.ID != current.ID || refreshed.OrgID != current.OrgID || *refreshed.WorkspaceID != audience.WorkspaceID {
+		return
+	}
+	l.SetIdentity(refreshed)
 }
 
 func (l *LocalPDP) AfterSync(err error) {
@@ -548,6 +605,7 @@ func (l *LocalPDP) AfterSync(err error) {
 	if e == nil {
 		l.ownerMu.Lock()
 		l.endOwnerSessionLocked()
+		l.releaseOwnerSecretsLocked()
 		l.ownerUnavailable = l.tokenlessOwnerSession
 		l.ownerMu.Unlock()
 	}
@@ -562,6 +620,9 @@ func (l *LocalPDP) AfterSync(err error) {
 	if sub, ok := l.Sessions.Current(); !ok || sub.Status != pdp.StatusLinked {
 		l.flushSession(pdp.DefaultSession)
 	}
+	// A changed bundle refreshes shared connector credentials at once and
+	// drops those of removed or re-pointed connectors (HAI-1071).
+	l.syncSecretConnectors()
 }
 
 func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, checkAuth func(*http.Request) bool) http.Handler {
@@ -717,6 +778,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" object with no unknown fields")
 		return
 	}
+	l.refreshIdentityForBundle(r.Context())
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(body, &fields)
 	_, hasPrincipalID := fields["service_principal_id"]
@@ -766,6 +828,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		l.loadCredentials(r.Context(), id, sub)
+		l.prefetchSharedSecrets(r.Context(), id)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(socketSessionResponse{Schema: sessionSchemaV2, SessionID: id, ServicePrincipalID: principal.ServicePrincipalID, SubjectType: "service_principal", IdleTTLSeconds: l.idleTTLSeconds()})
@@ -822,6 +885,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	l.loadCredentials(r.Context(), id, sub)
+	l.prefetchSharedSecrets(r.Context(), id)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(socketSessionResponse{
@@ -1138,10 +1202,12 @@ func (l *LocalPDP) releaseTenantSecret(ctx context.Context, toolBound bool, c po
 	if contract.AccountModel(c.AccountModel) != contract.AccountModelShared {
 		return nil, &invoke.SecretError{Code: "account_model_not_supported", Reason: "a tenant-stored credential is released only for a shared connector"}
 	}
-	if l.secrets == nil {
+	// Served from daemon memory (HAI-1071): this never reads the store.
+	secrets := l.ConnectorSecrets()
+	if secrets == nil {
 		return nil, &invoke.SecretError{Code: "credential_unavailable", Reason: "the connector credential is not available"}
 	}
-	value, err := l.secrets.Resolve(ctx, c)
+	value, err := secrets.Resolve(ctx, c)
 	if err != nil {
 		var secretErr *invoke.SecretError
 		if errors.As(err, &secretErr) {
@@ -1203,10 +1269,25 @@ func credentialReleaseReason(reason string) string {
 	}
 }
 
+func authorizeSyntaxCode(d pdp.Decision) string {
+	if d.ReasonCode != pdp.ReasonUnsupportedShellSyntax || denyhint.ShellSyntaxHint(d.SyntaxCode) == "" {
+		return ""
+	}
+	return d.SyntaxCode
+}
+
+func authorizeHint(d pdp.Decision) string {
+	if d.ReasonCode == pdp.ReasonUnsupportedShellSyntax {
+		return denyhint.ShellSyntaxHint(authorizeSyntaxCode(d))
+	}
+	return denyhint.Hint(string(d.ReasonCode))
+}
+
 func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {
 	resp := socketAuthorizeResponse{
 		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: string(d.ReasonCode),
-		Hint: denyhint.Hint(string(d.ReasonCode)), DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
+		SyntaxCode: authorizeSyntaxCode(d), Hint: authorizeHint(d), DenySource: d.DenySource,
+		Reason: d.Reason, PolicyID: d.PolicyID,
 		BundleState: d.BundleState,
 	}
 	if d.Allow {
@@ -1257,7 +1338,7 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: string(d.ReasonCode),
-		CredentialKind: credentialKind,
+		SyntaxCode: authorizeSyntaxCode(d), CredentialKind: credentialKind,
 	}
 	if unmatched && d.ReasonCode == "no_matching_policy" {
 		e.Decision = "unmatched"

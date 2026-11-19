@@ -67,8 +67,9 @@ type Daemon struct {
 	AppendAudit   func([]byte) error
 	AuditCrypto   *auditcrypto.Provider
 	// Secrets resolves references to opaque_ref connectors from the bundle's
-	// connector descriptors (HAI-378).
-	Secrets invoke.SecretResolver
+	// connector descriptors (HAI-378). The serve daemon passes its shared
+	// credential cache (HAI-1071), so a run never waits on the secret store.
+	Secrets invoke.Secrets
 	// RouteKeys, when set, gives each run in a named session an MCP route
 	// key in KEI_MCP_ROUTE_KEY (ADR-036 §4.4), and makes credential
 	// references optional: `kei-proxy run -- <harness>` launches a harness.
@@ -344,7 +345,7 @@ func (d *Daemon) withCredentials(ctx context.Context, sessionID, subject string,
 // connector's bundle descriptor (ADR-034, HAI-378). It returns the descriptor
 // whose tenant-stored secret fills the reference, nil for the session's own
 // OAuth credential, or a denial code and reason.
-func descriptorReference(c *policybundle.Connector, ref connectorCredentialRef, secrets invoke.SecretResolver) (*policybundle.Connector, string, string) {
+func descriptorReference(c *policybundle.Connector, ref connectorCredentialRef, secrets invoke.Secrets) (*policybundle.Connector, string, string) {
 	if c == nil || c.ID != ref.connectorID {
 		return nil, "descriptor_invalid", "the policy bundle has no descriptor for this connector"
 	}
@@ -368,6 +369,9 @@ func descriptorReference(c *policybundle.Connector, ref connectorCredentialRef, 
 		// secret, usable only once credential sync resolved it into the
 		// index for exactly this connector and field.
 		if invoke.IsExternalRef(c.CredentialRef) {
+			if secrets == nil {
+				return nil, "credential_unavailable", "the connector credential is not available"
+			}
 			if err := secrets.CheckExternalField(*c, ref.field); err != nil {
 				code, reason, _ := invoke.CredentialDenial(err)
 				return nil, code, reason

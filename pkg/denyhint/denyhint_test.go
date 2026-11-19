@@ -1,6 +1,9 @@
 package denyhint
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestHintCoversEveryKnownDenyCode asserts the stable table maps every known
 // deny reason_code a developer can hit to a concrete next step.
@@ -65,6 +68,27 @@ func TestHintPreflightRequiredNamesTheFullFix(t *testing.T) {
 
 // TestHintUnknownCodeIsEmpty asserts codes outside the table (including the
 // empty string) get no hint, so the response omits the field entirely.
+func TestShellSyntaxHintsAreBoundedAndDoNotEchoInput(t *testing.T) {
+	for _, code := range []string{
+		"parameter_expansion", "command_substitution", "backtick_substitution",
+		"unsupported_redirection", "unsupported_grouping", "unsupported_glob",
+		"unsupported_background", "tilde_expansion", "history_expansion", "shell_comment",
+		"malformed_quoting", "control_character", "input_too_large",
+		"invalid_command_structure", "invalid_input",
+	} {
+		hint := ShellSyntaxHint(code)
+		if hint == "" || len(hint) > 320 {
+			t.Errorf("ShellSyntaxHint(%q) = %q, want bounded non-empty remediation", code, hint)
+		}
+		if strings.Contains(hint, code) || strings.Contains(hint, "command text") {
+			t.Errorf("ShellSyntaxHint(%q) exposes parser input/category unnecessarily: %q", code, hint)
+		}
+	}
+	if got := ShellSyntaxHint("unrecognized-user-value"); got != "" {
+		t.Fatalf("unknown syntax category echoed/remediated: %q", got)
+	}
+}
+
 func TestHintUnknownCodeIsEmpty(t *testing.T) {
 	for _, code := range []string{"", "policy_bundle_missing", "no_session", "totally_unknown_code"} {
 		if h := Hint(code); h != "" {
