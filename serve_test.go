@@ -43,6 +43,27 @@ func TestRuntimeHTTPHandlerHealthAndReadiness(t *testing.T) {
 	}
 }
 
+func TestReadyVersionHeaderIsUnixSocketOnly(t *testing.T) {
+	previous := version
+	version = "test-version-1"
+	t.Cleanup(func() { version = previous })
+	local := keiruntime.NewLocalPDP(Config{}, nil)
+	defer local.Close()
+	tcp, unix := newServeHandlers(Config{}, local)
+
+	for name, handler := range map[string]http.Handler{"tcp": tcp, "unix socket": unix} {
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		got := resp.Header().Get("X-Kei-Proxy-Version")
+		if name == "unix socket" && got != "test-version-1" {
+			t.Errorf("%s version header = %q, want test-version-1", name, got)
+		}
+		if name == "tcp" && got != "" {
+			t.Errorf("%s unexpectedly exposes version header %q", name, got)
+		}
+	}
+}
+
 func TestServeUnixSocketHTTPPermissionsAndCleanup(t *testing.T) {
 	tempDir := shortSocketTempDir(t)
 	socketPath := filepath.Join(tempDir, "runtime.sock")

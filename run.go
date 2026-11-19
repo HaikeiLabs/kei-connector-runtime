@@ -85,6 +85,8 @@ func Main(buildVersion string, args []string) int {
 		code = runHarness(args[1:])
 	} else if args[0] == "serve" {
 		code = runServe(args[1:])
+	} else if args[0] == "status" {
+		code = runStatus(args[1:])
 	} else if args[0] == "policy" {
 		code = runPolicy(args[1:])
 	} else if args[0] == "version" || args[0] == "-v" || args[0] == "--version" {
@@ -201,6 +203,7 @@ Usage:
 
 Commands:
   serve        run the local daemon: sessions, policy decisions, model profiles, audit
+  status       report local daemon availability and readiness (read-only)
   runtime      check the installation credential (bootstrap) or report liveness (heartbeat)
   policy sync [--force]  fetch, validate and persist the installation's policy bundle; --force requests fresh issuance
   policy show  print the persisted policy bundle's version and enforcement state
