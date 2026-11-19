@@ -89,14 +89,15 @@ func (r deliveredRunResolver) Resolve(ctx context.Context, connectorID, field st
 	if source != contract.CredentialSourceOpaqueRef {
 		return "", "", runReasonError{"unresolved_reference"}
 	}
-	entry, err := credentials.ReadConnectorReference(filepath.Join(r.cfg.RuntimeStateDir, "connector-credentials.json"), connectorID, field)
+	indexPath := filepath.Join(r.cfg.RuntimeStateDir, "connector-credentials.json")
+	entry, err := credentials.ReadConnectorReference(indexPath, connectorID, field)
 	if err != nil || entry.SecretBackend != response.Connector.CredentialBackend || response.Connector.CredentialRef == "" {
 		return "", "", runReasonError{"unresolved_reference"}
 	}
 	if entry.External {
 		// An external credential_ref (HAI-1000) resolved by credential sync:
 		// the descriptor names the customer's own secret.
-		if externalRef, ok := credentials.ExternalSecretRef(entry.SecretBackend, response.Connector.CredentialRef); !ok || externalRef != entry.SecretRef {
+		if !credentials.ExternalReferenceNames(indexPath, entry, response.Connector.CredentialRef) {
 			return "", "", runReasonError{"unresolved_reference"}
 		}
 	} else if entry.SecretRef != response.Connector.CredentialSecretRef || !strings.HasSuffix(entry.SecretRef, "/"+response.Connector.CredentialRef) {

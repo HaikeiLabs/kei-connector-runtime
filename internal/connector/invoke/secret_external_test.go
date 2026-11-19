@@ -109,3 +109,30 @@ func TestSecretResolverReleasesABareAzureExternalRef(t *testing.T) {
 		t.Fatalf("got=%q err=%v reads=%v", got, err, store.reads)
 	}
 }
+
+// HAI-1023: an entry resolved from the catalog's qualified secret_ref records
+// the bare credential_ref, so release verifies it without
+// KEI_SECRETS_AZURE_VAULT_URL.
+func TestInvokeSecret_VerifiesWithoutVaultEnv(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	const qualified = "https://acme.vault.azure.net/secrets/crm-api-key"
+	index := runtimecredentials.ConnectorIndexPath(filepath.Join(t.TempDir(), "state"))
+	if err := runtimecredentials.WriteExternalConnectorReference(index, runtimecredentials.ConnectorReference{ConnectorID: externalConnectorID, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: qualified, External: true}, "crm-api-key"); err != nil {
+		t.Fatal(err)
+	}
+	store := &externalSecretStore{values: map[string]string{"azure-key-vault|" + qualified: externalValue}}
+	descriptor := externalDescriptor()
+	descriptor.CredentialRef, descriptor.CredentialBackend = "crm-api-key", "azure-key-vault"
+	resolver := SecretResolver{IndexPath: index, Store: store}
+	if err := resolver.CheckExternalField(descriptor, "api_key"); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	got, err := resolver.Resolve(context.Background(), descriptor)
+	if err != nil || got != externalValue || len(store.reads) != 1 {
+		t.Fatalf("got=%q err=%v reads=%v", got, err, store.reads)
+	}
+	descriptor.CredentialRef = "billing-api-key"
+	if err := resolver.CheckExternalField(descriptor, "api_key"); err == nil {
+		t.Fatal("another bare ref must not verify")
+	}
+}

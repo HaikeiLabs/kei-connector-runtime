@@ -31,6 +31,9 @@ type ConnectorReference struct {
 	// writes it after checking the ref exists in the configured store; Kei
 	// never delivered it, so the ref does not name the connector field.
 	External bool `json:"external,omitempty"`
+	// Do not add fields: an older kei-proxy decodes the index with
+	// DisallowUnknownFields, so a new field breaks rollback. Keep new
+	// per-entry metadata in a sidecar (external_ref_sidecar.go).
 }
 
 type connectorReferenceIndex struct {
@@ -64,14 +67,21 @@ func RemoveExternalConnectorReferences(path string, remove func(ConnectorReferen
 		return 0, nil
 	}
 	removed := 0
-	err := updateConnectorReferenceIndex(path, func(index *connectorReferenceIndex) bool {
-		for key, entry := range index.Entries {
-			if entry.External && remove(entry) {
-				delete(index.Entries, key)
-				removed++
+	err := withConnectorIndexLock(path, func() error {
+		err := updateConnectorReferenceIndexLocked(path, func(index *connectorReferenceIndex) bool {
+			for key, entry := range index.Entries {
+				if entry.External && remove(entry) {
+					delete(index.Entries, key)
+					removed++
+				}
 			}
+			return removed > 0
+		})
+		if err != nil {
+			return err
 		}
-		return removed > 0
+		// Drop sidecar records of removed entries.
+		return reconcileExternalRefSidecarLocked(path, nil)
 	})
 	return removed, err
 }
@@ -79,6 +89,12 @@ func RemoveExternalConnectorReferences(path string, remove func(ConnectorReferen
 // updateConnectorReferenceIndex applies update to the index under an
 // exclusive lock and atomically rewrites it when update reports a change.
 func updateConnectorReferenceIndex(path string, update func(*connectorReferenceIndex) bool) error {
+	return withConnectorIndexLock(path, func() error { return updateConnectorReferenceIndexLocked(path, update) })
+}
+
+// withConnectorIndexLock runs fn holding the index's exclusive lock. The
+// external-ref sidecar is written under the same lock.
+func withConnectorIndexLock(path string, fn func() error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return errors.New("create credential index directory failed")
@@ -101,6 +117,12 @@ func updateConnectorReferenceIndex(path string, update func(*connectorReferenceI
 		return errors.New("lock credential index failed")
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+// updateConnectorReferenceIndexLocked is updateConnectorReferenceIndex for a
+// caller that holds the index lock.
+func updateConnectorReferenceIndexLocked(path string, update func(*connectorReferenceIndex) bool) error {
 	index := connectorReferenceIndex{Version: 1, Entries: map[string]ConnectorReference{}}
 	if existing, readErr := readConnectorReferenceIndex(path); readErr == nil {
 		index = existing
@@ -146,8 +168,8 @@ func ReadConnectorReference(path, connectorID, field string) (ConnectorReference
 
 // ReadExternalConnectorReference returns the external entry credential sync
 // resolved for connectorID at credentialRef, the external credential_ref a
-// bundle descriptor names. credentialRef may be the backend's bare name
-// (ExternalSecretRef). An entry for that ref under another backend is
+// bundle descriptor names, matched by ExternalReferenceNames. An entry for
+// that ref under another backend is
 // ErrConnectorReferenceMismatch; no resolved entry is
 // ErrConnectorReferenceNotFound.
 func ReadExternalConnectorReference(path, connectorID, backend, credentialRef string) (ConnectorReference, error) {
@@ -158,6 +180,7 @@ func ReadExternalConnectorReference(path, connectorID, backend, credentialRef st
 	if err != nil {
 		return ConnectorReference{}, err
 	}
+	sidecar := readExternalRefSidecar(path)
 	keys := make([]string, 0, len(index.Entries))
 	for key := range index.Entries {
 		keys = append(keys, key)
@@ -169,8 +192,7 @@ func ReadExternalConnectorReference(path, connectorID, backend, credentialRef st
 		if !entry.External || entry.ConnectorID != connectorID || connectorReferenceKey(entry.ConnectorID, entry.Field) != key {
 			continue
 		}
-		canonical, ok := ExternalSecretRef(entry.SecretBackend, credentialRef)
-		if !ok || canonical != entry.SecretRef {
+		if !externalReferenceNames(sidecar, entry, credentialRef) {
 			continue
 		}
 		if entry.SecretBackend != backend {

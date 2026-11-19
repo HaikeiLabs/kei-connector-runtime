@@ -441,3 +441,21 @@ func (s *recordingRunSecretStore) Get(_ context.Context, _, ref string) (*string
 func (*recordingRunSecretStore) Put(context.Context, string, string, string) error { return nil }
 func (*recordingRunSecretStore) Delete(context.Context, string, string) error      { return nil }
 func (*recordingRunSecretStore) Validate(context.Context, string, string) error    { return nil }
+
+// HAI-1023: kei-proxy run verifies an external entry by its bare
+// credential_ref, so a catalog-qualified Azure ref needs no vault env.
+func TestDeliveredRunResolverVerifiesCatalogSecretRefWithoutVaultEnv(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	const id = "00000000-0000-4000-8000-000000001000"
+	const qualified = "https://acme.vault.azure.net/secrets/crm-api-key"
+	index := filepath.Join(t.TempDir(), "connector-credentials.json")
+	if err := credentials.WriteExternalConnectorReference(index, credentials.ConnectorReference{ConnectorID: id, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: qualified, External: true}, "crm-api-key"); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingRunSecretStore{value: "fake-external-value"}
+	auth := &fakeRunAuthorization{response: &invoke.Response{Decision: "allow", Connector: &invoke.Descriptor{Metadata: contract.Metadata{ID: id, CredentialRef: "crm-api-key", CredentialSource: contract.CredentialSourceOpaqueRef}, CredentialBackend: "azure-key-vault"}}}
+	got, _, err := (deliveredRunResolver{cfg: Config{RuntimeStateDir: filepath.Dir(index)}, store: store, authorization: auth}).Resolve(context.Background(), id, "api_key")
+	if err != nil || got != "fake-external-value" || len(store.refs) != 1 || store.refs[0] != qualified {
+		t.Fatalf("resolve=%q err=%v refs=%v", got, err, store.refs)
+	}
+}

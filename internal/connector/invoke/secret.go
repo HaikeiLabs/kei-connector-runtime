@@ -100,7 +100,7 @@ func (r SecretResolver) CheckExternalField(c policybundle.Connector, field strin
 	if entry.SecretBackend != c.CredentialBackend {
 		return &SecretError{"credential_backend_mismatch", "the delivered credential does not match the descriptor"}
 	}
-	if canonical, ok := runtimecredentials.ExternalSecretRef(entry.SecretBackend, c.CredentialRef); !ok || canonical != entry.SecretRef {
+	if !runtimecredentials.ExternalReferenceNames(r.IndexPath, entry, c.CredentialRef) {
 		return &SecretError{"unresolved_reference", "the reference does not name a credential resolved for this connector"}
 	}
 	return nil

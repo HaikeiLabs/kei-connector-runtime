@@ -402,3 +402,205 @@ func TestResolveExternalRefsAcceptsAGCPSchemelessRef(t *testing.T) {
 		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
 	}
 }
+
+// HAI-1023: the catalog qualifies external refs from the org/workspace
+// credential store and sends secret_ref; the runtime prefers it and keeps the
+// bare-name logic only for an older catalog that omits it.
+
+func TestResolveExternalRef_UsesCatalogSecretRef(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	catalog := &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{
+		"": {Refs: []ExternalCredentialRef{{ConnectorID: extConnectorA, Field: "api_key", CredentialRef: azureBareName, SecretRef: azureQualified, SecretBackend: "azure-key-vault", Status: "pending"}}},
+	}}
+	cfg := externalConfig(t, catalog.server(t).URL)
+	cfg.SecretsBackend = "azure-key-vault"
+	var warnings bytes.Buffer
+	cfg.Warnings = &warnings
+	store := &refStore{known: map[string]bool{azureQualified: true}}
+	out, err := ResolveExternalRefs(context.Background(), cfg, store)
+	if err != nil || len(out.Resolved) != 1 || len(out.Unresolved) != 0 {
+		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("no vault warning expected when the catalog qualifies the ref: %q", warnings.String())
+	}
+	entry, err := ReadConnectorReference(cfg.ConnectorIndexPath, extConnectorA, "api_key")
+	want := ConnectorReference{ConnectorID: extConnectorA, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: azureQualified, External: true}
+	if err != nil || entry != want {
+		t.Fatalf("entry=%+v err=%v, want %+v", entry, err, want)
+	}
+	if got, err := ReadExternalConnectorReference(cfg.ConnectorIndexPath, extConnectorA, "azure-key-vault", azureBareName); err != nil || got != want {
+		t.Fatalf("bare lookup got=%+v err=%v", got, err)
+	}
+}
+
+func TestResolveExternalRef_RejectsSecretRefForOtherBackend(t *testing.T) {
+	for name, ref := range map[string]ExternalCredentialRef{
+		"azure secret_ref":       {CredentialRef: azureBareName, SecretRef: azureQualified, SecretBackend: "azure-key-vault"},
+		"azure ref, no backend":  {CredentialRef: azureBareName, SecretRef: azureQualified},
+		"aws ref, other backend": {CredentialRef: "customer/crm/api-key", SecretRef: extRefA, SecretBackend: "azure-key-vault"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ref.ConnectorID, ref.Field, ref.Status = extConnectorA, "api_key", "pending"
+			catalog := &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{"": {Refs: []ExternalCredentialRef{ref}}}}
+			cfg := externalConfig(t, catalog.server(t).URL) // aws-secrets-manager
+			store := &refStore{known: map[string]bool{azureQualified: true, extRefA: true}}
+			out, err := ResolveExternalRefs(context.Background(), cfg, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out.Resolved) != 0 || len(out.UnresolvedRefs) != 1 || out.UnresolvedRefs[0].Reason != ReasonNoBackend {
+				t.Fatalf("out=%+v", out)
+			}
+			if len(store.validated) != 0 || store.gets != 0 {
+				t.Fatalf("store called for another backend's ref: validated=%v gets=%d", store.validated, store.gets)
+			}
+		})
+	}
+}
+
+func TestResolveExternalRef_FallsBackWhenSecretRefAbsent(t *testing.T) {
+	catalog := &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{
+		"": {Refs: []ExternalCredentialRef{{ConnectorID: extConnectorA, Field: "api_key", CredentialRef: "customer/crm/api-key", Status: "pending"}}},
+	}}
+	cfg := externalConfig(t, catalog.server(t).URL)
+	store := &refStore{known: map[string]bool{"aws-secrets-manager:///customer/crm/api-key": true}}
+	out, err := ResolveExternalRefs(context.Background(), cfg, store)
+	if err != nil || len(out.Resolved) != 1 {
+		t.Fatalf("out=%+v err=%v validated=%v", out, err, store.validated)
+	}
+	entry, err := ReadExternalConnectorReference(cfg.ConnectorIndexPath, extConnectorA, "aws-secrets-manager", "customer/crm/api-key")
+	if err != nil || entry.SecretRef != "aws-secrets-manager:///customer/crm/api-key" {
+		t.Fatalf("entry=%+v err=%v", entry, err)
+	}
+}
+
+func TestReadExternalConnectorReference_MatchesByBareCredentialRef(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	path := filepath.Join(t.TempDir(), "runtime", "connector-credentials.json")
+	entry := ConnectorReference{ConnectorID: extConnectorA, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: azureQualified, External: true}
+	if err := WriteExternalConnectorReference(path, entry, azureBareName); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadExternalConnectorReference(path, extConnectorA, "azure-key-vault", azureBareName)
+	if err != nil || got != entry {
+		t.Fatalf("bare lookup got=%+v err=%v", got, err)
+	}
+	if _, err := ReadExternalConnectorReference(path, extConnectorA, "azure-key-vault", "billing-api-key"); !errors.Is(err, ErrConnectorReferenceNotFound) {
+		t.Fatalf("another bare ref: err=%v", err)
+	}
+	if _, err := ReadExternalConnectorReference(path, extConnectorA, "aws-secrets-manager", azureBareName); !errors.Is(err, ErrConnectorReferenceMismatch) {
+		t.Fatalf("another backend: err=%v", err)
+	}
+	if !ExternalReferenceNames(path, entry, azureBareName) || ExternalReferenceNames(path, entry, "billing-api-key") {
+		t.Fatal("ExternalReferenceNames must match exactly the bare credential_ref")
+	}
+}
+
+func TestConnectorIndex_ReadsPreChangeEntry(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runtime")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "connector-credentials.json")
+	// An index written before entries carried credential_ref.
+	const preChange = `{"version":1,"entries":{"` + extConnectorA + `/api_key":{"connector_id":"` + extConnectorA + `","field":"api_key","secret_backend":"aws-secrets-manager","secret_ref":"aws-secrets-manager:///customer/crm/api-key","generation":0,"external":true}}}`
+	if err := os.WriteFile(path, []byte(preChange), 0600); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := ReadConnectorReference(path, extConnectorA, "api_key")
+	if err != nil || !entry.External {
+		t.Fatalf("entry=%+v err=%v", entry, err)
+	}
+	if _, err := ReadExternalConnectorReference(path, extConnectorA, "aws-secrets-manager", "customer/crm/api-key"); err != nil {
+		t.Fatalf("pre-change entry no longer matches its bare ref: %v", err)
+	}
+	// A sync with the new catalog leaves the entry in the old schema and
+	// records the bare ref in the sidecar only.
+	if err := WriteExternalConnectorReference(path, entry, "customer/crm/api-key"); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != preChange {
+		t.Fatalf("index rewritten: %s err=%v", data, err)
+	}
+	if !ExternalReferenceNames(path, entry, "customer/crm/api-key") {
+		t.Fatal("sidecar record does not match")
+	}
+}
+
+// preHAI1023ConnectorReference and preHAI1023Index are the index schema of
+// kei-proxy releases before HAI-1023, copied verbatim: an older binary decodes
+// the index with DisallowUnknownFields, so a rollback must find nothing else.
+type preHAI1023ConnectorReference struct {
+	ConnectorID   string `json:"connector_id"`
+	Field         string `json:"field"`
+	SecretBackend string `json:"secret_backend"`
+	SecretRef     string `json:"secret_ref"`
+	Generation    int    `json:"generation"`
+	External      bool   `json:"external,omitempty"`
+}
+
+type preHAI1023Index struct {
+	Version int                                     `json:"version"`
+	Entries map[string]preHAI1023ConnectorReference `json:"entries"`
+}
+
+func TestConnectorIndex_RollbackSafeForOlderBinaries(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	catalog := &externalRefsCatalog{pages: map[string]externalCredentialRefsPage{
+		"": {Refs: []ExternalCredentialRef{{ConnectorID: extConnectorA, Field: "api_key", CredentialRef: azureBareName, SecretRef: azureQualified, SecretBackend: "azure-key-vault", Status: "pending"}}},
+	}}
+	cfg := externalConfig(t, catalog.server(t).URL)
+	cfg.SecretsBackend = "azure-key-vault"
+	store := &refStore{known: map[string]bool{azureQualified: true}}
+	if out, err := ResolveExternalRefs(context.Background(), cfg, store); err != nil || len(out.Resolved) != 1 {
+		t.Fatalf("out=%+v err=%v", out, err)
+	}
+	data, err := os.ReadFile(cfg.ConnectorIndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old preHAI1023Index
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&old); err != nil {
+		t.Fatalf("an older kei-proxy cannot decode the index: %v\n%s", err, data)
+	}
+	reencoded, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reencoded, data) {
+		t.Fatalf("index is not byte-identical in the old schema:\n got %s\nwant %s", data, reencoded)
+	}
+	// The new binary still verifies the bare ref without the vault env.
+	if _, err := ReadExternalConnectorReference(cfg.ConnectorIndexPath, extConnectorA, "azure-key-vault", azureBareName); err != nil {
+		t.Fatalf("bare ref no longer verifies: %v", err)
+	}
+}
+
+func TestExternalRefSidecar_PrunedWithEntryAndStaleRecordIgnored(t *testing.T) {
+	t.Setenv("KEI_SECRETS_AZURE_VAULT_URL", "")
+	path := filepath.Join(t.TempDir(), "runtime", "connector-credentials.json")
+	entry := ConnectorReference{ConnectorID: extConnectorA, Field: "api_key", SecretBackend: "azure-key-vault", SecretRef: azureQualified, External: true}
+	if err := WriteExternalConnectorReference(path, entry, azureBareName); err != nil {
+		t.Fatal(err)
+	}
+	// An older binary replaces the entry with another store ref: the record
+	// no longer binds to it and is ignored.
+	other := entry
+	other.SecretRef = "https://other.vault.azure.net/secrets/" + azureBareName
+	if err := WriteConnectorReference(path, other); err != nil {
+		t.Fatal(err)
+	}
+	if ExternalReferenceNames(path, other, azureBareName) {
+		t.Fatal("a stale sidecar record must not match")
+	}
+	removed, err := RemoveExternalConnectorReferences(path, func(ConnectorReference) bool { return true })
+	if err != nil || removed != 1 {
+		t.Fatalf("removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Stat(ExternalRefSidecarPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sidecar kept after its entries were removed: %v", err)
+	}
+}
