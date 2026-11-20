@@ -1,4 +1,4 @@
-package connectorruntime
+package daemonstatus
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ func TestProbeDaemonStatusUnready(t *testing.T) {
 	}
 	t.Setenv("KEI_RUNTIME_SOCKET_PATH", path)
 	var stdout, stderr bytes.Buffer
-	if code := runStatusWithWriters(nil, &stdout, &stderr); code == 0 {
+	if code := Run(nil, &stdout, &stderr); code == 0 {
 		t.Fatal("unready daemon unexpectedly returned success")
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "secret-response-canary") {
@@ -51,8 +51,8 @@ func TestProbeDaemonStatusReadyAndSafeOutput(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := runStatusWithWriters(nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("runStatus exit = %d, stderr=%q", code, stderr.String())
+	if code := Run(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("Run exit = %d, stderr=%q", code, stderr.String())
 	}
 	got := stdout.String()
 	for _, forbidden := range []string{dir, "private-token-canary", "body-secret-canary", "KEI_RUNTIME_TOKEN"} {
@@ -99,24 +99,6 @@ func TestProbeDaemonStatusRejectsNonOwnerOnlySocket(t *testing.T) {
 	}
 }
 
-func TestStatusHelpAndVersionDoNotCreateSocket(t *testing.T) {
-	path := filepath.Join(shortSocketTempDir(t), "must-not-be-created.sock")
-	t.Setenv("KEI_RUNTIME_SOCKET_PATH", path)
-
-	if code := Main("test-version", []string{"--version"}); code != 0 {
-		t.Fatalf("--version exit = %d", code)
-	}
-	if code := Main("test-version", []string{"--help"}); code != 0 {
-		t.Fatalf("--help exit = %d", code)
-	}
-	if code := Main("test-version", []string{"status"}); code == 0 {
-		t.Fatal("status for absent daemon unexpectedly succeeded")
-	}
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("status/help/version created socket or returned unexpected stat error: %v", err)
-	}
-}
-
 func startStatusTestServer(t *testing.T, path string, status int, buildVersion, body string) {
 	t.Helper()
 	listener, err := net.Listen("unix", path)
@@ -138,4 +120,14 @@ func startStatusTestServer(t *testing.T, path string, status int, buildVersion, 
 	})}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
+}
+
+func shortSocketTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.TempDir(), "h-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

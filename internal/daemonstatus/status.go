@@ -1,4 +1,7 @@
-package connectorruntime
+// Package daemonstatus implements the local, read-only `status` probe for the
+// kei-proxy daemon. It never loads runtime configuration, reads credentials,
+// contacts a provider, or starts the daemon.
+package daemonstatus
 
 import (
 	"context"
@@ -26,19 +29,16 @@ type daemonStatus struct {
 	reason  string
 }
 
-// runStatus is deliberately a local, read-only probe. It does not load runtime
-// configuration, read credentials, contact a provider, or start the daemon.
-func runStatus(args []string) int {
-	return runStatusWithWriters(args, os.Stdout, os.Stderr)
-}
-
-func runStatusWithWriters(args []string, stdout, stderr io.Writer) int {
+// Run probes the local daemon socket and writes a redacted status report to
+// stdout. It returns 0 when the daemon is ready, 1 when it is not, and 2 on
+// usage errors.
+func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 0 {
 		fmt.Fprintln(stderr, "status does not accept arguments")
 		return 2
 	}
 
-	path := runtimeSocketPathFromEnv()
+	path := socketPathFromEnv()
 	result := probeDaemonStatus(path)
 	fmt.Fprintf(stdout, "status: %s\n", result.state)
 	fmt.Fprintf(stdout, "socket: %s\n", displaySocketEndpoint(path))
@@ -54,6 +54,13 @@ func runStatusWithWriters(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	return 1
+}
+
+func socketPathFromEnv() string {
+	if configured := os.Getenv("KEI_RUNTIME_SOCKET_PATH"); configured != "" {
+		return configured
+	}
+	return socket.DefaultPathOS()
 }
 
 func displaySocketEndpoint(path string) string {

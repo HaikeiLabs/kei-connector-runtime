@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/auditcrypto"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/daemonstatus"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/hooks"
 	runcommand "github.com/HaikeiLabs/kei-connector-runtime/internal/run"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
@@ -86,7 +87,7 @@ func Main(buildVersion string, args []string) int {
 	} else if args[0] == "serve" {
 		code = runServe(args[1:])
 	} else if args[0] == "status" {
-		code = runStatus(args[1:])
+		code = daemonstatus.Run(args[1:], os.Stdout, os.Stderr)
 	} else if args[0] == "policy" {
 		code = runPolicy(args[1:])
 	} else if args[0] == "version" || args[0] == "-v" || args[0] == "--version" {
