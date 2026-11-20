@@ -343,7 +343,7 @@ func validatePolicySetV2(raw json.RawMessage) error {
 	}
 	for _, tool := range set.Tools {
 		if tool.Route.ConnectorBinding != nil && len(tool.Plan) > 0 {
-			if err := ValidateV2Plan(tool); err != nil {
+			if err := ValidateV2Plan(tool.V2Tool); err != nil {
 				return ErrBundleUnsupported
 			}
 		}
