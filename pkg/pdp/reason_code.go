@@ -20,6 +20,8 @@ const (
 	ReasonSessionRequired             ReasonCode = "session_required"
 	ReasonSessionRevalidationRequired ReasonCode = "session_revalidation_required"
 	ReasonSubjectUnlinked             ReasonCode = "subject_unlinked"
+	ReasonResourceOutOfTemplate       ReasonCode = "resource_out_of_template"
+	ReasonBindingStale                ReasonCode = "binding_stale"
 	ReasonToolActionMismatch          ReasonCode = "tool_action_mismatch"
 	ReasonToolNotRegistered           ReasonCode = "tool_not_registered"
 	ReasonUnsupportedShellSyntax      ReasonCode = "unsupported_shell_syntax"
@@ -32,6 +34,7 @@ var knownReasonCodes = map[ReasonCode]bool{
 	ReasonRequestCanceled: true, ReasonSessionNotFound: true, ReasonSessionRequired: true,
 	ReasonSessionRevalidationRequired: true, ReasonSubjectUnlinked: true, ReasonToolActionMismatch: true,
 	ReasonToolNotRegistered: true, ReasonUnsupportedShellSyntax: true,
+	ReasonResourceOutOfTemplate: true, ReasonBindingStale: true,
 }
 
 // Known reports whether c is one of the codes listed above.
