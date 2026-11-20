@@ -24,6 +24,9 @@ type Operation struct {
 	ResourceID         string
 	ResourceParent     string
 	ResourceParentType string
+	// BindingVersion is the connector binding version the caller pinned the
+	// plan to, when it names one. Empty means the caller names no version.
+	BindingVersion string
 }
 
 // V2ResourceType is an alias for the shared contracts type.
@@ -66,13 +69,37 @@ type v2PolicySet struct {
 		Checks     string   `json:"checks"`
 		Default    string   `json:"default"`
 	} `json:"evaluation"`
-	Tools                 []V2Tool          `json:"tools"`
+	Tools                 []v2Tool          `json:"tools"`
 	Checks                []v2Check         `json:"checks"`
 	ToolPolicies          []v2Check         `json:"tool_policies"`
 	HarnessMatchSemantics string            `json:"harness_match_semantics"`
 	HarnessPolicies       []v2HarnessPolicy `json:"harness_policies"`
 	// Connectors is the optional descriptor section (HAI-378); see Connector.
 	Connectors []Connector `json:"connectors,omitempty"`
+}
+
+// v2ToolBinding mirrors the bundle's connector_binding with the additive
+// resource_template and version fields. Older bundles omit both; the
+// corresponding enforcement is skipped while they are empty, so legacy
+// bundles evaluate exactly as before.
+type v2ToolBinding struct {
+	ConnectorID      string `json:"connector_id"`
+	ResourceTemplate string `json:"resource_template,omitempty"`
+	Version          string `json:"version,omitempty"`
+}
+
+// v2ToolRoute mirrors the bundle's route with the extended binding.
+type v2ToolRoute struct {
+	ConnectorBinding *v2ToolBinding   `json:"connector_binding,omitempty"`
+	HarnessExecutor  *json.RawMessage `json:"harness_executor,omitempty"`
+}
+
+// v2Tool mirrors bundle.V2Tool on the wire with the extended route. The
+// embedded alias keeps plan validation and resource-type matching on the
+// shared contracts type.
+type v2Tool struct {
+	bundle.V2Tool
+	Route v2ToolRoute `json:"route"`
 }
 
 // denyOverrides reports whether the policy set declares the deny_overrides
@@ -197,7 +224,7 @@ func (v *Verified) evaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
 		return invalidDecision(), nil
 	}
-	var registered *V2Tool
+	var registered *v2Tool
 	for i := range set.Tools {
 		if set.Tools[i].Name == toolName {
 			registered = &set.Tools[i]
@@ -283,14 +310,14 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
 		return invalidDecision()
 	}
-	var tool *V2Tool
+	var tool *v2Tool
 	for i := range set.Tools {
 		if set.Tools[i].Name == toolName {
 			tool = &set.Tools[i]
 			break
 		}
 	}
-	if tool == nil || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" || ValidateV2Plan(*tool) != nil {
+	if tool == nil || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" || ValidateV2Plan(tool.V2Tool) != nil {
 		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector tool is not registered in the policy bundle"}
 	}
 	if agentID == "" {
@@ -309,8 +336,16 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		if op.ConnectorID != connectorID || op.Capability == "" || op.Action == "" {
 			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan contains a malformed operation"}
 		}
-		if !containsExact(tool.RequiredCapabilities, op.Capability) || !v.operationResourceRegistered(tool, op) {
+		if !containsExact(tool.RequiredCapabilities, op.Capability) || !v.operationResourceRegistered(&tool.V2Tool, op) {
 			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation does not match the tool registration"}
+		}
+		if binding := tool.Route.ConnectorBinding; binding != nil {
+			if binding.ResourceTemplate != "" && op.ProviderResource != "" && !MatchRenderedResource(binding.ResourceTemplate, op.ProviderResource) {
+				return Decision{Outcome: "deny", ReasonCode: "resource_out_of_template", Reason: "the operation's rendered resource does not match the binding's resource template"}
+			}
+			if op.BindingVersion != "" && op.BindingVersion != binding.Version {
+				return Decision{Outcome: "deny", ReasonCode: "binding_stale", Reason: "the requested connector binding version is not in the policy bundle"}
+			}
 		}
 		covered[op.Capability] = true
 		request := map[string]string{"source": tool.Source, "connector_id": connectorID, "tool": tool.Name, "capability": op.Capability}

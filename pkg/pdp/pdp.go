@@ -36,12 +36,16 @@ type ConnectorTarget struct {
 type Request struct {
 	// Session is the id of the session the call runs in (Sessions.Create);
 	// empty or non-live ids deny with session_not_found.
-	Session   string
-	Tool      string // registry name in the bundle's policy_set.tools
-	Action    string // optional; must equal the registered action
-	Resource  string
-	AgentID   string // optional; the bundle's default agent when empty
-	Connector *ConnectorTarget
+	Session  string
+	Tool     string // registry name in the bundle's policy_set.tools
+	Action   string // optional; must equal the registered action
+	Resource string
+	AgentID  string // optional; the bundle's default agent when empty
+	// BindingVersion is the connector binding version the caller pinned the
+	// plan to, when it names one; the bundle evaluator denies a plan whose
+	// pinned version is not the bundle's (binding_stale). Optional.
+	BindingVersion string
+	Connector      *ConnectorTarget
 }
 
 // Decision is the local outcome. Every runtime failure is a deny with a
@@ -308,6 +312,11 @@ func (e *Evaluator) AuthorizeV2ConnectorPlan(ctx context.Context, req Request, a
 	if err != nil {
 		d := policybundle.Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "tool arguments do not satisfy the registered operation plan"}
 		return v2Decision(d, v, state, current), nil
+	}
+	if req.BindingVersion != "" {
+		for i := range operations {
+			operations[i].BindingVersion = req.BindingVersion
+		}
 	}
 	d := v.EvaluateV2Plan(req.Tool, req.AgentID, subject, operations, e.now().UTC())
 	return v2Decision(d, v, state, current), nil
