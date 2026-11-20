@@ -36,14 +36,50 @@ type V2ResourceType = bundle.V2ResourceType
 type V2Tool = bundle.V2Tool
 
 // V2HarnessTool reports whether name resolves to an explicitly registered
-// harness_executor route in a verified v2 bundle.
+// harness_executor route in a verified v2 bundle. The lookup decodes the
+// policy set with the runtime's own v2Tool type: the shared contracts type
+// strict-decodes connector bindings into a struct without resource_template
+// and version, so a bundle whose connector tools carry them would make every
+// tool — harness ones included — read as not registered.
 func (v *Verified) V2HarnessTool(name string, now time.Time) bool {
-	return v.toBundle().V2HarnessTool(name, now)
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return false
+	}
+	var set v2PolicySet
+	if strictJSON(v.Payload.PolicySet, &set) != nil {
+		return false
+	}
+	for _, tool := range set.Tools {
+		if tool.Name == name {
+			return tool.Route.HarnessExecutor != nil && tool.Route.ConnectorBinding == nil
+		}
+	}
+	return false
 }
 
 // V2ConnectorTool resolves one trusted connector tool from the parsed v2 set.
+// Like V2HarnessTool, the lookup runs on the runtime-local v2Tool type so a
+// templated binding cannot make the tool unfindable (see that method).
 func (v *Verified) V2ConnectorTool(name string, now time.Time) (V2Tool, bool) {
-	return v.toBundle().V2ConnectorTool(name, now)
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return V2Tool{}, false
+	}
+	var set v2PolicySet
+	if strictJSON(v.Payload.PolicySet, &set) != nil {
+		return V2Tool{}, false
+	}
+	for _, tool := range set.Tools {
+		if tool.Name == name && tool.Route.ConnectorBinding != nil && len(tool.Plan) > 0 && ValidateV2Plan(tool.V2Tool) == nil {
+			// The alias's route binding type has only the connector id; the
+			// template and version stay on the runtime-local route that
+			// EvaluateV2Plan re-reads for its own decision.
+			tool.V2Tool.Route.ConnectorBinding = &struct {
+				ConnectorID string `json:"connector_id"`
+			}{ConnectorID: tool.Route.ConnectorBinding.ConnectorID}
+			return tool.V2Tool, true
+		}
+	}
+	return V2Tool{}, false
 }
 
 type v2Check struct {
