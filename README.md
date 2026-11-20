@@ -77,7 +77,7 @@ kei-proxy policy show
 | `identity link` \| `status` | Link a chat-platform identity to the installation |
 | `collector` | Ship pending audit records to Kei |
 
-Run `kei-proxy <command> --help` for flags.
+Run `kei-proxy <command> --help` for flags. `kei-proxy model profile --metadata-only` resolves the same assigned profile without reading its credential or emitting secret-store references. Use it when a harness receives its model credential from a separate, trusted provider.
 
 ## Documentation
 
