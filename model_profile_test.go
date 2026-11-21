@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -30,6 +31,71 @@ func TestRunModelProfileUsesRuntimeAssignedProfileByDefault(t *testing.T) {
 
 	if code := runModelProfile(nil); code != 0 {
 		t.Fatalf("runModelProfile() = %d, want 0", code)
+	}
+}
+
+func TestRunModelProfileMetadataOnlyDoesNotResolveOrExposeSecret(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profile_id":   "00000000-0000-0000-0000-000000000011",
+			"org_id":       "00000000-0000-0000-0000-000000000012",
+			"agent_id":     "00000000-0000-0000-0000-000000000013",
+			"display_name": "Example", "endpoint": "https://models.example.test/v1",
+			"default_model": "example-model", "auth_type": "api_key", "status": "active",
+			"secret_backend": "unsupported-backend", "secret_ref": "private-reference",
+		})
+	}))
+	defer server.Close()
+	setModelProfileRuntimeEnv(t, server.URL)
+	t.Setenv("KEI_SECRETS_BACKEND", "")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	original := os.Stdout
+	os.Stdout = writer
+	defer func() { os.Stdout = original }()
+	code := runModelProfile([]string{"--metadata-only"})
+	_ = writer.Close()
+	if code != 0 {
+		t.Fatalf("metadata-only returned %d, want 0 without a secret store", code)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(reader).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result["endpoint"] != "https://models.example.test/v1" || result["default_model"] != "example-model" {
+		t.Fatalf("incorrect model metadata: %v", result)
+	}
+	for _, field := range []string{"api_key", "secret_ref", "secret_backend", "credential_store_installation_id"} {
+		if _, exists := result[field]; exists {
+			t.Fatalf("metadata-only exposed %s", field)
+		}
+	}
+}
+
+func TestRunModelProfileMetadataOnlyStillRequiresActiveAssignedProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   int
+	}{
+		{"missing", http.StatusNotFound, "", 1},
+		{"inactive", http.StatusOK, `{"profile_id":"00000000-0000-0000-0000-000000000011","org_id":"00000000-0000-0000-0000-000000000012","agent_id":"00000000-0000-0000-0000-000000000013","status":"disabled"}`, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			setModelProfileRuntimeEnv(t, server.URL)
+			if code := runModelProfile([]string{"--metadata-only"}); code != tc.want {
+				t.Fatalf("metadata-only returned %d, want %d", code, tc.want)
+			}
+		})
 	}
 }
 
