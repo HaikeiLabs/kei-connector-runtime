@@ -19,6 +19,8 @@ type ModelInvokeRequest struct {
 	Request   json.RawMessage `json:"request"`
 	UserID    string          `json:"user_id"`
 	RequestID string          `json:"request_id"`
+	AgentID   string          `json:"agent_id,omitempty"`
+	ProfileID string          `json:"profile_id,omitempty"`
 }
 
 type ModelInvokeResponse struct {
@@ -55,7 +57,7 @@ func GetModelProfileAPIKey(profile *ModelProfile) (string, error) {
 		return "", nil
 	}
 
-	store, err := secrets.NewStore()
+	store, err := secrets.NewStoreFromEnv()
 	if err != nil {
 		return "", fmt.Errorf("failed to create secret store: %w", err)
 	}

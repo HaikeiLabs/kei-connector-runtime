@@ -12,7 +12,12 @@ on for local desktop installs and off for server deployments; set it to `false`
 to disable. When enabled, the mode-0600 socket binds requests that omit a
 session to a named session for the v2 bundle's verified installation subject.
 The tokenless routes are `POST /v1/authorize` and
-`/v1/credentials:release`. The subject is
+`/v1/credentials:release`. The Unix socket also accepts tokenless
+`POST /v1/mcp-manifests:sync` from the local harness: it accepts MCP tool
+metadata only, resolves the connector from the verified bundle, and submits a
+candidate with the runtime credential. It never grants access; an admin must
+approve the candidate and the refreshed bundle must contain that exact hash
+before calls are permitted. This route is not served on TCP. The subject is
 rebound on bundle refresh and its session is ended if the subject disappears
 or changes. If the current v2 bundle
 does not provide a usable subject, tokenless calls fail closed with
@@ -41,19 +46,36 @@ any other agent, including another agent assigned to the installation, is
 denied with `agent_mismatch`, and the audit event records the resolved agent.
 A v2 tool absent from the bundle's `harness_executor` routes is denied as
 `tool_not_registered`; the response and audit `policy_reason` direct the operator
-to re-sync the harness manifest. A tool registered with `connector_binding`
-remains denied on this decision-only endpoint as `preflight_required`, with an
-audit reason that identifies the connector route and complete-plan requirement. A trusted
-`harness_executor` may instead request an exact-target decision by including
-`connector: {connector_id, capability}` and a non-empty `resource` alongside
-`tool`. The runtime verifies the connector and capability against the local
-v2 bundle, then evaluates the tool policy with `connector_id`, `capability`,
-and `resource_id` in the same decision. This is decision-only: it returns no
-credential and does not authorize `connector_binding` tools or provide an
-execution route.
+to re-sync the harness manifest. For a registered `connector_binding` tool,
+the request may include `tool_args` and `tool_context`; the runtime validates
+them against the bundle's closed plan schemas, derives every operation locally,
+and evaluates the complete plan before returning a decision. Inputs are accepted
+only on this tenant-local socket and are never sent to the control plane or
+copied to audit. Missing, malformed, or incomplete plan data denies. The harness
+still executes the provider call; this endpoint returns no preflight handle,
+provider result, or credential.
 
-(The ADR-035 preflight/consume plan routes were removed with the connector
-invoke path in HAI-724; they are no longer served.)
+A trusted `harness_executor` may instead request an exact-target decision by
+including `connector: {connector_id, capability}` and a non-empty `resource`
+alongside `tool`. The runtime verifies the connector and capability against
+the local v2 bundle, then evaluates the tool policy with `connector_id`,
+`capability`, and `resource_id` in the same decision. This is decision-only: it
+returns no credential and does not authorize `connector_binding` tools or
+provide an execution route.
+
+Canonical MCP targets use `tool: "mcp:<connector-slug>.<upstream-tool-name>"`
+on this same decision-only socket, with `mcp_manifest_hash` set to the hash of
+the currently discovered tool list. The runtime accepts them only when the
+verified v2 bundle contains that MCP connector, the supplied hash exactly
+matches its approved manifest, and that manifest lists the exact upstream
+tool. It then evaluates `harness_policies` using the canonical target and the
+request's harness kind. A missing/unapproved manifest or hash drift is denied
+before policy matching. The harness keeps the MCP client and executes the
+upstream call itself after a permit; the runtime receives only tool metadata
+for catalog registration and never receives or proxies MCP call payloads.
+
+(The ADR-035 preflight/consume plan routes remain removed; complete-plan
+authorization is a local decision, not a replacement invoke path.)
 
 V1 socket behavior is
 unchanged, and one-shot `kei-proxy authorize` forwards a v2 decision to the
@@ -104,6 +126,7 @@ This daemon-socket model brings three benefits:
 
 The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
 `POST /v1/authorize`, `POST /v1/credentials:release`,
+`POST /v1/mcp-manifests:sync` (Unix socket only),
 `PUT/DELETE/GET /v1/session`, and the opt-in
 `POST /v1/session:subjectToken` (see below). Session creation accepts only `kei.session/v2`;
 the legacy `kei.session/v1` request is rejected. GET or DELETE without
@@ -125,8 +148,21 @@ The `kei.authorize-response/v1` `decision` is `permit`, `deny`, or `unmatched`.
 applicable policy; it is not a permit and the runtime does not defer execution.
 An adapter may choose its own native decision for unmatched calls, including a
 Pi shell command with no matching shell policy, while SDK and connector callers
-remain on their existing non-permit paths. A matching
-explicit deny remains `deny` with `reason_code: policy_deny`.
+remain on their existing non-permit paths. A matching explicit deny remains
+`deny` with `reason_code: policy_deny`.
+
+A shell parser rejection remains `deny` with the compatibility code
+`unsupported_shell_syntax`; it is never returned as `unmatched`. The response
+may also carry a bounded `syntax_code` category (for example,
+`unsupported_redirection`) and a static `hint`. The bounded categories cover
+expansions/substitutions, redirections, grouping, globs, background execution,
+tilde/history/comment syntax, quoting, control characters, invalid command
+structure/input, and parser size limits. These fields identify only the
+construct category and safe next step: neither response nor audit includes the
+command, a snippet, an offset, or parsed arguments. The command digest remains
+for audit correlation. `policy_deny` and `no_matching_policy` continue to mean
+authorization outcomes, not parser failures. Rewriting a command does not
+change policy and every revised command is independently authorized.
 
 For a v2 bundle, a named verified installation-owner session may authorize a
 tool by its name against `tool_policies` even when the catalog has no tool
@@ -256,7 +292,8 @@ unresolved. The daemon:
    it.
 2. **Resolves each reference.** With connector descriptors in the bundle,
    an `opaque_ref` reference must equal the descriptor's `credential_ref` and
-   resolves from the tenant secret store inside the daemon, with the same deny
+   resolves from the tenant secret store inside the daemon (from daemon
+   memory for a `shared` connector, see HAI-1071 below), with the same deny
    codes; a `per_user`
    `oauth` reference resolves from the session-held credential. Without
    descriptors, only the `token`/`access_token` field of a session OAuth
@@ -307,12 +344,12 @@ harness-executor tool, include both `tool` and
 `connector{connector_id, capability}`; the daemon checks the named tool against
 the trusted installation agent and live named session, verifies the connector
 and capability in the v2 bundle, and evaluates the tool policy with the exact
-connector/capability/resource context. `shared` and `per_user` connector
-credentials may be released only when the session-held credential's account
-model matches the verified bundle. A `per_user` credential is fetched using
-that named session's subject token and can only be used by the same session
-subject; the fresh policy decision binds the exact tool/connector/capability/
-resource tuple. Unsupported models, any tuple or audience mismatch, a deny, or
+connector/capability/resource context. For a v2 `connector_binding` tool,
+include the same `tool_args` and `tool_context` used for authorization. The
+runtime re-derives and re-evaluates the complete registered plan and verifies
+that the requested credential resource is the planned resource or its declared
+parent scope. `shared` and `per_user` credentials retain their existing
+session/audience constraints; mismatches, unsupported models, a deny, or
 unavailable credentials return no credential. Optional `on_behalf_of` is forwarded only
 for audit attribution and never affects authorization. The request is
 `kei.credential-release-request/v1` (the session in `X-Kei-Session`); the answer is
@@ -326,6 +363,93 @@ harness-provided type-prefixed `on_behalf_of`.
 `POST` only: any other method, and a daemon without session credential
 release, answers `404`. The value is held in session memory and flushed when
 the session ends; it is never logged or printed.
+
+For a v2 harness-executor tool, a credential is released only when the tool
+policy that permitted the call has a selector whose `connector_id` is exactly
+the requested connector (HAI-1070). A tool-only permit (no `connector_id`) and
+an access grant (its target names only the tool) still permit the tool call on
+`/v1/authorize`, but the release denies with `connector_not_named` and no
+credential; the audit record is the same deny record as any other release
+deny. The check reads only the in-memory bundle. A direct capability permit
+(a check with no `tool` selector) never permits a harness tool, so it releases
+nothing. `connector_binding` tools are unchanged: the bundle binds each one to
+exactly one connector, and its release re-evaluates the complete plan for that
+connector.
+
+**Known limitation.** Time-bound (JIT) access grants cannot name a connector
+from the CLI or console yet, so they allow the tool call but release no
+connector credential (`connector_not_named`). The catalog can already store a
+grant's `connector_id` (catalog#530); setting it from the CLI and console is
+tracked as tech debt in HAI-1072. Until then, use group policy grants that name
+the connector.
+
+#### Tenant-stored (`opaque_ref`) credentials (HAI-1066)
+
+When the connector's bundle descriptor has `credential_source: opaque_ref`
+(for example a postgres DSN), the daemon does not ask the identity service.
+After the same full decision (and plan re-evaluation for a `connector_binding`
+tool), it reads the secret from the runtime's own secret store
+(`KEI_SECRETS_BACKEND`) using the descriptor's credential reference:
+
+- a `kei://connectors/<id>/<field>` reference is looked up in the connector
+  reference index that `kei-proxy credential sync` wrote (in
+  `KEI_RUNTIME_STATE_DIR`). The entry is either a secret Kei delivered or an
+  external `credential_ref` (the customer's own secret name, HAI-1000) that
+  sync found in the configured store;
+- the index entry's backend must equal the descriptor's `credential_backend`.
+
+The response has the same shape as an OAuth release: `credential.connector_id`,
+`account_model` (`shared`), and the value in `access_token`. `issuer` and
+`expires_at` are empty, because a tenant-stored secret has neither, so request
+it again for each call. Only a tool-bound request (`tool` plus `connector`)
+for a `shared` connector is released. Secret-store connectors use the shared
+account model only (owner decision 2026-11-15). Every failure denies with no
+credential:
+
+| `reason_code` | When |
+|---|---|
+| `connector_not_registered` | The bundle has no descriptor for the connector |
+| `account_model_not_supported` | The descriptor's `account_model` is missing, `domain_delegation`, or `per_user` (a tenant-stored secret is one shared account) |
+| `credential_source_not_supported` | The request names no `tool` |
+| `credential_unavailable` | The secret was never delivered or resolved, `credential sync` ran with another state directory, no secret store is configured, or the read failed |
+| `credential_backend_mismatch` | The index entry is for another backend, or names another connector or field |
+| `descriptor_invalid` | The descriptor's reference does not name this connector |
+
+The value and its secret reference are never logged, never written to an audit
+record, and never part of a reason. The audit record of a release has
+`credential_kind: secret_store`.
+
+#### Served from daemon memory (HAI-1071)
+
+An allowed release never waits on the secret store. The serve daemon keeps the
+credentials of `shared` `opaque_ref` connectors in memory and reads that
+memory on the call path:
+
+- **Prefetch.** When a session starts (`PUT /v1/session`, and the tokenless
+  owner session), the daemon loads every `shared` `opaque_ref` connector in
+  the verified bundle that it does not hold yet, before answering the session
+  request. Each read is bounded by the store timeout (5s) and the reads run in
+  parallel. When the bundle changes, the new connectors load in the
+  background.
+- **Calls.** A release reads memory only. A connector whose load failed, or
+  that is not loaded yet, denies at once with the load's reason code
+  (`credential_unavailable` for a store failure); the call never blocks.
+- **Refresh.** A background loop reloads each value every 5 minutes, and at
+  once when the bundle changes, so a rotated secret is picked up. A failed
+  load is retried with exponential backoff (1s, doubling, up to 5 minutes).
+  If a refresh fails with `credential_unavailable` (a store outage), the
+  value already loaded keeps being served, so running sessions are not
+  broken by an outage.
+- **Drop.** A value is dropped when its connector leaves the bundle, when its
+  `credential_ref` or `credential_backend` changes, when the last live
+  session ends, when the installation is revoked, and on daemon exit.
+- **Never persisted.** Values live only in the daemon's memory: never on
+  disk, in a log line (load failures log only the connector ID, reason code
+  and failure count), or in an error.
+
+The audit record of a release is unchanged: one row per call, with
+`credential_kind: secret_store`. `POST /v1/commands:run` reads the same
+memory for a `shared` `opaque_ref` reference.
 
 ### `POST /v1/session:subjectToken` (opt-in, `KEI_EXPORTABLE_SERVICE_PRINCIPALS`)
 

@@ -58,7 +58,7 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg CredentialCo
 	}
 
 	// Create secret store (for backend operations)
-	store, err := secrets.NewStore()
+	store, err := secrets.NewStoreFromEnv()
 	if err != nil {
 		fmt.Fprintf(stderr, "credential sync failed: create secret store: %v\n", err)
 		return 1
@@ -66,13 +66,16 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg CredentialCo
 
 	// Run the sync
 	runtimeClient := NewRuntimeClient(cfg.ControlPlaneURL(), *timeout)
-	output, err := credentials.Sync(context.Background(), credentials.Config{
+	syncConfig := credentials.Config{
 		ControlPlaneURL: cfg.ControlPlaneURL(),
 		RuntimeToken:    cfg.Token(),
 		KeyID:           cfg.SyncKeyID(),
 		PrivateKey:      cfg.SyncPrivateKey(),
 		Timeout:         *timeout,
-	}, store, func(ctx context.Context) (string, error) {
+		SecretsBackend:  secrets.ConfiguredBackendName(),
+		Warnings:        stderr,
+	}
+	output, err := credentials.Sync(context.Background(), syncConfig, store, func(ctx context.Context) (string, error) {
 		identity, err := runtimeClient.WhoAmI(ctx, cfg.Token())
 		if err != nil {
 			return "", err
@@ -82,6 +85,17 @@ func runCredentialSync(args []string, stdout, stderr io.Writer, cfg CredentialCo
 	if err != nil {
 		fmt.Fprintf(stderr, "credential sync failed: %v\n", err)
 		return 1
+	}
+
+	// Resolve external credential refs (HAI-1000): check each ref the catalog
+	// lists exists in the configured store and record it for activation and
+	// release. A failure here leaves the index as it was and does not fail
+	// the delivery sync.
+	external, err := credentials.ResolveExternalRefs(context.Background(), syncConfig, store)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: resolve external credential refs: %v\n", err)
+	} else {
+		output.ExternalRefs = external
 	}
 
 	// Write output (never outputs plaintext credentials)

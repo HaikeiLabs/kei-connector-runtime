@@ -16,7 +16,8 @@ import (
 )
 
 // Audience is the runtime installation the bundle must be issued to. It comes
-// from whoami once, when the process starts.
+// from WhoAmI at startup and is refreshed when a persisted bundle shows that
+// the same installation moved to another workspace.
 type Audience struct {
 	InstallationID string
 	OrgID          string
@@ -35,12 +36,16 @@ type ConnectorTarget struct {
 type Request struct {
 	// Session is the id of the session the call runs in (Sessions.Create);
 	// empty or non-live ids deny with session_not_found.
-	Session   string
-	Tool      string // registry name in the bundle's policy_set.tools
-	Action    string // optional; must equal the registered action
-	Resource  string
-	AgentID   string // optional; the bundle's default agent when empty
-	Connector *ConnectorTarget
+	Session  string
+	Tool     string // registry name in the bundle's policy_set.tools
+	Action   string // optional; must equal the registered action
+	Resource string
+	AgentID  string // optional; the bundle's default agent when empty
+	// BindingVersion is the connector binding version the caller pinned the
+	// plan to, when it names one; the bundle evaluator denies a plan whose
+	// pinned version is not the bundle's (binding_stale). Optional.
+	BindingVersion string
+	Connector      *ConnectorTarget
 }
 
 // Decision is the local outcome. Every runtime failure is a deny with a
@@ -49,6 +54,7 @@ type Decision struct {
 	Allow          bool
 	Reason         string
 	ReasonCode     ReasonCode
+	SyntaxCode     string // bounded shellpolicy diagnostic; never contains command text
 	DenySource     string // runtime_state | registry | identity | policy
 	PolicyID       string
 	BundleVersion  int64
@@ -56,6 +62,7 @@ type Decision struct {
 	PolicyRevision int64
 	BundleState    string
 	Enrollment     json.RawMessage // only with subject_unlinked
+	AuditSubject   string          `json:"-"` // subject snapshot used by the decision; audit only
 }
 
 // Evaluator decides calls against the bundle persisted in a state directory.
@@ -85,28 +92,55 @@ func (e *Evaluator) Evaluate(ctx context.Context, req Request) (Decision, error)
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
-	if live, reason := e.sessionLive(req.Session); !live {
+	current, ok, reason := e.sessionSnapshot(req.Session)
+	if !ok {
 		return sessionDenial(reason), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
-		return stateDenial(state), nil
+		return decisionWithSubject(stateDenial(state), current), nil
 	}
-	d, _ := e.evaluate(v, state, req)
-	return d, nil
+	return e.evaluate(v, state, req, current), nil
 }
 
-// sessionLive reports whether the named session can be used. Empty ids are
-// never live; a named id is live only while it is in the session store. When
-// false, the returned string is the denial reason code.
-func (e *Evaluator) sessionLive(id string) (bool, ReasonCode) {
-	if id == DefaultSession {
-		return false, ReasonSessionNotFound
+func (e *Evaluator) sessionSnapshot(id string) (Subject, bool, ReasonCode) {
+	if id == DefaultSession || e.sessions == nil {
+		return Subject{}, false, ReasonSessionNotFound
 	}
-	if e.sessions == nil {
-		return false, ReasonSessionNotFound
+	return e.sessions.getWithReason(id)
+}
+
+func sessionPolicySubject(current Subject) *policybundle.SessionSubject {
+	return &policybundle.SessionSubject{
+		UserID: current.UserID, Email: current.Email, Source: current.Source,
+		ExternalID: current.ExternalID, Status: string(current.Status),
 	}
-	return e.sessions.liveWithReason(id)
+}
+
+func decisionWithSubject(d Decision, current Subject) Decision {
+	if current.UserID == "" {
+		return d
+	}
+	kind := current.SubjectKind
+	if kind == "" {
+		kind = "user"
+	}
+	d.AuditSubject = kind + ":" + current.UserID
+	return d
+}
+
+func v2Decision(d policybundle.Decision, v *policybundle.Verified, state policybundle.State, current Subject) Decision {
+	return decisionWithSubject(Decision{
+		Allow:          d.Outcome == "allow",
+		Reason:         d.Reason,
+		ReasonCode:     ReasonCode(d.ReasonCode),
+		DenySource:     denySource(ReasonCode(d.ReasonCode)),
+		PolicyID:       d.PolicyID,
+		BundleVersion:  v.Payload.BundleVersion,
+		BundleDigest:   v.Digest,
+		PolicyRevision: v.Payload.PolicyRevision,
+		BundleState:    string(state),
+	}, current)
 }
 
 func sessionDenial(reasonCode ...ReasonCode) Decision {
@@ -150,19 +184,17 @@ func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (Connect
 	if req.Connector == nil {
 		return ConnectorGrant{Decision: Decision{Reason: "connector target is required", ReasonCode: ReasonToolNotRegistered, DenySource: "registry"}}, nil
 	}
-	if live, reason := e.sessionLive(req.Session); !live {
+	current, ok, reason := e.sessionSnapshot(req.Session)
+	if !ok {
 		return ConnectorGrant{Decision: sessionDenial(reason)}, nil
 	}
 	v, state, err := e.check()
 	if err != nil {
-		return ConnectorGrant{Decision: stateDenial(state)}, nil
+		return ConnectorGrant{Decision: decisionWithSubject(stateDenial(state), current)}, nil
 	}
-	d, current := e.evaluate(v, state, req)
-	g := ConnectorGrant{Decision: d}
-	if current != nil {
-		g.Subject, g.HasSession = *current, true
-		g.Subject.Token, g.Subject.Enrollment = "", nil
-	}
+	d := e.evaluate(v, state, req, current)
+	g := ConnectorGrant{Decision: d, Subject: current, HasSession: true}
+	g.Subject.Token, g.Subject.Enrollment = "", nil
 	if c, ok := v.Connector(req.Connector.ConnectorID); ok {
 		g.Connector = &c
 	}
@@ -170,25 +202,17 @@ func (e *Evaluator) EvaluateConnector(ctx context.Context, req Request) (Connect
 	return g, nil
 }
 
-// evaluate decides req against v and returns the session subject it used.
-func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State, req Request) (Decision, *Subject) {
+// evaluate decides req against v using the subject snapshot already acquired
+// for this request.
+func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State, req Request, current Subject) Decision {
 	call := policybundle.Call{Tool: req.Tool, Action: req.Action, Resource: req.Resource, AgentID: req.AgentID}
 	if req.Connector != nil {
 		call.ConnectorID, call.Capability, call.ConnectorInvocation = req.Connector.ConnectorID, req.Connector.Capability, true
 	}
-	var subject *policybundle.SessionSubject
-	var current Subject
-	var used *Subject
-	if e.sessions != nil {
-		var ok bool
-		if current, ok = e.sessions.Get(req.Session); ok {
-			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
-			used = &current
-		}
-	}
+	subject := sessionPolicySubject(current)
 	now := e.now().UTC()
 	d := v.EvaluateSessionAt(call, subject, e.memberships(v, now), now)
-	out := Decision{
+	out := decisionWithSubject(Decision{
 		Allow:          d.Outcome == "allow",
 		Reason:         d.Reason,
 		ReasonCode:     ReasonCode(d.ReasonCode),
@@ -198,11 +222,11 @@ func (e *Evaluator) evaluate(v *policybundle.Verified, state policybundle.State,
 		BundleDigest:   v.Digest,
 		PolicyRevision: v.Payload.PolicyRevision,
 		BundleState:    string(state),
-	}
-	if out.ReasonCode == "subject_unlinked" && subject != nil && len(current.Enrollment) > 0 {
+	}, current)
+	if out.ReasonCode == "subject_unlinked" && len(current.Enrollment) > 0 {
 		out.Enrollment = append(json.RawMessage(nil), current.Enrollment...)
 	}
-	return out, used
+	return out
 }
 
 // HarnessCall is a pre-built harness tool call (ADR-029 §1.2, §1.3).
@@ -249,6 +273,55 @@ func (e *Evaluator) AuthorizeV2HarnessToolForTarget(ctx context.Context, req Req
 	return e.authorizeV2HarnessTool(ctx, req, connectorID, capability, resource)
 }
 
+// AuthorizeV2HarnessToolRelease decides a connector credential release for a
+// harness-executed tool: the target decision, plus the rule that only a permit
+// whose selector names connectorID releases (HAI-1070). It reads only the
+// in-memory bundle.
+func (e *Evaluator) AuthorizeV2HarnessToolRelease(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
+	return e.authorizeV2HarnessToolWith(ctx, req, func(v *policybundle.Verified, subject *policybundle.SessionSubject, now time.Time) policybundle.Decision {
+		return v.EvaluateV2HarnessToolRelease(req.Tool, req.AgentID, connectorID, capability, resource, subject, now)
+	})
+}
+
+// AuthorizeV2ConnectorPlan authorizes the complete registered connector plan
+// for the live named session. The plan definition is bundle-trusted; raw args
+// and context are schema-validated and used only to derive policy targets.
+func (e *Evaluator) AuthorizeV2ConnectorPlan(ctx context.Context, req Request, args, contextData []byte) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
+	}
+	if req.Session == DefaultSession {
+		return Decision{Reason: "v2 connector authorization requires a named session", ReasonCode: "session_required", DenySource: "identity"}, nil
+	}
+	current, ok, reason := e.sessionSnapshot(req.Session)
+	if !ok {
+		return sessionDenial(reason), nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return decisionWithSubject(stateDenial(state), current), nil
+	}
+	subject := sessionPolicySubject(current)
+	tool, ok := v.V2ConnectorTool(req.Tool, e.now().UTC())
+	if !ok || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" {
+		d := policybundle.Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector tool is not registered for this connector"}
+		return v2Decision(d, v, state, current), nil
+	}
+	connectorID := tool.Route.ConnectorBinding.ConnectorID
+	operations, err := policybundle.BuildV2Operations(tool, connectorID, args, contextData)
+	if err != nil {
+		d := policybundle.Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "tool arguments do not satisfy the registered operation plan"}
+		return v2Decision(d, v, state, current), nil
+	}
+	if req.BindingVersion != "" {
+		for i := range operations {
+			operations[i].BindingVersion = req.BindingVersion
+		}
+	}
+	d := v.EvaluateV2Plan(req.Tool, req.AgentID, subject, operations, e.now().UTC())
+	return v2Decision(d, v, state, current), nil
+}
+
 // AuthorizeV2UnregisteredTool evaluates an unregistered tool name for the
 // verified installation-owner subject held by a live named session.
 func (e *Evaluator) AuthorizeV2UnregisteredTool(ctx context.Context, req Request) (Decision, error) {
@@ -258,19 +331,55 @@ func (e *Evaluator) AuthorizeV2UnregisteredTool(ctx context.Context, req Request
 	if req.Session == DefaultSession {
 		return Decision{Reason: "v2 unregistered-tool authorization requires a named session", ReasonCode: ReasonSessionRequired, DenySource: "identity"}, nil
 	}
-	if live, reason := e.sessionLive(req.Session); !live {
+	current, ok, reason := e.sessionSnapshot(req.Session)
+	if !ok {
 		return sessionDenial(reason), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
-		return stateDenial(state), nil
+		return decisionWithSubject(stateDenial(state), current), nil
 	}
-	var subject *policybundle.SessionSubject
-	if current, ok := e.sessions.Get(req.Session); ok {
-		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
+	d := v.EvaluateV2UnregisteredTool(req.Tool, req.AgentID, sessionPolicySubject(current), e.now().UTC())
+	return v2Decision(d, v, state, current), nil
+}
+
+// AuthorizeV2MCP evaluates one canonical MCP slug/tool identity for a live
+// named session. The verified bundle must contain the connector and explicitly
+// approved tool; registry discovery alone never grants permission.
+func (e *Evaluator) AuthorizeV2MCP(ctx context.Context, sessionID, slug, tool, agentID, harnessKind string) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Decision{}, err
 	}
-	d := v.EvaluateV2UnregisteredTool(req.Tool, req.AgentID, subject, e.now().UTC())
-	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: ReasonCode(d.ReasonCode), DenySource: denySource(ReasonCode(d.ReasonCode)), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+	if sessionID == DefaultSession {
+		return Decision{Reason: "v2 MCP authorization requires a named session", ReasonCode: ReasonSessionRequired, DenySource: "identity"}, nil
+	}
+	current, ok, reason := e.sessionSnapshot(sessionID)
+	if !ok {
+		return sessionDenial(reason), nil
+	}
+	v, state, err := e.check()
+	if err != nil {
+		return decisionWithSubject(stateDenial(state), current), nil
+	}
+	if v.Payload.Schema != "kei.policy-bundle/v2" {
+		return decisionWithSubject(Decision{Reason: "MCP authorization requires a verified v2 policy bundle", ReasonCode: ReasonToolNotRegistered, DenySource: "registry", BundleState: string(state)}, current), nil
+	}
+	connector, ok := v.MCPConnector(slug)
+	if !ok || connector.MCP == nil || connector.MCP.ApprovedManifestHash == "" {
+		return decisionWithSubject(Decision{Reason: "MCP connector has no approved manifest", ReasonCode: ReasonToolNotRegistered, DenySource: "registry", BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, current), nil
+	}
+	approved := false
+	for _, candidate := range connector.MCP.ApprovedTools {
+		if candidate.Name == tool {
+			approved = true
+			break
+		}
+	}
+	if !approved {
+		return decisionWithSubject(Decision{Reason: "MCP tool is not in the approved manifest", ReasonCode: ReasonToolNotRegistered, DenySource: "registry", BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, current), nil
+	}
+	d := v.EvaluateV2MCP(slug, tool, agentID, harnessKind, sessionPolicySubject(current), e.now().UTC())
+	return v2Decision(d, v, state, current), nil
 }
 
 // IsV2UnregisteredTool reports whether name has no tool registration in the
@@ -281,25 +390,28 @@ func (e *Evaluator) IsV2UnregisteredTool(name string) bool {
 }
 
 func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
+	return e.authorizeV2HarnessToolWith(ctx, req, func(v *policybundle.Verified, subject *policybundle.SessionSubject, now time.Time) policybundle.Decision {
+		return v.EvaluateV2HarnessToolForTarget(req.Tool, req.AgentID, connectorID, capability, resource, subject, now)
+	})
+}
+
+func (e *Evaluator) authorizeV2HarnessToolWith(ctx context.Context, req Request, evaluate func(*policybundle.Verified, *policybundle.SessionSubject, time.Time) policybundle.Decision) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
 	if req.Session == DefaultSession {
 		return Decision{Reason: "v2 harness authorization requires a named session", ReasonCode: ReasonSessionRequired, DenySource: "identity"}, nil
 	}
-	if live, reason := e.sessionLive(req.Session); !live {
+	current, ok, reason := e.sessionSnapshot(req.Session)
+	if !ok {
 		return sessionDenial(reason), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
-		return stateDenial(state), nil
+		return decisionWithSubject(stateDenial(state), current), nil
 	}
-	var subject *policybundle.SessionSubject
-	if current, ok := e.sessions.Get(req.Session); ok {
-		subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
-	}
-	d := v.EvaluateV2HarnessToolForTarget(req.Tool, req.AgentID, connectorID, capability, resource, subject, e.now().UTC())
-	return Decision{Allow: d.Outcome == "allow", Reason: d.Reason, ReasonCode: ReasonCode(d.ReasonCode), DenySource: denySource(ReasonCode(d.ReasonCode)), PolicyID: d.PolicyID, BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+	d := evaluate(v, sessionPolicySubject(current), e.now().UTC())
+	return v2Decision(d, v, state, current), nil
 }
 
 // AuthorizeV2Model decides a model call for the subject held by the request's
@@ -311,21 +423,16 @@ func (e *Evaluator) AuthorizeV2Model(ctx context.Context, sessionID, agentID, pr
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
-	if live, reason := e.sessionLive(sessionID); !live {
+	current, ok, reason := e.sessionSnapshot(sessionID)
+	if !ok {
 		return sessionDenial(reason), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
-		return stateDenial(state), nil
+		return decisionWithSubject(stateDenial(state), current), nil
 	}
-	var subject *policybundle.SessionSubject
-	if e.sessions != nil {
-		if current, ok := e.sessions.Get(sessionID); ok {
-			subject = &policybundle.SessionSubject{UserID: current.UserID, Email: current.Email, Source: current.Source, ExternalID: current.ExternalID, Status: string(current.Status)}
-		}
-	}
-	m := v.EvaluateV2Model(profileID, agentID, subject, e.now().UTC())
-	return Decision{Allow: m.Outcome == "allow", Reason: m.Reason, ReasonCode: ReasonCode(m.ReasonCode), DenySource: denySource(ReasonCode(m.ReasonCode)), BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest, PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state)}, nil
+	m := v.EvaluateV2Model(profileID, agentID, sessionPolicySubject(current), e.now().UTC())
+	return v2Decision(m, v, state, current), nil
 }
 
 // ReconcileSession is the compatibility wrapper for callers that ignore revoked ids.
@@ -345,6 +452,11 @@ func (e *Evaluator) ReconcileSessions() []string {
 	m := e.memberships(v, now)
 	return e.sessions.revokeIf(func(sub Subject) bool {
 		if sub.Status != StatusLinked {
+			return false
+		}
+		// Principal bindings are checked against the current bundle and trusted
+		// agent on authorization, not against human identity memberships.
+		if sub.SubjectKind == "service_principal" {
 			return false
 		}
 		if sub.Source == "installation_owner" {
@@ -466,6 +578,12 @@ func (e *Evaluator) BundleStatus() (policybundle.Status, error) {
 func (e *Evaluator) IsV2HarnessTool(name string) bool {
 	route, isV2 := e.V2ToolRoute(name)
 	return isV2 && route == "harness_executor"
+}
+
+// IsV2ConnectorTool reports whether name resolves to a registered connector_binding route.
+func (e *Evaluator) IsV2ConnectorTool(name string) bool {
+	route, isV2 := e.V2ToolRoute(name)
+	return isV2 && route == "connector_binding"
 }
 
 // V2ToolRoute reports the route kind for name in the current verified v2

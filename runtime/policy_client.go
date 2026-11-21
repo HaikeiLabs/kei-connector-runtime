@@ -104,11 +104,15 @@ func (c *policyControlClient) request(ctx context.Context, method, path string, 
 }
 
 func (c *policyControlClient) FetchBundle(ctx context.Context, etag string) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
-	return c.fetchBundle(ctx, etag)
+	return c.fetchBundle(ctx, etag, false)
 }
 
-func (c *policyControlClient) fetchBundle(ctx context.Context, etag string) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
-	req, e := c.newRequest(ctx, http.MethodGet, "/api/v1/runtime/policy-bundles/current", nil)
+func (c *policyControlClient) fetchBundle(ctx context.Context, etag string, force bool) (body []byte, gotETag, contentType string, version int64, unchanged bool, err error) {
+	method, path := http.MethodGet, "/api/v1/runtime/policy-bundles/current"
+	if force {
+		method, path = http.MethodPost, "/api/v1/runtime/policy-bundles/current:refresh"
+	}
+	req, e := c.newRequest(ctx, method, path, nil)
 	if e != nil {
 		err = e
 		return
@@ -116,7 +120,7 @@ func (c *policyControlClient) fetchBundle(ctx context.Context, etag string) (bod
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", policyBundleAccept)
 	req.Header.Set("Accept-Encoding", "identity")
-	if etag != "" {
+	if etag != "" && !force {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
 	}
 	resp, e := c.http.Do(req)
@@ -353,6 +357,16 @@ func (c *policyControlClient) ResolveSubject(ctx context.Context, req SubjectRes
 // SyncPolicyBundle fetches an unsigned canonical bundle only over a validated
 // HTTPS control-plane channel authenticated by the installation runtime token.
 func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration) error {
+	return syncPolicyBundle(ctx, cfg, identity, timeout, false)
+}
+
+// ForceRefreshPolicyBundle bypasses catalog reuse and requests an issuance for
+// the installation selected by the runtime token.
+func ForceRefreshPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration) error {
+	return syncPolicyBundle(ctx, cfg, identity, timeout, true)
+}
+
+func syncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity, timeout time.Duration, force bool) error {
 	if identity == nil || identity.WorkspaceID == nil {
 		return errors.New("runtime identity has no workspace audience")
 	}
@@ -365,7 +379,7 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 	if active, _, checkErr := store.Check(identity.ID, identity.OrgID, *identity.WorkspaceID, time.Now().UTC()); checkErr == nil && active != nil {
 		etag = active.Digest
 	}
-	body, bundleETag, contentType, headerVersion, unchanged, err := client.fetchBundle(ctx, etag)
+	body, bundleETag, contentType, headerVersion, unchanged, err := client.fetchBundle(ctx, etag, force)
 	if errors.Is(err, ErrPolicyBundleNotReady) {
 		_ = store.RefreshFailed(time.Now().UTC())
 		var bre *bundleRefreshError
@@ -375,6 +389,9 @@ func SyncPolicyBundle(ctx context.Context, cfg PolicyConfig, identity *Identity,
 		} else {
 			slog.Warn("policy bundle not ready (409); the active bundle stays until it expires",
 				"bundle_version_requested", "v2")
+		}
+		if force {
+			return err
 		}
 		return nil
 	}

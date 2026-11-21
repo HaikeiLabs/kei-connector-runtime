@@ -57,11 +57,7 @@ func (s *azureKeyVaultStore) Get(ctx context.Context, backend, secretRef string)
 	}
 	secret, err := client.GetSecret(ctx, name, version, nil)
 	if err != nil {
-		var responseError *azcore.ResponseError
-		if errors.As(err, &responseError) && responseError.StatusCode == http.StatusNotFound {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, classifyAzureError(err)
 	}
 	if secret.Value == nil {
 		return nil, ErrNotFound

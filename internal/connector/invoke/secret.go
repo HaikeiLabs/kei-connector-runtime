@@ -31,6 +31,14 @@ type Descriptor struct {
 	CredentialSecretRef string `json:"credential_secret_ref,omitempty"`
 }
 
+// Secrets resolves opaque_ref descriptor credentials for the serve daemon.
+// SecretResolver reads the tenant secret store on each call; SecretCache
+// (HAI-1071) serves shared connectors from memory.
+type Secrets interface {
+	Resolve(ctx context.Context, c policybundle.Connector) (string, error)
+	CheckExternalField(c policybundle.Connector, field string) error
+}
+
 // SecretResolver resolves an opaque_ref bundle descriptor's credential inside
 // the serve daemon.
 type SecretResolver struct {
@@ -65,20 +73,69 @@ func ParseConnectorRef(ref string) (connectorID, field string, ok bool) {
 	return connectorID, field, true
 }
 
+// IsExternalRef reports whether a descriptor credential_ref is the
+// customer's own secret (an external credential_ref, HAI-1000) rather than a
+// kei://connectors reference.
+func IsExternalRef(ref string) bool {
+	return ref != "" && !strings.HasPrefix(ref, connectorRefPrefix)
+}
+
+// CheckExternalField reports whether field of descriptor c, whose
+// credential_ref is external, was resolved by credential sync: the connector
+// reference index must hold an External entry for exactly that connector and
+// field, in the descriptor's backend, naming the descriptor's ref. Otherwise
+// it returns a *SecretError (unresolved_reference, credential_backend_mismatch
+// or credential_unavailable). It reads no secret value.
+func (r SecretResolver) CheckExternalField(c policybundle.Connector, field string) error {
+	if !IsExternalRef(c.CredentialRef) || c.CredentialBackend == "" {
+		return &SecretError{"unresolved_reference", "the reference does not name the connector's credential field"}
+	}
+	if r.IndexPath == "" {
+		return &SecretError{"credential_unavailable", "the connector credential is not available"}
+	}
+	entry, err := runtimecredentials.ReadConnectorReference(r.IndexPath, c.ID, field)
+	if err != nil || !entry.External {
+		return &SecretError{"unresolved_reference", "the reference does not name a credential resolved for this connector"}
+	}
+	if entry.SecretBackend != c.CredentialBackend {
+		return &SecretError{"credential_backend_mismatch", "the delivered credential does not match the descriptor"}
+	}
+	if !runtimecredentials.ExternalReferenceNames(r.IndexPath, entry, c.CredentialRef) {
+		return &SecretError{"unresolved_reference", "the reference does not name a credential resolved for this connector"}
+	}
+	return nil
+}
+
 // Resolve returns the credential value for descriptor c, or a *SecretError.
 // Nothing is retried, and no other backend is tried.
 func (r SecretResolver) Resolve(ctx context.Context, c policybundle.Connector) (string, error) {
 	if contract.CredentialSource(c.CredentialSource) != contract.CredentialSourceOpaqueRef {
 		return "", &SecretError{"descriptor_invalid", "the connector does not use a tenant-stored credential"}
 	}
-	connectorID, field, ok := ParseConnectorRef(c.CredentialRef)
-	if !ok || connectorID != c.ID || c.CredentialBackend == "" {
+	if c.CredentialBackend == "" {
+		return "", &SecretError{"descriptor_invalid", "the descriptor's credential reference does not name this connector"}
+	}
+	var lookup func() (runtimecredentials.ConnectorReference, error)
+	if connectorID, field, ok := ParseConnectorRef(c.CredentialRef); ok {
+		if connectorID != c.ID {
+			return "", &SecretError{"descriptor_invalid", "the descriptor's credential reference does not name this connector"}
+		}
+		lookup = func() (runtimecredentials.ConnectorReference, error) {
+			return runtimecredentials.ReadConnectorReference(r.IndexPath, connectorID, field)
+		}
+	} else if c.CredentialRef != "" && !strings.HasPrefix(c.CredentialRef, connectorRefPrefix) {
+		// An external credential_ref (HAI-1000): the customer's own secret,
+		// found only once credential sync resolved it for this connector.
+		lookup = func() (runtimecredentials.ConnectorReference, error) {
+			return runtimecredentials.ReadExternalConnectorReference(r.IndexPath, c.ID, c.CredentialBackend, c.CredentialRef)
+		}
+	} else {
 		return "", &SecretError{"descriptor_invalid", "the descriptor's credential reference does not name this connector"}
 	}
 	if r.IndexPath == "" || r.Store == nil {
 		return "", &SecretError{"credential_unavailable", "the connector credential is not available"}
 	}
-	entry, err := runtimecredentials.ReadConnectorReference(r.IndexPath, connectorID, field)
+	entry, err := lookup()
 	if errors.Is(err, runtimecredentials.ErrConnectorReferenceMismatch) {
 		return "", &SecretError{"credential_backend_mismatch", "the delivered credential does not match the descriptor"}
 	}

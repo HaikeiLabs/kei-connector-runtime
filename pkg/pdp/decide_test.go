@@ -11,13 +11,16 @@ import (
 
 func TestDecideUnregisteredToolForTheOwnerSessionUsesTheTrustedAgent(t *testing.T) {
 	now := time.Now().UTC()
-	e, owner := newV2OwnerUnregisteredToolEvaluator(t, now, []any{v2GrantPermitPolicy("group:members", "custom.read")})
+	e, owner := newV2OwnerUnregisteredToolEvaluator(t, now, []any{
+		v2GrantPermitPolicy("group:members", "custom.read"),
+	})
 	res, err := e.Decide(context.Background(), DecideRequest{
 		Session: owner, Target: Target{Tool: "custom.read"}, TrustedAgent: testAgent, OwnerSession: true,
 	})
 	if err != nil || !res.Allow || !res.AuditTrustedAgent {
 		t.Fatalf("result=%+v err=%v", res, err)
 	}
+
 }
 
 func TestDecideDeniesWithoutATrustedAgentOrForAnotherAgent(t *testing.T) {

@@ -18,6 +18,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/HaikeiLabs/kei-connector-contracts/authorizerequest"
+	"github.com/HaikeiLabs/kei-connector-contracts/contract"
+	"github.com/HaikeiLabs/kei-connector-runtime/internal/connector/invoke"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/credrelease"
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/session"
 	"github.com/HaikeiLabs/kei-connector-runtime/pkg/denyhint"
@@ -34,10 +36,11 @@ const (
 	credentialReleaseResponseSchema = "kei.credential-release-response/v1"
 	sessionSchema                   = "kei.session/v1"
 	// sessionSchemaV2 creates a named session (multi-session socket API).
-	sessionSchemaV2      = "kei.session/v2"
-	bundleStatusSchema   = "kei.policy-bundle-status/v1"
-	maxSocketRequest     = 64 << 10
-	maxSocketPlanRequest = 192 << 10
+	sessionSchemaV2              = "kei.session/v2"
+	bundleStatusSchema           = "kei.policy-bundle-status/v1"
+	maxSocketRequest             = 64 << 10
+	maxSocketPlanRequest         = 192 << 10
+	maxSocketToolManifestRequest = maxToolManifestBytes
 )
 
 type socketAuthorizeRequest struct {
@@ -52,6 +55,9 @@ type socketAuthorizeRequest struct {
 	DelegationDepth int                       `json:"delegation_depth,omitempty"`
 	Framework       string                    `json:"framework,omitempty"`
 	ToolArgsDigest  string                    `json:"tool_args_digest,omitempty"`
+	ToolArgs        json.RawMessage           `json:"tool_args,omitempty"`
+	ToolContext     json.RawMessage           `json:"tool_context,omitempty"`
+	MCPManifestHash string                    `json:"mcp_manifest_hash,omitempty"`
 	OnBehalfOf      string                    `json:"on_behalf_of,omitempty"`
 	// ShellCommand is accepted only over the tenant-local socket and is used
 	// solely to evaluate shell: policies. It is never copied to audit events.
@@ -70,6 +76,7 @@ type socketAuthorizeResponse struct {
 	Schema              string          `json:"schema"`
 	Decision            string          `json:"decision"` // permit | deny | unmatched
 	ReasonCode          string          `json:"reason_code,omitempty"`
+	SyntaxCode          string          `json:"syntax_code,omitempty"`
 	Hint                string          `json:"hint,omitempty"`
 	DenySource          string          `json:"deny_source,omitempty"`
 	Reason              string          `json:"reason,omitempty"`
@@ -146,6 +153,7 @@ type socketDecisionEvent struct {
 	Decision            string   `json:"decision"`
 	DenySource          string   `json:"deny_source"`
 	ReasonCode          string   `json:"reason_code"`
+	SyntaxCode          string   `json:"syntax_code,omitempty"`
 	PolicyID            *string  `json:"policy_id,omitempty"`
 	PolicyReason        *string  `json:"policy_reason,omitempty"`
 	PolicyBundleVersion *int64   `json:"policy_bundle_version,omitempty"`
@@ -177,18 +185,27 @@ type SessionKeychain interface {
 }
 
 type LocalPDP struct {
-	cfg       PolicyConfig
-	Sessions  *pdp.Sessions
-	evaluator atomic.Pointer[pdp.Evaluator]
-	identity  atomic.Pointer[Identity]
-	emit      EmitAuditFunc
-	keychain  SessionKeychain
+	cfg               PolicyConfig
+	Sessions          *pdp.Sessions
+	evaluator         atomic.Pointer[pdp.Evaluator]
+	identity          atomic.Pointer[Identity]
+	identityRefreshMu sync.Mutex
+	identityResolver  func(context.Context) (*Identity, error)
+	emit              EmitAuditFunc
+	keychain          SessionKeychain
 
 	// creds creates per-session credential stores held in sessionCreds.
-	creds                 *credrelease.Store
+	creds *credrelease.Store
+	// secrets holds shared opaque_ref connector credentials in memory
+	// (HAI-1071); see connector_secrets.go.
+	secretsMu             sync.Mutex
+	secrets               *invoke.SecretCache
+	stopSecrets           context.CancelFunc
+	secretsDigest         string
 	sessionCreds          sync.Map
 	runner                http.Handler
 	toolRegistrar         ToolRegistrar
+	mcpManifestRegistrar  mcpManifestSubmitter
 	modelConfigHandler    http.Handler
 	stopSweep             chan struct{}
 	closeOnce             sync.Once
@@ -207,7 +224,9 @@ type LocalPDP struct {
 func NewLocalPDP(cfg PolicyConfig, emit EmitAuditFunc) *LocalPDP {
 	l := &LocalPDP{cfg: cfg, Sessions: pdp.NewSessions(), emit: emit, stopSweep: make(chan struct{})}
 	if cfg != nil && cfg.ControlPlaneURL() != "" {
-		l.toolRegistrar = runtimeToolRegistrar{client: &runtimeClient{baseURL: strings.TrimRight(cfg.ControlPlaneURL(), "/"), client: &http.Client{Timeout: 15 * time.Second}}}
+		client := &runtimeClient{baseURL: strings.TrimRight(cfg.ControlPlaneURL(), "/"), client: &http.Client{Timeout: 15 * time.Second}}
+		l.toolRegistrar = runtimeToolRegistrar{client: client}
+		l.mcpManifestRegistrar = client
 	}
 	// A named session's credentials go with it, however it ends.
 	l.Sessions.OnEnd(l.sessionEnded)
@@ -239,6 +258,7 @@ func (l *LocalPDP) SetTokenlessOwnerSession(enabled bool) {
 	}
 	if !enabled {
 		l.endOwnerSessionLocked()
+		l.releaseOwnerSecretsLocked()
 		l.ownerUnavailable = false
 	}
 	l.ownerMu.Unlock()
@@ -254,6 +274,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	if e == nil {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -261,6 +282,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	if !ok {
 		l.endOwnerSessionLocked()
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -278,6 +300,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 	id, err := l.Sessions.CreatePinned(sub)
 	if err != nil {
 		l.ownerUnavailable = true
+		l.releaseOwnerSecretsLocked()
 		l.ownerMu.Unlock()
 		return
 	}
@@ -289,6 +312,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 			l.dropSessionCredentials(id)
 			l.ownerID = ""
 			l.ownerUnavailable = true
+			l.releaseOwnerSecretsLocked()
 			l.ownerMu.Unlock()
 			return
 		}
@@ -299,6 +323,7 @@ func (l *LocalPDP) reconcileOwnerSession() {
 		// A concurrent bundle refresh ends this session and flushes a late load.
 		l.loadCredentials(context.Background(), id, sub)
 	}
+	l.prefetchSharedSecrets(context.Background(), ownerSecretHolder)
 }
 
 func (l *LocalPDP) endOwnerSessionLocked() {
@@ -306,6 +331,13 @@ func (l *LocalPDP) endOwnerSessionLocked() {
 		l.Sessions.EndID(l.ownerID)
 		l.ownerID = ""
 	}
+}
+
+// releaseOwnerSecretsLocked releases the owner session's hold on the shared
+// connector credentials when the owner session stops being available (not
+// when it is only recreated by a refresh).
+func (l *LocalPDP) releaseOwnerSecretsLocked() {
+	l.releaseSharedSecrets(ownerSecretHolder)
 }
 
 // SweepSessions ends idle named sessions until ctx is done or Close. The
@@ -420,6 +452,7 @@ func (l *LocalPDP) OnSessionEnd(fn func(id string)) {
 
 func (l *LocalPDP) sessionEnded(id string) {
 	l.dropSessionCredentials(id)
+	l.releaseSharedSecrets(id)
 	l.endHooksMu.Lock()
 	hooks := append([]func(string){}, l.endHooks...)
 	l.endHooksMu.Unlock()
@@ -450,13 +483,16 @@ func (l *LocalPDP) SetModelConfigHandler(h http.Handler) { l.modelConfigHandler 
 // Before the identity resolves, every call denies policy_bundle_missing. The
 // error is non-nil only when ctx is done.
 func (l *LocalPDP) AuthorizeConnector(ctx context.Context, req pdp.Request) (pdp.ConnectorGrant, *Identity, error) {
+	l.refreshIdentityForBundle(ctx)
 	e, id := l.evaluator.Load(), l.identity.Load()
 	if e == nil || id == nil {
-		if req.Session != pdp.DefaultSession && !l.Sessions.Exists(req.Session) {
+		sub, hasSession := l.Sessions.Get(req.Session)
+		if req.Session != pdp.DefaultSession && !hasSession {
 			return pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: pdp.ReasonSessionNotFound, DenySource: "identity", Reason: "the session does not exist or has ended"}}, nil, ctx.Err()
 		}
 		g := pdp.ConnectorGrant{Decision: pdp.Decision{ReasonCode: pdp.ReasonPolicyBundleMissing, DenySource: "runtime_state", Reason: "runtime identity is not resolved yet", BundleState: "cold"}}
-		if sub, ok := l.Sessions.Get(req.Session); ok {
+		if hasSession {
+			g.Decision.AuditSubject = typedSubject(sub)
 			sub.Token, sub.Enrollment = "", nil
 			g.Subject, g.HasSession = sub, true
 		}
@@ -484,6 +520,7 @@ func (l *LocalPDP) AuditScope() (orgID, workspaceID, installationID string) {
 func (l *LocalPDP) Close() {
 	l.closeOnce.Do(func() { close(l.stopSweep) })
 	l.flushCredentials()
+	l.stopConnectorSecrets()
 }
 
 // flushCredentials flushes every session's credentials.
@@ -491,6 +528,7 @@ func (l *LocalPDP) flushCredentials() {
 	if l.creds != nil {
 		l.creds.Flush()
 	}
+	l.flushConnectorSecrets()
 	l.sessionCreds.Range(func(k, _ any) bool {
 		l.dropSessionCredentials(k.(string))
 		return true
@@ -508,6 +546,44 @@ func (l *LocalPDP) SetIdentity(identity *Identity) {
 	}
 	l.identity.Store(identity)
 	l.evaluator.Store(e)
+}
+
+// SetIdentityResolver installs the daemon's control-plane identity lookup.
+// It is used on demand when a bundle for the same installation has moved to
+// another workspace since the evaluator was last built.
+func (l *LocalPDP) SetIdentityResolver(resolve func(context.Context) (*Identity, error)) {
+	l.identityRefreshMu.Lock()
+	l.identityResolver = resolve
+	l.identityRefreshMu.Unlock()
+}
+
+// refreshIdentityForBundle follows a workspace move without weakening the
+// installation boundary. A bundle for another installation is never used to
+// select a new identity; ordinary evaluator validation continues to fail it
+// closed.
+func (l *LocalPDP) refreshIdentityForBundle(ctx context.Context) {
+	l.identityRefreshMu.Lock()
+	defer l.identityRefreshMu.Unlock()
+	current, evaluator, resolve := l.identity.Load(), l.evaluator.Load(), l.identityResolver
+	if current == nil || current.WorkspaceID == nil || evaluator == nil || resolve == nil {
+		return
+	}
+	status, err := evaluator.BundleStatus()
+	if err != nil || status.Audience == nil {
+		return
+	}
+	audience := status.Audience
+	if audience.InstallationID != current.ID || audience.OrgID != current.OrgID || audience.WorkspaceID == *current.WorkspaceID {
+		return
+	}
+	refreshed, err := resolve(ctx)
+	if err != nil || refreshed == nil || refreshed.WorkspaceID == nil {
+		return
+	}
+	if refreshed.ID != current.ID || refreshed.OrgID != current.OrgID || *refreshed.WorkspaceID != audience.WorkspaceID {
+		return
+	}
+	l.SetIdentity(refreshed)
 }
 
 func (l *LocalPDP) AfterSync(err error) {
@@ -529,6 +605,7 @@ func (l *LocalPDP) AfterSync(err error) {
 	if e == nil {
 		l.ownerMu.Lock()
 		l.endOwnerSessionLocked()
+		l.releaseOwnerSecretsLocked()
 		l.ownerUnavailable = l.tokenlessOwnerSession
 		l.ownerMu.Unlock()
 	}
@@ -543,6 +620,9 @@ func (l *LocalPDP) AfterSync(err error) {
 	if sub, ok := l.Sessions.Current(); !ok || sub.Status != pdp.StatusLinked {
 		l.flushSession(pdp.DefaultSession)
 	}
+	// A changed bundle refreshes shared connector credentials at once and
+	// drops those of removed or re-pointed connectors (HAI-1071).
+	l.syncSecretConnectors()
 }
 
 func (l *LocalPDP) NewHandler(next http.Handler, checkConfig func() error, checkAuth func(*http.Request) bool) http.Handler {
@@ -565,6 +645,7 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/commands:run" && r.Method == http.MethodPost && l.runner != nil:
 		case r.URL.Path == "/v1/credentials:release" && r.Method == http.MethodPost && l.creds != nil:
 		case r.URL.Path == "/v1/tools:register" && r.Method == http.MethodPost:
+		case r.URL.Path == mcpManifestSyncPath && r.Method == http.MethodPost && allowUnauthenticatedAuthorize:
 		case r.URL.Path == "/v1/model-config" && r.Method == http.MethodGet && l.modelConfigHandler != nil:
 		// Owner-only Unix socket only, never a TCP listener, and always
 		// token-authenticated (not a tokenless owner route).
@@ -583,7 +664,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		ownerID, ownerEnabled, ownerUnavailable := l.ownerID, l.tokenlessOwnerSession, l.ownerUnavailable
 		l.ownerMu.RUnlock()
 		unauthenticatedOwner := allowUnauthenticatedAuthorize && routeAllowsOwner && ownerEnabled && ownerID != "" && !authenticated && session.FromRequest(r) == pdp.DefaultSession
-		if !authenticated && !unauthenticatedOwner && !(allowUnauthenticatedAuthorize && ownerEnabled && routeAllowsOwner && !authenticated && ownerUnavailable) {
+		localManifestSync := allowUnauthenticatedAuthorize && r.Method == http.MethodPost && r.URL.Path == mcpManifestSyncPath && !authenticated
+		if !authenticated && !unauthenticatedOwner && !localManifestSync && !(allowUnauthenticatedAuthorize && ownerEnabled && routeAllowsOwner && !authenticated && ownerUnavailable) {
 			writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
 			return
 		}
@@ -608,6 +690,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.runner.ServeHTTP(w, r)
 		case r.URL.Path == "/v1/tools:register":
 			l.handleToolRegistration(w, r)
+		case r.URL.Path == mcpManifestSyncPath:
+			l.handleMCPManifestSync(w, r)
 		case r.URL.Path == "/v1/credentials:release":
 			l.handleCredentialRelease(w, r)
 		case r.URL.Path == "/v1/model-config":
@@ -645,12 +729,12 @@ func (l *LocalPDP) handleToolRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var manifest ToolManifest
-	if err := decodeSocketJSONLimit(w, r, &manifest, maxSocketPlanRequest); err != nil {
+	if err := decodeSocketJSONLimit(w, r, &manifest, maxSocketToolManifestRequest); err != nil {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", "invalid tool manifest JSON")
 		return
 	}
-	if manifest.Schema != ToolManifestSchemaV3 {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", fmt.Sprintf("unsupported tool manifest schema: supported %s, received %q", ToolManifestSchemaV3, manifest.Schema))
+	if manifest.Schema != ToolManifestSchemaV3 && manifest.Schema != ToolManifestSchemaV4 {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_manifest", fmt.Sprintf("unsupported tool manifest schema: supported %s and %s, received %q", ToolManifestSchemaV3, ToolManifestSchemaV4, manifest.Schema))
 		return
 	}
 	if len(manifest.Tools) == 0 {
@@ -694,6 +778,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+sessionSchemaV2+" object with no unknown fields")
 		return
 	}
+	l.refreshIdentityForBundle(r.Context())
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(body, &fields)
 	_, hasPrincipalID := fields["service_principal_id"]
@@ -743,6 +828,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		l.loadCredentials(r.Context(), id, sub)
+		l.prefetchSharedSecrets(r.Context(), id)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(socketSessionResponse{Schema: sessionSchemaV2, SessionID: id, ServicePrincipalID: principal.ServicePrincipalID, SubjectType: "service_principal", IdleTTLSeconds: l.idleTTLSeconds()})
@@ -799,6 +885,7 @@ func (l *LocalPDP) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	l.loadCredentials(r.Context(), id, sub)
+	l.prefetchSharedSecrets(r.Context(), id)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(socketSessionResponse{
@@ -904,12 +991,16 @@ func (l *LocalPDP) handlePolicyBundleStatus(w http.ResponseWriter) {
 
 func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, includeEnrollment bool) {
 	var req socketAuthorizeRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != authorizeRequestSchema {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != authorizeRequestSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+authorizeRequestSchema+" object with no unknown fields")
 		return
 	}
 	if (req.Tool == "" && req.Connector == nil) || (req.Connector != nil && (req.Connector.ConnectorID == "" || req.Connector.Capability == "")) {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request needs a tool, connector, or tool with connector{connector_id, capability}")
+		return
+	}
+	if (len(req.ToolContext) > 0 && len(req.ToolArgs) == 0) || (len(req.ToolArgs) > 0 && !l.isV2ConnectorTool(req.Tool)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "tool_args and tool_context are only valid for a registered connector_binding tool")
 		return
 	}
 	if !validOnBehalfOf(req.OnBehalfOf) {
@@ -953,12 +1044,16 @@ func (l *LocalPDP) handleAuthorize(w http.ResponseWriter, r *http.Request, inclu
 // whether a credential was released, never the credential value.
 func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Request) {
 	var req socketAuthorizeRequest
-	if err := decodeSocketJSON(w, r, &req); err != nil || req.Schema != credentialReleaseRequestSchema {
+	if err := decodeSocketJSONLimit(w, r, &req, maxSocketPlanRequest); err != nil || req.Schema != credentialReleaseRequestSchema {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+credentialReleaseRequestSchema+" object with no unknown fields")
 		return
 	}
 	if req.Connector == nil || req.Connector.ConnectorID == "" || req.Connector.Capability == "" {
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a connector{connector_id, capability} is required for a credential release")
+		return
+	}
+	if (len(req.ToolContext) > 0 && len(req.ToolArgs) == 0) || (len(req.ToolArgs) > 0 && !l.isV2ConnectorTool(req.Tool)) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "tool_args and tool_context are only valid for a registered connector_binding tool")
 		return
 	}
 	if req.Resource == "" {
@@ -1002,33 +1097,38 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		if req.Tool != "" {
 			credentialResource = l.connectorCredentialResource(req.Connector.ConnectorID)
 		}
+		descriptor, hasDescriptor := l.bundleConnector(req.Connector.ConnectorID)
 		var expectedAccountModel string
-		if req.Tool != "" {
-			if e := l.evaluator.Load(); e != nil {
-				if verified, ok := e.Bundle(); ok {
-					if connector, found := verified.Connector(req.Connector.ConnectorID); found {
-						expectedAccountModel = connector.AccountModel
-					}
-				}
-			}
+		if req.Tool != "" && hasDescriptor {
+			expectedAccountModel = descriptor.AccountModel
 		}
 		var cred *socketCredentialReleaseCred
-		releaseErr := l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, credentialResource, func(c credrelease.ConnectorCredential) error {
-			if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != credentialResource) {
-				return errCredentialAudienceMismatch
-			}
-			if req.Tool != "" && (expectedAccountModel == "" || c.AccountModel != expectedAccountModel || (c.AccountModel != "shared" && c.AccountModel != "per_user")) {
-				return errCredentialAccountModelUnsupported
-			}
-			cred = &socketCredentialReleaseCred{
-				ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
-				AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
-			}
-			return nil
-		})
+		var releaseErr error
+		if hasDescriptor && contract.CredentialSource(descriptor.CredentialSource) == contract.CredentialSourceOpaqueRef {
+			// A tenant-stored credential (HAI-1066): read from the runtime's
+			// secret store, never from the identity service.
+			cred, releaseErr = l.releaseTenantSecret(r.Context(), req.Tool != "", descriptor, credentialResource)
+		} else {
+			releaseErr = l.UseConnectorCredential(r.Context(), sessionID, subject, req.Connector.ConnectorID, credentialResource, func(c credrelease.ConnectorCredential) error {
+				if req.Tool != "" && (c.ConnectorID != req.Connector.ConnectorID || c.Resource != credentialResource) {
+					return errCredentialAudienceMismatch
+				}
+				if req.Tool != "" && (expectedAccountModel == "" || c.AccountModel != expectedAccountModel || (c.AccountModel != "shared" && c.AccountModel != "per_user")) {
+					return errCredentialAccountModelUnsupported
+				}
+				cred = &socketCredentialReleaseCred{
+					ConnectorID: c.ConnectorID, Issuer: c.Issuer, Resource: c.Resource,
+					AccountModel: c.AccountModel, AccessToken: c.AccessToken, ExpiresAt: c.ExpiresAt,
+				}
+				return nil
+			})
+		}
 		if releaseErr != nil {
 			var denied *credrelease.DeniedError
-			if errors.As(releaseErr, &denied) {
+			var secretErr *invoke.SecretError
+			if errors.As(releaseErr, &secretErr) {
+				resp.ReasonCode = secretErr.Code
+			} else if errors.As(releaseErr, &denied) {
 				resp.ReasonCode = credentialReleaseReason(denied.Reason)
 			} else if errors.Is(releaseErr, errCredentialAccountModelUnsupported) {
 				resp.ReasonCode = "account_model_not_supported"
@@ -1072,6 +1172,52 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// bundleConnector is connectorID's descriptor in the verified bundle.
+func (l *LocalPDP) bundleConnector(connectorID string) (policybundle.Connector, bool) {
+	e := l.evaluator.Load()
+	if e == nil {
+		return policybundle.Connector{}, false
+	}
+	verified, ok := e.Bundle()
+	if !ok {
+		return policybundle.Connector{}, false
+	}
+	return verified.Connector(connectorID)
+}
+
+// releaseTenantSecret reads an opaque_ref connector's credential from the
+// tenant secret store (HAI-1066, ADR-039), after the release decision allowed
+// the call. Only a tool-bound request for a shared connector is released: a
+// tenant-stored secret is one account for every caller, so a per_user (or any
+// other) account model denies account_model_not_supported (owner decision
+// 2026-11-15: secret_ref connectors are shared only). The value is returned
+// only in the release response; it and its reference are never logged,
+// audited or part of an error.
+func (l *LocalPDP) releaseTenantSecret(ctx context.Context, toolBound bool, c policybundle.Connector, resource string) (*socketCredentialReleaseCred, error) {
+	if !toolBound {
+		return nil, &invoke.SecretError{Code: "credential_source_not_supported", Reason: "a tenant-stored credential is released only for a tool-bound request"}
+	}
+	if contract.AccountModel(c.AccountModel) != contract.AccountModelShared {
+		return nil, &invoke.SecretError{Code: "account_model_not_supported", Reason: "a tenant-stored credential is released only for a shared connector"}
+	}
+	// Served from daemon memory (HAI-1071): this never reads the store.
+	secrets := l.ConnectorSecrets()
+	if secrets == nil {
+		return nil, &invoke.SecretError{Code: "credential_unavailable", Reason: "the connector credential is not available"}
+	}
+	value, err := secrets.Resolve(ctx, c)
+	if err != nil {
+		var secretErr *invoke.SecretError
+		if errors.As(err, &secretErr) {
+			return nil, err
+		}
+		return nil, &invoke.SecretError{Code: "credential_unavailable", Reason: "the connector credential is not available"}
+	}
+	// A tenant-stored secret has no issuer and no expiry: the harness asks
+	// for it again on every call.
+	return &socketCredentialReleaseCred{ConnectorID: c.ID, Resource: resource, AccountModel: c.AccountModel, AccessToken: value}, nil
 }
 
 // connectorCredentialResource is the audience the identity service issued
@@ -1123,10 +1269,25 @@ func credentialReleaseReason(reason string) string {
 	}
 }
 
+func authorizeSyntaxCode(d pdp.Decision) string {
+	if d.ReasonCode != pdp.ReasonUnsupportedShellSyntax || denyhint.ShellSyntaxHint(d.SyntaxCode) == "" {
+		return ""
+	}
+	return d.SyntaxCode
+}
+
+func authorizeHint(d pdp.Decision) string {
+	if d.ReasonCode == pdp.ReasonUnsupportedShellSyntax {
+		return denyhint.ShellSyntaxHint(authorizeSyntaxCode(d))
+	}
+	return denyhint.Hint(string(d.ReasonCode))
+}
+
 func socketAuthorizeResponseForDecision(d pdp.Decision, includeEnrollment bool) socketAuthorizeResponse {
 	resp := socketAuthorizeResponse{
 		Schema: authorizeResponseSchema, Decision: "deny", ReasonCode: string(d.ReasonCode),
-		Hint: denyhint.Hint(string(d.ReasonCode)), DenySource: d.DenySource, Reason: d.Reason, PolicyID: d.PolicyID,
+		SyntaxCode: authorizeSyntaxCode(d), Hint: authorizeHint(d), DenySource: d.DenySource,
+		Reason: d.Reason, PolicyID: d.PolicyID,
 		BundleState: d.BundleState,
 	}
 	if d.Allow {
@@ -1177,14 +1338,16 @@ func (l *LocalPDP) decisionEventJSONWithUnmatched(req socketAuthorizeRequest, se
 		SpanID: spanID, InvokedAt: time.Now().UTC().Format(time.RFC3339Nano), DelegationDepth: req.DelegationDepth,
 		AgentID: req.AgentID, Framework: req.Framework, ToolName: toolName, ResourcesTouched: []string{},
 		Decision: "deny", BundleState: d.BundleState, DenySource: d.DenySource, ReasonCode: string(d.ReasonCode),
-		CredentialKind: credentialKind,
+		SyntaxCode: authorizeSyntaxCode(d), CredentialKind: credentialKind,
 	}
 	if unmatched && d.ReasonCode == "no_matching_policy" {
 		e.Decision = "unmatched"
 	} else if d.Allow {
 		e.Decision = "allow"
 	}
-	if subject, ok := l.Sessions.Get(sessionID); ok {
+	if d.AuditSubject != "" {
+		e.InvokingSubject = d.AuditSubject
+	} else if subject, ok := l.Sessions.Get(sessionID); ok {
 		e.InvokingSubject = typedSubject(subject)
 	}
 	// A deny without a resolved subject (no session, unlinked session) must

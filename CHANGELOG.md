@@ -2,9 +2,46 @@
 
 ## Unreleased
 
-### Breaking: tool manifest v3 only (HAI-875)
+### Added: v4 tool-manifest registration
 
-kei-proxy accepts `kei.tool-manifest/v3` only from this release. Manifests v1, v2, and v4 are rejected. Agentware 0.12.0 posts v3 and is unaffected.
+kei-proxy accepts strictly validated `kei.tool-manifest/v4` manifests during
+runtime bootstrap and `POST /v1/tools:register`. V4 connector routes require a
+valid operation plan; v4 `sync_mode: merge` is preserved. Runtime sync
+negotiates the v4 media type and requires explicit catalog acknowledgment.
+V3 callers keep their existing replace behavior and must omit v4-only fields.
+Registration remains metadata-only and grants no policy access.
+
+### Fixed: keep authorization subject stable during session end
+
+Each decision now evaluates and audits the same live-session subject snapshot.
+A concurrent owner-session refresh can no longer turn a successful liveness
+check followed by a second lookup into a false `subject_unlinked` denial.
+
+
+### Changed: agent-connector bindings no longer gate authorization (HAI-623)
+
+kei-proxy no longer denies a connector call with `agent_not_bound_to_connector`
+before policy runs. `agent_connector_bindings` in the bundle is wiring only;
+a call is allowed or denied by the bundle's rules and live access grants. An
+agent with no grant for the connector now gets the policy deny
+(`no_matching_policy` or `no_grant_matched`). The reason code and its deny
+hint are removed.
+
+### Added: agent-specific model profile selection
+
+`kei-proxy model profile` accepts `--agent-id <uuid>` and uses `--profile-id`
+to select any active profile assigned to that agent (or the installation's
+default agent). `kei-proxy model profiles` lists active assignments without
+credentials. `model invoke` accepts `agent_id` and `profile_id` in its request
+JSON. Serve exposes `GET /v1/model-profiles` (safe metadata only), and both
+`/v1/model-config` and `/v1/models` accept those selectors as query parameters.
+Profile selection remains scoped to assignments authorized by the runtime API,
+and secret-store credential lookup is unchanged. The serve daemon has no
+`POST /v1/chat/completions` route; model invocation remains `model invoke`.
+
+### Previous release behavior: tool manifest v3 only (HAI-875)
+
+Proxy v0.7.2 accepted `kei.tool-manifest/v3` only and rejected v1, v2, and v4. This release adds negotiated v4 support; v1 and v2 remain rejected. Agentware 0.12.0 continues to post v3.
 
 ### Added: live access grants in the v2 policy bundle (HAI-617)
 

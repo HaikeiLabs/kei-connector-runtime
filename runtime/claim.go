@@ -14,7 +14,9 @@ import (
 	"uuid"
 )
 
-const identityClaimStartPath = "/api/identity/claims/start"
+// identityClaimStartPath is the catalog runtime API, served on the runtime
+// control-plane host alongside heartbeat and policy bundles.
+const identityClaimStartPath = "/api/v1/runtime/chat-identity-claims"
 
 // IdentityClaimStartRequest carries the platform identity from the current
 // harness interaction. TenantID is empty for platforms such as Discord whose
@@ -32,11 +34,12 @@ type IdentityClaimStartResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// StartIdentityClaim starts a platform-neutral claim through the console's
-// server-side proxy. The runtime credential is forwarded as Bearer auth; this
-// client never knows or sends the console-only X-KEI-API-Key.
 var whatsappE164Pattern = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 
+// StartIdentityClaim starts a platform-neutral claim on the catalog runtime
+// API, authenticated with the runtime credential as Bearer auth like the other
+// runtime calls. This client never knows or sends the console-only
+// X-KEI-API-Key.
 func (c *runtimeClient) StartIdentityClaim(ctx context.Context, token string, input IdentityClaimStartRequest) (*IdentityClaimStartResponse, error) {
 	input.Platform = strings.ToLower(strings.TrimSpace(input.Platform))
 	if !supportedClaimPlatform(input.Platform) || strings.TrimSpace(token) == "" || strings.TrimSpace(input.PlatformUserID) == "" {

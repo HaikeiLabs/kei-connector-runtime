@@ -8,17 +8,24 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
-// The single supported catalog manifest schema.
+// Supported catalog tool-manifest schemas.
 const (
 	ToolManifestSchemaV3 = "kei.tool-manifest/v3"
+	ToolManifestSchemaV4 = "kei.tool-manifest/v4"
+	maxToolManifestBytes = 1 << 20
 )
 
-// ToolManifest is the schema-tagged v3 catalog sync request.
+// ToolManifest is a schema-tagged catalog sync request. SyncMode is v4-only;
+// raw JSON preserves the distinction between an omitted field and an invalid
+// explicit null or non-string value.
 type ToolManifest struct {
-	Schema string           `json:"schema"`
-	Tools  []ToolDefinition `json:"tools"`
+	Schema   string           `json:"schema"`
+	SyncMode json.RawMessage  `json:"sync_mode,omitempty"`
+	Tools    []ToolDefinition `json:"tools"`
 }
 
 type ToolRoute struct {
@@ -36,7 +43,7 @@ type HarnessExecutorRoute struct {
 	Registration string `json:"registration"`
 }
 
-// ToolDefinition is a manifest entry in a v3 tool manifest.
+// ToolDefinition is an entry in a v3 or v4 tool manifest.
 type ToolDefinition struct {
 	Name                 string            `json:"name"`
 	Description          string            `json:"description,omitempty"`
@@ -52,6 +59,7 @@ type ToolDefinition struct {
 	OperationClass       string            `json:"operation_class,omitempty"`
 	Service              string            `json:"service,omitempty"`
 	Enabled              *bool             `json:"enabled,omitempty"`
+	Plan                 json.RawMessage   `json:"plan,omitempty"`
 }
 
 // KeiResourceType identifies a resource kind and optional parent kind.
@@ -74,8 +82,17 @@ func validateToolManifest(m *ToolManifest) error {
 	if m == nil {
 		return fmt.Errorf("tool manifest is nil")
 	}
-	if m.Schema != ToolManifestSchemaV3 {
-		return fmt.Errorf("unsupported manifest schema: supported %s, received %q", ToolManifestSchemaV3, m.Schema)
+	switch m.Schema {
+	case ToolManifestSchemaV3:
+		if len(m.SyncMode) != 0 {
+			return fmt.Errorf("v3 manifest must omit sync_mode")
+		}
+	case ToolManifestSchemaV4:
+		if err := validateV4SyncMode(m.SyncMode); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported manifest schema: supported %s and %s, received %q", ToolManifestSchemaV3, ToolManifestSchemaV4, m.Schema)
 	}
 	if len(m.Tools) > 256 {
 		return fmt.Errorf("too many tools: %d (max 256)", len(m.Tools))
@@ -93,9 +110,64 @@ func validateToolManifest(m *ToolManifest) error {
 			return fmt.Errorf("%s: duplicate name %q", prefix, td.Name)
 		}
 		seen[td.Name] = true
+		if m.Schema == ToolManifestSchemaV4 && len(td.Description) > 1024 {
+			return fmt.Errorf("%s: description is too long", prefix)
+		}
 		if err := validateToolRoute(td, prefix); err != nil {
 			return err
 		}
+		if m.Schema == ToolManifestSchemaV3 {
+			if len(td.Plan) != 0 {
+				return fmt.Errorf("%s: v3 manifest must omit plan", prefix)
+			}
+		} else if err := validateV4Plan(td, prefix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateV4SyncMode(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var mode string
+	if err := json.Unmarshal(raw, &mode); err != nil || (mode != "replace" && mode != "merge") {
+		return fmt.Errorf("v4 sync_mode must be replace or merge")
+	}
+	return nil
+}
+
+func validateV4Plan(td ToolDefinition, prefix string) error {
+	if td.Route.HarnessExecutor != nil {
+		if len(td.Plan) != 0 {
+			return fmt.Errorf("%s: harness_executor route must omit plan", prefix)
+		}
+		return nil
+	}
+	if len(td.Plan) == 0 || len(td.Plan) > policybundle.MaxPlanDataBytes {
+		return fmt.Errorf("%s: connector_binding route requires a bounded plan", prefix)
+	}
+	for _, resource := range td.ResourceTypes {
+		if strings.TrimSpace(resource.Type) == "" || (resource.ParentType != "" && strings.TrimSpace(resource.ParentType) == "") {
+			return fmt.Errorf("%s: invalid resource type", prefix)
+		}
+	}
+	tool := policybundle.V2Tool{
+		Name:                 td.Name,
+		Source:               td.Source,
+		OperationClass:       td.OperationClass,
+		RequiredCapabilities: td.RequiredCapabilities,
+		Plan:                 td.Plan,
+	}
+	for _, resource := range td.ResourceTypes {
+		tool.ResourceTypes = append(tool.ResourceTypes, policybundle.V2ResourceType{
+			Type:       resource.Type,
+			ParentType: resource.ParentType,
+		})
+	}
+	if err := policybundle.ValidateV2Plan(tool); err != nil {
+		return fmt.Errorf("%s: invalid v4 connector plan", prefix)
 	}
 	return nil
 }
@@ -138,11 +210,14 @@ func validateToolRoute(td ToolDefinition, prefix string) error {
 	return nil
 }
 
-// LoadToolManifest reads and strictly validates a v3 tool manifest.
+// LoadToolManifest reads and strictly validates a v3 or v4 tool manifest.
 func LoadToolManifest(path string) (*ToolManifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read tool manifest: %w", err)
+	}
+	if len(data) > maxToolManifestBytes {
+		return nil, fmt.Errorf("tool manifest exceeds %d bytes", maxToolManifestBytes)
 	}
 	var header struct {
 		Schema string `json:"schema"`
@@ -150,8 +225,8 @@ func LoadToolManifest(path string) (*ToolManifest, error) {
 	if err := json.Unmarshal(data, &header); err != nil {
 		return nil, fmt.Errorf("decode tool manifest: %w", err)
 	}
-	if header.Schema != ToolManifestSchemaV3 {
-		return nil, fmt.Errorf("unsupported manifest schema: supported %s, received %q", ToolManifestSchemaV3, header.Schema)
+	if header.Schema != ToolManifestSchemaV3 && header.Schema != ToolManifestSchemaV4 {
+		return nil, fmt.Errorf("unsupported manifest schema: supported %s and %s, received %q", ToolManifestSchemaV3, ToolManifestSchemaV4, header.Schema)
 	}
 	var m ToolManifest
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -162,8 +237,11 @@ func LoadToolManifest(path string) (*ToolManifest, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("decode tool manifest: expected one JSON object")
 	}
-	if m.Schema != ToolManifestSchemaV3 {
-		return nil, fmt.Errorf("unsupported manifest schema: supported %s, received %q", ToolManifestSchemaV3, m.Schema)
+	if m.Schema != ToolManifestSchemaV3 && m.Schema != ToolManifestSchemaV4 {
+		return nil, fmt.Errorf("unsupported manifest schema: supported %s and %s, received %q", ToolManifestSchemaV3, ToolManifestSchemaV4, m.Schema)
+	}
+	if m.Schema == ToolManifestSchemaV4 && m.Tools == nil {
+		return nil, fmt.Errorf("invalid tool manifest: v4 tools is required")
 	}
 	if m.Tools == nil {
 		m.Tools = []ToolDefinition{}

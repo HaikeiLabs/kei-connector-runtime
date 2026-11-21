@@ -52,7 +52,7 @@ func TestLoadToolManifestSchemalessRejected(t *testing.T) {
 }
 
 func TestLoadToolManifestRejectsUnsupportedVersions(t *testing.T) {
-	for _, version := range []string{"kei.tool-manifest/v1", "kei.tool-manifest/v2", "kei.tool-manifest/v4", "garbage"} {
+	for _, version := range []string{"kei.tool-manifest/v1", "kei.tool-manifest/v2", "kei.tool-manifest/v5", "garbage"} {
 		t.Run(version, func(t *testing.T) {
 			path := t.TempDir() + "/manifest.json"
 			body := `{"schema":"` + version + `","tools":[]}`
@@ -60,8 +60,8 @@ func TestLoadToolManifestRejectsUnsupportedVersions(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err := LoadToolManifest(path)
-			if err == nil || !strings.Contains(err.Error(), "supported kei.tool-manifest/v3") || !strings.Contains(err.Error(), version) {
-				t.Fatalf("LoadToolManifest error = %v, want supported v3 and received %q", err, version)
+			if err == nil || !strings.Contains(err.Error(), "supported kei.tool-manifest/v3 and kei.tool-manifest/v4") || !strings.Contains(err.Error(), version) {
+				t.Fatalf("LoadToolManifest error = %v, want supported v3 and v4 and received %q", err, version)
 			}
 		})
 	}
@@ -194,6 +194,57 @@ func TestSyncToolsAcceptsNegotiatedV3(t *testing.T) {
 	}
 }
 
+func TestSyncToolsAcceptsNegotiatedV4Merge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v4+json" {
+			t.Fatalf("Accept = %q, want v4 media type", got)
+		}
+		var body ToolManifest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Schema != ToolManifestSchemaV4 || string(body.SyncMode) != `"merge"` || len(body.Tools) != 1 || len(body.Tools[0].Plan) == 0 {
+			t.Fatalf("v4 manifest not preserved: %+v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV4)
+		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV3+", "+ToolManifestSchemaV4)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewRuntimeClient(server.URL, time.Second)
+	manifest := &ToolManifest{
+		Schema:   ToolManifestSchemaV4,
+		SyncMode: json.RawMessage(`"merge"`),
+		Tools: []ToolDefinition{{
+			Name: "github.get_issue", Service: "github", Source: "github", OperationClass: "read",
+			RequiredCapabilities: []string{"issue.read"},
+			ResourceTypes:        []KeiResourceType{{Type: "issue", ParentType: "repository"}},
+			Route:                &ToolRoute{ConnectorBinding: &ConnectorBindingRoute{AgentID: "agent-1", ConnectorID: "connector-1"}},
+			Plan:                 json.RawMessage(`{"args_schema":{},"context_schema":{},"operations":[]}`),
+		}},
+	}
+	if err := client.SyncTools(context.Background(), "test-token", manifest); err != nil {
+		t.Fatalf("negotiated v4 sync: %v", err)
+	}
+}
+
+func TestSyncToolsV4RequiresExplicitProtocolAcknowledgment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v4+json" {
+			t.Fatalf("Accept = %q, want v4 media type", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := NewRuntimeClient(server.URL, time.Second)
+	manifest := &ToolManifest{Schema: ToolManifestSchemaV4, Tools: []ToolDefinition{}}
+	if err := client.SyncTools(context.Background(), "test-token", manifest); err == nil || !strings.Contains(err.Error(), "not explicitly negotiated") {
+		t.Fatalf("SyncTools error = %v, want missing-v4-ack failure", err)
+	}
+}
+
 func TestSyncToolsRejectsUnsupportedLocalProtocol(t *testing.T) {
 	client := NewRuntimeClient("http://unused", time.Second)
 	if err := client.SyncTools(context.Background(), "token", &ToolManifest{Schema: "kei.tool-manifest/v5"}); err == nil {
@@ -284,6 +335,38 @@ func TestSyncToolManifestUnsetEnvSkips(t *testing.T) {
 	syncToolManifest(context.Background(), cfg, time.Second, NewRuntimeClient, &stderr)
 	if stderr.Len() != 0 {
 		t.Fatalf("expected no output when KEI_TOOL_MANIFEST is empty, got %q", stderr.String())
+	}
+}
+
+func TestSyncToolManifestV4Negotiated(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/json, application/vnd.kei.tool-manifest.v4+json" {
+			t.Errorf("Accept = %q, want v4 negotiation", got)
+		}
+		var body ToolManifest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode v4 body: %v", err)
+		}
+		if body.Schema != ToolManifestSchemaV4 || string(body.SyncMode) != `"merge"` || len(body.Tools) != 1 {
+			t.Errorf("manifest = %+v, want v4 merge with one tool", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(ToolManifestProtocolHeader, ToolManifestSchemaV4)
+		w.Header().Set(ToolManifestSupportedHeader, ToolManifestSchemaV3+", "+ToolManifestSchemaV4)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manifestPath := t.TempDir() + "/manifest.json"
+	manifest := `{"schema":"kei.tool-manifest/v4","sync_mode":"merge","tools":[{"name":"local.echo","source":"local","operation_class":"write","service":"local","route":{"harness_executor":{"executor":"harness","registration":"echo"}}}]}`
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{RuntimeControlPlaneURL: server.URL, RuntimeToken: "test-token", ToolManifestPath: manifestPath}
+	var stderr strings.Builder
+	syncToolManifest(context.Background(), cfg, time.Second, NewRuntimeClient, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("v4 sync logged an error: %s", stderr.String())
 	}
 }
 

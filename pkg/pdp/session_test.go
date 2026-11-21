@@ -205,8 +205,8 @@ func TestReconcileSessionsPerSession(t *testing.T) {
 func TestEmptySessionIsNotLive(t *testing.T) {
 	sessions := NewSessions()
 	e := &Evaluator{sessions: sessions}
-	if live, reason := e.sessionLive(""); live || reason != ReasonSessionNotFound {
-		t.Fatalf("sessionLive(empty) = %t, %q; want false, %q", live, reason, ReasonSessionNotFound)
+	if _, ok, reason := e.sessionSnapshot(""); ok || reason != ReasonSessionNotFound {
+		t.Fatalf("sessionSnapshot(empty) = %t, %q; want false, %q", ok, reason, ReasonSessionNotFound)
 	}
 	if d, err := e.Evaluate(context.Background(), Request{Tool: "github.create_issue"}); err != nil || d.ReasonCode != ReasonSessionNotFound {
 		t.Errorf("Evaluate(empty) = %+v, %v; want %s", d, err, ReasonSessionNotFound)
@@ -236,8 +236,8 @@ func TestRevokingServicePrincipalSessionPreservesTypedSubject(t *testing.T) {
 }
 
 // TestSessionsMaxAge: a named session is recycled after 8 hours (max age)
-// regardless of use; the next sessionLive check returns session_revalidation_required;
-// onRecycle and onEnd both fire.
+// regardless of use; the next policy decision returns
+// session_revalidation_required; onRecycle and onEnd both fire.
 func TestSessionsMaxAge(t *testing.T) {
 	s := NewSessions()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)

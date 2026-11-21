@@ -173,8 +173,14 @@ func TestDaemonRunDescriptorDenyMatrix(t *testing.T) {
 		want   string
 	}{
 		"bundle without descriptors runs no opaque_ref connector": {func(r *runDescriptorRig) { r.grant.Descriptors, r.grant.Connector = false, nil }, "credential_source_not_supported"},
-		"connector routed but no descriptor":                      {func(r *runDescriptorRig) { r.grant.Connector = nil }, "descriptor_invalid"},
-		"descriptor names another connector":                      {func(r *runDescriptorRig) { r.grant.Connector.ID = "00000000-0000-4000-8000-000000000999" }, "descriptor_invalid"},
+		// HAI-1050: without descriptors the bundle does not say where a
+		// credential lives, so even a provider whose contracts setup schema
+		// is oauth/per_user is denied.
+		"bundle without descriptors runs no session oauth connector": {func(r *runDescriptorRig) {
+			r.grant.Descriptors, r.grant.Connector, r.grant.Provider = false, nil, "github"
+		}, "credential_source_not_supported"},
+		"connector routed but no descriptor": {func(r *runDescriptorRig) { r.grant.Connector = nil }, "descriptor_invalid"},
+		"descriptor names another connector": {func(r *runDescriptorRig) { r.grant.Connector.ID = "00000000-0000-4000-8000-000000000999" }, "descriptor_invalid"},
 		"reference names another field": {func(r *runDescriptorRig) {
 			r.grant.Connector.CredentialRef = "kei://connectors/" + runDescriptorConnector + "/api_token"
 		}, "unresolved_reference"},

@@ -14,7 +14,12 @@ runtime no longer asks for v1, and there is no opt-in variable. When the
 runtime holds an active bundle it also sends `If-None-Match` with the
 bundle's digest. `serve`, `runtime heartbeat`, `runtime bootstrap` and
 `policy sync` all fetch this way. A v1 bundle already on disk is still
-validated and enforced until it is replaced or expires.
+validated and enforced until it is replaced or expires. To bypass catalog
+reuse and request issuance immediately, run `kei-proxy policy sync --force`.
+This uses `POST /api/v1/runtime/policy-bundles/current:refresh` with the same
+installation runtime token; identity and scope are derived from that token,
+never from command arguments. A forced refresh fails if the catalog cannot
+issue a new bundle; it will not report the old bundle as a successful refresh.
 
 The refresher polls at the bundle's `refresh.poll_interval_seconds` (the
 catalog sends 60), clamped to 30–300 seconds with ±10% jitter. When no bundle
@@ -62,9 +67,7 @@ so its warn line appears on every poll, about once a minute.
 
 ### Why the catalog returns 409
 
-`detail` names the condition. The catalog documents each one with its
-operator fix in
-[When the bundle is not ready (409)](https://github.com/HaikeiLabs/kei-policy-catalog/blob/main/docs/policy-bundle-issuer.md#when-the-bundle-is-not-ready-409).
+`detail` names the condition. The table below lists each one.
 
 | `detail` | Meaning |
 |---|---|

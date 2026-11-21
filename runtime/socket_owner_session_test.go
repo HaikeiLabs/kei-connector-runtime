@@ -427,6 +427,93 @@ func TestSocketAuthorizeV2HarnessToolBindsExactTarget(t *testing.T) {
 	}
 }
 
+func TestSocketAuthorizeConnectorBindingUsesValidatedCompletePlan(t *testing.T) {
+	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
+	now := time.Now().UTC()
+	cfg := testPolicyConfig{policyStateDir: t.TempDir(), token: "runtime-token"}
+	var auditEvent json.RawMessage
+	local := NewLocalPDP(cfg, func(event json.RawMessage) { auditEvent = append(json.RawMessage(nil), event...) })
+	defer local.Close()
+	identity := &Identity{ID: "inst-fixture-0001", OrgID: "org-fixture-0001", WorkspaceID: strPtr("ws-fixture-0001"), AgentID: "agent-fixture-0001"}
+	local.SetIdentity(identity)
+	store, err := policybundle.OpenStore(cfg.PolicyStateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := v2PreflightBundle(t, now)
+	var bundleDoc map[string]any
+	if err := json.Unmarshal(bundle, &bundleDoc); err != nil {
+		t.Fatal(err)
+	}
+	policySet := bundleDoc["policy_set"].(map[string]any)
+	checks := policySet["checks"].([]any)
+	checks[0].(map[string]any)["selector"].(map[string]any)["resource_id"] = "acme/kei"
+	policySet["connectors"] = []any{map[string]any{
+		"id": "conn-fixture-0001", "provider": "github", "credential_source": "oauth", "account_model": "shared",
+		"capabilities": []any{map[string]any{"name": "repository.read", "mutating": false}},
+	}}
+	bundle, err = json.Marshal(bundleDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(bundle, identity.ID, identity.OrgID, *identity.WorkspaceID, now); err != nil {
+		t.Fatal(err)
+	}
+	h := local.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(*http.Request) bool { return true })
+	put := httptest.NewRecorder()
+	h.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/v1/session", strings.NewReader(`{"schema":"kei.session/v2","source":"discord","external_id":"discord-user-1"}`)))
+	var sessionResponse socketSessionResponse
+	if put.Code != http.StatusCreated || json.Unmarshal(put.Body.Bytes(), &sessionResponse) != nil || sessionResponse.SessionID == "" {
+		t.Fatalf("session status=%d body=%s", put.Code, put.Body.String())
+	}
+
+	authorize := func(contextData string) socketAuthorizeResponse {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"schema": authorizeRequestSchema, "tool": "github.read_repo", "action": "read",
+			"tool_args": json.RawMessage(`{}`), "tool_context": json.RawMessage(contextData),
+		})
+		req := withSessionHeader(httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(string(body))), sessionResponse.SessionID)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var response socketAuthorizeResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &response) != nil {
+			t.Fatalf("authorize status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		return response
+	}
+	if got := authorize(`{"repository":"acme/kei"}`); got.Decision != "permit" {
+		t.Fatalf("valid complete plan decision=%+v", got)
+	}
+	if strings.Contains(string(auditEvent), "acme/kei") {
+		t.Fatalf("raw plan arguments leaked into audit event: %s", auditEvent)
+	}
+	if got := authorize(`{"repository":"acme/kei","extra":"value"}`); got.Decision != "deny" || got.ReasonCode != "operation_plan_invalid" {
+		t.Fatalf("arguments outside the registered schema decision=%+v", got)
+	}
+	if got := authorize(`{"repository":"other/repo"}`); got.Decision != "deny" || got.ReasonCode != "no_matching_policy" {
+		t.Fatalf("resource outside the policy decision=%+v", got)
+	}
+	sessionID, err := local.Sessions.Create(pdp.Subject{UserID: "user-alice", Status: pdp.StatusLinked, Source: "discord", ExternalID: "discord-user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseRequest := socketAuthorizeRequest{
+		Tool: "github.read_repo", AgentID: "agent-fixture-0001", Resource: "repos/acme/kei",
+		Connector: &socketAuthorizeConnector{ConnectorID: "conn-fixture-0001", Capability: "repository.read"},
+		ToolArgs:  json.RawMessage(`{}`), ToolContext: json.RawMessage(`{"repository":"acme/kei"}`),
+	}
+	releaseDecision, _ := local.decideCredentialReleaseV2(context.Background(), sessionID, releaseRequest)
+	if !releaseDecision.Allow {
+		t.Fatalf("matching credential release target denied: %+v", releaseDecision)
+	}
+	releaseRequest.Resource = "repos/other/repo"
+	mismatchedRelease, _ := local.decideCredentialReleaseV2(context.Background(), sessionID, releaseRequest)
+	if mismatchedRelease.Allow || mismatchedRelease.ReasonCode != "operation_plan_invalid" {
+		t.Fatalf("credential resource mismatch decision=%+v", mismatchedRelease)
+	}
+}
+
 func TestSocketAuthorizeV2RouteDenialsExplainTheirRegistrationInKeiAudit(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
@@ -639,16 +726,17 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	now := time.Now().UTC()
 	tests := []struct {
-		name         string
-		effect       string
-		tool         string
-		shell        string
-		shellEffect  string
-		shellDst     string // shell policy destination command; defaults to "git log"
-		wireTool     string // tool name sent with shell_command; defaults to "shell"
-		wantDecision string
-		wantReason   string
-		wantPolicyID string
+		name           string
+		effect         string
+		tool           string
+		shell          string
+		shellEffect    string
+		shellDst       string // shell policy destination command; defaults to "git log"
+		wireTool       string // tool name sent with shell_command; defaults to "shell"
+		wantDecision   string
+		wantReason     string
+		wantSyntaxCode string
+		wantPolicyID   string
 	}{
 		{name: "group permit", effect: "permit", tool: "custom.read", wantDecision: "permit", wantPolicyID: "tool-policy"},
 		{name: "group deny", effect: "deny", tool: "custom.write", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "tool-policy"},
@@ -658,8 +746,8 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 		{name: "matching shell deny", tool: "shell", shell: "git log", shellEffect: "deny", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
 		{name: "compound shell command with no policies is unmatched", tool: "shell", shell: "git status && whoami", wantDecision: "unmatched", wantReason: "no_matching_policy"},
 		{name: "compound shell command is denied by an explicit deny on one stage", tool: "shell", shell: "git status && whoami", shellEffect: "deny", shellDst: "whoami", wantDecision: "deny", wantReason: "policy_deny", wantPolicyID: "shell-policy"},
-		{name: "unsupported shell syntax remains denied", tool: "shell", shell: "git status > out", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
-		{name: "command substitution remains denied", tool: "shell", shell: "git status $(whoami)", wantDecision: "deny", wantReason: "unsupported_shell_syntax"},
+		{name: "unsupported shell syntax remains denied", tool: "shell", shell: "git status > out", wantDecision: "deny", wantReason: "unsupported_shell_syntax", wantSyntaxCode: "unsupported_redirection"},
+		{name: "command substitution remains denied", tool: "shell", shell: "git status $(whoami)", wantDecision: "deny", wantReason: "unsupported_shell_syntax", wantSyntaxCode: "command_substitution"},
 		{name: "legacy pi.bash tool name is not a shell tool", tool: "shell", wireTool: "pi.bash", shell: "git log", wantDecision: "deny", wantReason: "invalid_shell_request"},
 	}
 	for _, tc := range tests {
@@ -726,8 +814,21 @@ func TestTokenlessOwnerSocketReturnsGenericUnmatchedDecision(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/authorize", strings.NewReader(body))
 			h.ServeHTTP(rec, req)
 			var response socketAuthorizeResponse
-			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK || response.Decision != tc.wantDecision || response.ReasonCode != tc.wantReason || response.PolicyID != tc.wantPolicyID {
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || rec.Code != http.StatusOK || response.Decision != tc.wantDecision || response.ReasonCode != tc.wantReason || response.SyntaxCode != tc.wantSyntaxCode || response.PolicyID != tc.wantPolicyID {
 				t.Fatalf("tool authorization status=%d response=%+v err=%v", rec.Code, response, err)
+			}
+			if tc.wantSyntaxCode != "" {
+				var event struct {
+					Decision   string `json:"decision"`
+					ReasonCode string `json:"reason_code"`
+					SyntaxCode string `json:"syntax_code"`
+				}
+				if err := json.Unmarshal(audit, &event); err != nil || event.Decision != "deny" || event.ReasonCode != "unsupported_shell_syntax" || event.SyntaxCode != tc.wantSyntaxCode {
+					t.Fatalf("syntax audit event=%s err=%v; want deny/unsupported_shell_syntax/%s", audit, err, tc.wantSyntaxCode)
+				}
+				if response.Hint == "" {
+					t.Fatalf("syntax denial response lacks actionable hint: %+v", response)
+				}
 			}
 			if tc.wantDecision == "unmatched" {
 				var event struct {

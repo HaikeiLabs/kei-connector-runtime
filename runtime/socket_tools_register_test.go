@@ -70,7 +70,7 @@ func TestSocketToolsRegisterValidManifest(t *testing.T) {
 	}
 }
 
-func TestSocketToolsRegisterAcceptsV3Only(t *testing.T) {
+func TestSocketToolsRegisterAcceptsV3AndV4(t *testing.T) {
 	cases := []struct {
 		name       string
 		body       string
@@ -79,10 +79,10 @@ func TestSocketToolsRegisterAcceptsV3Only(t *testing.T) {
 		wantError  string
 	}{
 		{"v3", `{"schema":"kei.tool-manifest/v3","tools":[{"name":"test.tool","service":"test","source":"test","operation_class":"read","route":{"harness_executor":{"executor":"test","registration":"test.tool"}}}]}`, http.StatusOK, "kei.tool-manifest/v3", ""},
-		{"v1", `{"schema":"kei.tool-manifest/v1","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "kei.tool-manifest/v1"`},
-		{"v2", `{"schema":"kei.tool-manifest/v2","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "kei.tool-manifest/v2"`},
-		{"v4", `{"schema":"kei.tool-manifest/v4","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "kei.tool-manifest/v4"`},
-		{"garbage", `{"schema":"whatever","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3, received "whatever"`},
+		{"v4", `{"schema":"kei.tool-manifest/v4","sync_mode":"merge","tools":[{"name":"local.echo","source":"local","operation_class":"write","service":"local","route":{"harness_executor":{"executor":"opencode","registration":"echo"}}}]}`, http.StatusOK, "kei.tool-manifest/v4", ""},
+		{"v1", `{"schema":"kei.tool-manifest/v1","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3 and kei.tool-manifest/v4, received "kei.tool-manifest/v1"`},
+		{"v2", `{"schema":"kei.tool-manifest/v2","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3 and kei.tool-manifest/v4, received "kei.tool-manifest/v2"`},
+		{"garbage", `{"schema":"whatever","tools":[]}`, http.StatusBadRequest, "", `unsupported tool manifest schema: supported kei.tool-manifest/v3 and kei.tool-manifest/v4, received "whatever"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,6 +112,33 @@ func TestSocketToolsRegisterAcceptsV3Only(t *testing.T) {
 				t.Fatalf("registrar manifest = %+v, want schema %q", registrar.lastManifest, tc.wantSchema)
 			}
 		})
+	}
+}
+
+func TestSocketToolsRegisterV4ConnectorPlan(t *testing.T) {
+	body := `{"schema":"kei.tool-manifest/v4","sync_mode":"merge","tools":[{"name":"github.get_issue","source":"github","operation_class":"read","service":"github","route":{"connector_binding":{"agent_id":"00000000-0000-0000-0000-000000000001","connector_id":"00000000-0000-0000-0000-000000000002"}},"required_capabilities":["issue.read"],"resource_types":[{"type":"issue","parent_type":"repository"}],"plan":{"args_schema":{"type":"object","properties":{"issue_number":{"type":"integer"}},"required":["issue_number"],"additionalProperties":false},"context_schema":{"type":"object","properties":{"repository":{"type":"string","minLength":1,"maxLength":256,"pattern":"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}},"required":["repository"],"additionalProperties":false},"operations":[{"id":"get-issue","capability":"issue.read","resource":{"type":"issue","id":{"from":"args","pointer":"/issue_number","type":"integer"},"parent":{"type":"repository","id":{"from":"context","field":"repository","type":"string"}}},"provider_resource_template":"repos/{parent.id}/issues/{resource.id}","provider_input":{}}]}}]}`
+	registrar := &fakeToolRegistrar{response: &keiruntime.ToolSyncResponse{Added: 1}}
+	l := keiruntime.NewLocalPDP(connectorruntime.Config{RuntimeToken: "test-token", RuntimeControlPlaneURL: "https://kei.example"}, nil)
+	l.SetToolRegistrar(registrar)
+	handler := l.NewHandler(http.NotFoundHandler(), func() error { return nil }, func(r *http.Request) bool { return true })
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid v4 connector manifest status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if registrar.lastManifest == nil || registrar.lastManifest.Schema != keiruntime.ToolManifestSchemaV4 || string(registrar.lastManifest.SyncMode) != `"merge"` || registrar.lastManifest.Tools[0].Name != "github.get_issue" || len(registrar.lastManifest.Tools[0].Plan) == 0 {
+		t.Fatalf("registrar did not receive complete v4 plan: %+v", registrar.lastManifest)
+	}
+
+	registrar.lastManifest = nil
+	invalid := strings.Replace(body, `"capability":"issue.read"`, `"capability":"issue.write"`, 1)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(invalid)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid v4 plan status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if registrar.lastManifest != nil {
+		t.Fatal("invalid v4 plan reached catalog registrar")
 	}
 }
 
@@ -194,7 +221,7 @@ func TestSocketToolsRegisterUnsupportedSchema(t *testing.T) {
 	}
 }
 
-func TestSocketToolsRegisterEmptyToolsV4(t *testing.T) {
+func TestSocketToolsRegisterEmptyV4Manifest(t *testing.T) {
 	registrar := &fakeToolRegistrar{response: &keiruntime.ToolSyncResponse{}}
 	l := keiruntime.NewLocalPDP(connectorruntime.Config{
 		RuntimeToken:           "test-token",
@@ -207,8 +234,8 @@ func TestSocketToolsRegisterEmptyToolsV4(t *testing.T) {
 	})
 	handler := l.NewHandler(next, func() error { return nil }, func(r *http.Request) bool { return true })
 
-	// v4 requires a non-empty tools array.
-	body := `{"schema":"kei.tool-manifest/v3","tools":[]}`
+	// The route rejects an empty manifest before forwarding it to the catalog.
+	body := `{"schema":"kei.tool-manifest/v4","tools":[]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/tools:register", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)

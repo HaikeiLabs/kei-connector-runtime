@@ -123,11 +123,7 @@ func (s *awsSecretsManagerStore) Get(ctx context.Context, backend, secretRef str
 	}
 	result, err := client.GetSecretValue(ctx, input)
 	if err != nil {
-		var resourceNotFound *types.ResourceNotFoundException
-		if errors.As(err, &resourceNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, classifyAWSError(err)
 	}
 	if result.SecretString == nil {
 		return nil, ErrNotFound

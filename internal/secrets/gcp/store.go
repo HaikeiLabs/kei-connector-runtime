@@ -114,7 +114,7 @@ func ParseSecretRef(secretRef string) (name, version string, err error) {
 // classes. The raw provider error is never propagated: it can echo the
 // reference and request details into logs.
 var (
-	errPermissionDenied = fmt.Errorf("%w: gcp-secret-manager permission denied: grant the workload identity roles/secretmanager.secretVersionAdder (write) and roles/secretmanager.secretAccessor (read) on the secret", errdef.ErrUnavailable)
+	errPermissionDenied = fmt.Errorf("%w: %w: gcp-secret-manager permission denied: grant the workload identity roles/secretmanager.secretVersionAdder (write) and roles/secretmanager.secretAccessor (read) on the secret", errdef.ErrUnavailable, errdef.ErrPermissionDenied)
 	errProvider         = fmt.Errorf("%w: gcp-secret-manager provider error: the GCP Secret Manager call failed; check the runtime's workload identity and network egress", errdef.ErrUnavailable)
 )
 

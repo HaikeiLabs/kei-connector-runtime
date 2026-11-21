@@ -19,6 +19,10 @@ func SyncPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity
 	return keiruntime.SyncPolicyBundle(ctx, cfg, identityFromRoot(identity), timeout)
 }
 
+func ForceRefreshPolicyBundle(ctx context.Context, cfg Config, identity *RuntimeIdentity, timeout time.Duration) error {
+	return keiruntime.ForceRefreshPolicyBundle(ctx, cfg, identityFromRoot(identity), timeout)
+}
+
 func RevokePolicyState(cfg Config) {
 	keiruntime.RevokePolicyState(cfg)
 }

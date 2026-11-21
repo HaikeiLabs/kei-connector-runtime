@@ -67,8 +67,9 @@ type Daemon struct {
 	AppendAudit   func([]byte) error
 	AuditCrypto   *auditcrypto.Provider
 	// Secrets resolves references to opaque_ref connectors from the bundle's
-	// connector descriptors (HAI-378).
-	Secrets invoke.SecretResolver
+	// connector descriptors (HAI-378). The serve daemon passes its shared
+	// credential cache (HAI-1071), so a run never waits on the secret store.
+	Secrets invoke.Secrets
 	// RouteKeys, when set, gives each run in a named session an MCP route
 	// key in KEI_MCP_ROUTE_KEY (ADR-036 §4.4), and makes credential
 	// references optional: `kei-proxy run -- <harness>` launches a harness.
@@ -255,7 +256,7 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 			return deny("subject_unlinked", "the session subject is not linked", 1, connectorIDs, fields)
 		}
 		if grant.Descriptors {
-			secret, code, reason := descriptorReference(grant.Connector, ref)
+			secret, code, reason := descriptorReference(grant.Connector, ref, d.Secrets)
 			if code != "" {
 				return deny(code, reason, 1, connectorIDs, fields)
 			}
@@ -264,8 +265,8 @@ func (d *Daemon) run(ctx context.Context, sessionID string, req daemonRunRequest
 			switch {
 			case grant.Provider == "":
 				return deny("unresolved_reference", "the policy bundle does not describe this connector", 1, connectorIDs, fields)
-			case !invoke.IsSessionProvider(grant.Provider):
-				return deny("credential_source_not_supported", "the daemon resolves only the session's own OAuth connections", 1, connectorIDs, fields)
+			case !invoke.IsSessionConnector(grant.Connector):
+				return deny("credential_source_not_supported", "the policy bundle does not describe this connector's credential source", 1, connectorIDs, fields)
 			case !sessionCredentialFields[ref.field]:
 				return deny("unresolved_reference", "a session credential provides only the token field", 1, connectorIDs, fields)
 			}
@@ -344,7 +345,7 @@ func (d *Daemon) withCredentials(ctx context.Context, sessionID, subject string,
 // connector's bundle descriptor (ADR-034, HAI-378). It returns the descriptor
 // whose tenant-stored secret fills the reference, nil for the session's own
 // OAuth credential, or a denial code and reason.
-func descriptorReference(c *policybundle.Connector, ref connectorCredentialRef) (*policybundle.Connector, string, string) {
+func descriptorReference(c *policybundle.Connector, ref connectorCredentialRef, secrets invoke.Secrets) (*policybundle.Connector, string, string) {
 	if c == nil || c.ID != ref.connectorID {
 		return nil, "descriptor_invalid", "the policy bundle has no descriptor for this connector"
 	}
@@ -361,10 +362,23 @@ func descriptorReference(c *policybundle.Connector, ref connectorCredentialRef) 
 		}
 		return nil, "", ""
 	case contract.CredentialSourceOpaqueRef:
-		if c.CredentialRef != "kei://connectors/"+ref.connectorID+"/"+ref.field {
-			return nil, "unresolved_reference", "the reference does not name the connector's credential field"
+		if c.CredentialRef == "kei://connectors/"+ref.connectorID+"/"+ref.field {
+			return c, "", ""
 		}
-		return c, "", ""
+		// An external credential_ref (HAI-1000, HAI-1066): the customer's own
+		// secret, usable only once credential sync resolved it into the
+		// index for exactly this connector and field.
+		if invoke.IsExternalRef(c.CredentialRef) {
+			if secrets == nil {
+				return nil, "credential_unavailable", "the connector credential is not available"
+			}
+			if err := secrets.CheckExternalField(*c, ref.field); err != nil {
+				code, reason, _ := invoke.CredentialDenial(err)
+				return nil, code, reason
+			}
+			return c, "", ""
+		}
+		return nil, "unresolved_reference", "the reference does not name the connector's credential field"
 	}
 	return nil, "descriptor_invalid", "the descriptor's credential source is not supported"
 }

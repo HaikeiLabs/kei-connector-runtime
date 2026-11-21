@@ -18,10 +18,15 @@ type Operation struct {
 	Resource           string
 	InputDigest        string
 	ProviderInput      json.RawMessage
+	ProviderResource   string
+	CredentialResource string
 	ResourceType       string
 	ResourceID         string
 	ResourceParent     string
 	ResourceParentType string
+	// BindingVersion is the connector binding version the caller pinned the
+	// plan to, when it names one. Empty means the caller names no version.
+	BindingVersion string
 }
 
 // V2ResourceType is an alias for the shared contracts type.
@@ -31,14 +36,50 @@ type V2ResourceType = bundle.V2ResourceType
 type V2Tool = bundle.V2Tool
 
 // V2HarnessTool reports whether name resolves to an explicitly registered
-// harness_executor route in a verified v2 bundle.
+// harness_executor route in a verified v2 bundle. The lookup decodes the
+// policy set with the runtime's own v2Tool type: the shared contracts type
+// strict-decodes connector bindings into a struct without resource_template
+// and version, so a bundle whose connector tools carry them would make every
+// tool — harness ones included — read as not registered.
 func (v *Verified) V2HarnessTool(name string, now time.Time) bool {
-	return v.toBundle().V2HarnessTool(name, now)
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return false
+	}
+	var set v2PolicySet
+	if strictJSON(v.Payload.PolicySet, &set) != nil {
+		return false
+	}
+	for _, tool := range set.Tools {
+		if tool.Name == name {
+			return tool.Route.HarnessExecutor != nil && tool.Route.ConnectorBinding == nil
+		}
+	}
+	return false
 }
 
 // V2ConnectorTool resolves one trusted connector tool from the parsed v2 set.
+// Like V2HarnessTool, the lookup runs on the runtime-local v2Tool type so a
+// templated binding cannot make the tool unfindable (see that method).
 func (v *Verified) V2ConnectorTool(name string, now time.Time) (V2Tool, bool) {
-	return v.toBundle().V2ConnectorTool(name, now)
+	if v == nil || v.Payload.Schema != "kei.policy-bundle/v2" || !v.SubjectSnapshotFresh(now) {
+		return V2Tool{}, false
+	}
+	var set v2PolicySet
+	if strictJSON(v.Payload.PolicySet, &set) != nil {
+		return V2Tool{}, false
+	}
+	for _, tool := range set.Tools {
+		if tool.Name == name && tool.Route.ConnectorBinding != nil && len(tool.Plan) > 0 && ValidateV2Plan(tool.V2Tool) == nil {
+			// The alias's route binding type has only the connector id; the
+			// template and version stay on the runtime-local route that
+			// EvaluateV2Plan re-reads for its own decision.
+			tool.V2Tool.Route.ConnectorBinding = &struct {
+				ConnectorID string `json:"connector_id"`
+			}{ConnectorID: tool.Route.ConnectorBinding.ConnectorID}
+			return tool.V2Tool, true
+		}
+	}
+	return V2Tool{}, false
 }
 
 type v2Check struct {
@@ -64,13 +105,37 @@ type v2PolicySet struct {
 		Checks     string   `json:"checks"`
 		Default    string   `json:"default"`
 	} `json:"evaluation"`
-	Tools                 []V2Tool          `json:"tools"`
+	Tools                 []v2Tool          `json:"tools"`
 	Checks                []v2Check         `json:"checks"`
 	ToolPolicies          []v2Check         `json:"tool_policies"`
 	HarnessMatchSemantics string            `json:"harness_match_semantics"`
 	HarnessPolicies       []v2HarnessPolicy `json:"harness_policies"`
 	// Connectors is the optional descriptor section (HAI-378); see Connector.
 	Connectors []Connector `json:"connectors,omitempty"`
+}
+
+// v2ToolBinding mirrors the bundle's connector_binding with the additive
+// resource_template and version fields. Older bundles omit both; the
+// corresponding enforcement is skipped while they are empty, so legacy
+// bundles evaluate exactly as before.
+type v2ToolBinding struct {
+	ConnectorID      string `json:"connector_id"`
+	ResourceTemplate string `json:"resource_template,omitempty"`
+	Version          string `json:"version,omitempty"`
+}
+
+// v2ToolRoute mirrors the bundle's route with the extended binding.
+type v2ToolRoute struct {
+	ConnectorBinding *v2ToolBinding   `json:"connector_binding,omitempty"`
+	HarnessExecutor  *json.RawMessage `json:"harness_executor,omitempty"`
+}
+
+// v2Tool mirrors bundle.V2Tool on the wire with the extended route. The
+// embedded alias keeps plan validation and resource-type matching on the
+// shared contracts type.
+type v2Tool struct {
+	bundle.V2Tool
+	Route v2ToolRoute `json:"route"`
 }
 
 // denyOverrides reports whether the policy set declares the deny_overrides
@@ -159,14 +224,43 @@ func (v *Verified) EvaluateV2HarnessTool(toolName, agentID string, subject *Sess
 // capability, or resource; omitted selector dimensions remain governed by the
 // tool's ordinary authorization policy.
 func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource string, subject *SessionSubject, now time.Time) Decision {
-	if decision, denied := v.v2SubjectDenial(subject, now); denied {
+	decision, _ := v.evaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource, subject, now)
+	return decision
+}
+
+// ReasonConnectorNotNamed is the deny reason for a credential release whose
+// call a permit allowed without naming the requested connector (HAI-1070).
+const ReasonConnectorNotNamed = "connector_not_named"
+
+// EvaluateV2HarnessToolRelease decides a connector credential release for a
+// harness tool. It is EvaluateV2HarnessToolForTarget plus one rule: the
+// credential is released only when the permit that allowed the call has a
+// selector whose connector_id is exactly connectorID. A tool-only permit, or an
+// access grant (whose target names only the tool), still permits the tool call
+// through EvaluateV2HarnessTool but never releases a credential. The check is
+// local to the verified bundle.
+func (v *Verified) EvaluateV2HarnessToolRelease(toolName, agentID, connectorID, capability, resource string, subject *SessionSubject, now time.Time) Decision {
+	decision, winner := v.evaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource, subject, now)
+	if decision.Outcome != "allow" {
 		return decision
+	}
+	if connectorID == "" || winner == nil || winner.Selector["connector_id"] != connectorID {
+		return Decision{Outcome: "deny", PolicyID: decision.PolicyID, ReasonCode: ReasonConnectorNotNamed, Reason: "the permit that allowed the call does not name this connector"}
+	}
+	return decision
+}
+
+// evaluateV2HarnessToolForTarget returns the decision and, when a tool policy
+// decided it, that winning check. An access-grant decision has no check.
+func (v *Verified) evaluateV2HarnessToolForTarget(toolName, agentID, connectorID, capability, resource string, subject *SessionSubject, now time.Time) (Decision, *v2Check) {
+	if decision, denied := v.v2SubjectDenial(subject, now); denied {
+		return decision, nil
 	}
 	var set v2PolicySet
 	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
-		return invalidDecision()
+		return invalidDecision(), nil
 	}
-	var registered *V2Tool
+	var registered *v2Tool
 	for i := range set.Tools {
 		if set.Tools[i].Name == toolName {
 			registered = &set.Tools[i]
@@ -174,7 +268,7 @@ func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 		}
 	}
 	if registered == nil || registered.Route.HarnessExecutor == nil || registered.Route.ConnectorBinding != nil {
-		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "harness tool is not registered in the policy bundle"}
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "harness tool is not registered in the policy bundle"}, nil
 	}
 	request := map[string]string{"tool": registered.Name, "source": registered.Source}
 	if connectorID != "" {
@@ -187,10 +281,13 @@ func (v *Verified) EvaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 		request["resource_id"] = resource
 	}
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
-	decision := evaluateV2Check(set.denyOverrides(), set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
-	// A rule that matched decided the call. Where no rule matched, a live
-	// access grant may still open it (ADR-038 §2).
-	return v.v2GrantOrRule(decision, v2ToolTarget(registered.Name), subject, groups, now)
+	decision, winner := evaluateV2CheckWinner(set.denyOverrides(), set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	if winner != nil {
+		return decision, winner
+	}
+	// No rule matched. A live access grant may still open the call
+	// (ADR-038 §2); it decides without a check.
+	return v.v2GrantOrRule(decision, v2ToolTarget(registered.Name), subject, groups, now), nil
 }
 
 // V2ToolRegistered reports whether a v2 policy set has a catalog registration
@@ -249,22 +346,22 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 	if err := strictJSON(v.Payload.PolicySet, &set); err != nil {
 		return invalidDecision()
 	}
-	var tool *V2Tool
+	var tool *v2Tool
 	for i := range set.Tools {
 		if set.Tools[i].Name == toolName {
 			tool = &set.Tools[i]
 			break
 		}
 	}
-	if tool == nil || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" || ValidateV2Plan(*tool) != nil {
+	if tool == nil || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" || ValidateV2Plan(tool.V2Tool) != nil {
 		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "connector tool is not registered in the policy bundle"}
 	}
 	if agentID == "" {
 		return Decision{Outcome: "deny", ReasonCode: "agent_not_assigned", Reason: "agent is not assigned to this installation"}
 	}
 	connectorID := tool.Route.ConnectorBinding.ConnectorID
-	if !v.agentBound(agentID, connectorID, tool.RequiredCapabilities) {
-		return Decision{Outcome: "deny", ReasonCode: "agent_not_bound_to_connector", Reason: "agent binding does not cover the tool's required capabilities"}
+	if !set.connectorDeclares(connectorID, tool.RequiredCapabilities) {
+		return Decision{Outcome: "deny", ReasonCode: "tool_not_registered", Reason: "the bound connector does not declare the tool's capabilities in the policy bundle"}
 	}
 	if len(ops) == 0 || len(tool.RequiredCapabilities) == 0 {
 		return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan is empty"}
@@ -275,8 +372,16 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		if op.ConnectorID != connectorID || op.Capability == "" || op.Action == "" {
 			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation plan contains a malformed operation"}
 		}
-		if !containsExact(tool.RequiredCapabilities, op.Capability) || !v.operationResourceRegistered(tool, op) {
+		if !containsExact(tool.RequiredCapabilities, op.Capability) || !v.operationResourceRegistered(&tool.V2Tool, op) {
 			return Decision{Outcome: "deny", ReasonCode: "operation_plan_invalid", Reason: "the operation does not match the tool registration"}
+		}
+		if binding := tool.Route.ConnectorBinding; binding != nil {
+			if binding.ResourceTemplate != "" && op.ProviderResource != "" && !MatchRenderedResource(binding.ResourceTemplate, op.ProviderResource) {
+				return Decision{Outcome: "deny", ReasonCode: "resource_out_of_template", Reason: "the operation's rendered resource does not match the binding's resource template"}
+			}
+			if op.BindingVersion != "" && op.BindingVersion != binding.Version {
+				return Decision{Outcome: "deny", ReasonCode: "binding_stale", Reason: "the requested connector binding version is not in the policy bundle"}
+			}
 		}
 		covered[op.Capability] = true
 		request := map[string]string{"source": tool.Source, "connector_id": connectorID, "tool": tool.Name, "capability": op.Capability}
@@ -305,21 +410,29 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 	return Decision{Outcome: "allow", ReasonCode: "policy_permit"}
 }
 
-func (v *Verified) agentBound(agentID, connectorID string, required []string) bool {
-	var bindings []struct {
-		AgentID      string   `json:"agent_id"`
-		ConnectorID  string   `json:"connector_id"`
-		Capabilities []string `json:"capabilities"`
+// connectorDeclares reports whether the policy set registers every capability
+// for connectorID (HAI-1050: the bundle alone decides). A set with a
+// connectors section must carry a descriptor for the connector that declares
+// each capability; a set without one (an older catalog) registers a tool's
+// capabilities only through its required_capabilities, which every operation
+// is already checked against.
+func (s v2PolicySet) connectorDeclares(connectorID string, capabilities []string) bool {
+	if s.Connectors == nil {
+		return true
 	}
-	if json.Unmarshal(v.Payload.AgentConnectorBindings, &bindings) != nil {
-		return false
-	}
-	for _, binding := range bindings {
-		if binding.AgentID != agentID || binding.ConnectorID != connectorID {
+	for _, c := range s.Connectors {
+		if c.ID != connectorID {
 			continue
 		}
-		for _, capability := range required {
-			if !containsExact(binding.Capabilities, capability) {
+		for _, wanted := range capabilities {
+			declared := false
+			for _, capability := range c.Capabilities {
+				if capability.Name == wanted {
+					declared = true
+					break
+				}
+			}
+			if !declared {
 				return false
 			}
 		}
@@ -351,6 +464,13 @@ func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool 
 // not read, and policy id ascending breaks ties (contracts policy.Precedence);
 // otherwise the highest priority decides, then deny before permit, then id.
 func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) Decision {
+	decision, _ := evaluateV2CheckWinner(denyOverrides, checks, request, subject, groups, roles, agentID, orgID, workspaceID)
+	return decision
+}
+
+// evaluateV2CheckWinner is evaluateV2Check that also returns the winning
+// check, or nil when no check matched.
+func evaluateV2CheckWinner(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) (Decision, *v2Check) {
 	matching := make([]v2Check, 0, len(checks))
 	call := Call{AgentID: agentID, UserID: subject.UserID, Email: subject.Email}
 	for _, check := range checks {
@@ -369,7 +489,7 @@ func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]st
 		matching = append(matching, check)
 	}
 	if len(matching) == 0 {
-		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no policy check matched the operation"}
+		return Decision{Outcome: "deny", ReasonCode: "no_matching_policy", Reason: "no policy check matched the operation"}, nil
 	}
 	sort.Slice(matching, func(i, j int) bool {
 		if denyOverrides {
@@ -385,9 +505,9 @@ func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]st
 	})
 	winner := matching[0]
 	if winner.Effect == "deny" {
-		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}
+		return Decision{Outcome: "deny", PolicyID: winner.PolicyID, ReasonCode: "policy_deny", Reason: "policy denied"}, &winner
 	}
-	return Decision{Outcome: "allow", PolicyID: winner.PolicyID}
+	return Decision{Outcome: "allow", PolicyID: winner.PolicyID}, &winner
 }
 
 // v2CheckRule is the part of a check that deny-overrides precedence reads.

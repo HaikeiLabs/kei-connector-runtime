@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/HaikeiLabs/kei-connector-runtime/internal/secrets"
+	"github.com/google/uuid"
 )
 
 // runModelProfile resolves a runtime model profile and, when applicable,
@@ -17,7 +18,8 @@ import (
 // emitted only on stdout and are never logged by the proxy.
 func runModelProfile(args []string) int {
 	fs := flag.NewFlagSet("model profile", flag.ContinueOnError)
-	profileID := fs.String("profile-id", "", "model profile ID (must be assigned to the runtime's default agent)")
+	agentID := fs.String("agent-id", "", "agent UUID whose assigned model profile to resolve")
+	profileID := fs.String("profile-id", "", "model profile ID (must be assigned to the selected agent)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -26,22 +28,43 @@ func runModelProfile(args []string) int {
 		fmt.Fprintln(os.Stderr, "model profile requires KEI_RUNTIME_TOKEN and KEI_RUNTIME_CONTROL_PLANE_URL")
 		return 2
 	}
+	var requestedAgentID string
+	if *agentID != "" {
+		parsedAgentID, err := uuid.Parse(*agentID)
+		if err != nil || parsedAgentID == uuid.Nil {
+			fmt.Fprintln(os.Stderr, "model profile --agent-id must be a valid UUID")
+			return 2
+		}
+		requestedAgentID = parsedAgentID.String()
+	}
 	client := NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var profile *ModelProfile
 	var err error
-	fmt.Fprintln(os.Stderr, "model profile lookup: runtime default agent assignment")
-	profile, err = client.GetRuntimeAssignedModelProfile(ctx)
-	if err == nil && profile == nil {
-		err = fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
+	if *profileID != "" {
+		parsedProfileID, parseErr := uuid.Parse(*profileID)
+		if parseErr != nil || parsedProfileID == uuid.Nil {
+			fmt.Fprintln(os.Stderr, "model profile --profile-id must be a valid UUID")
+			return 2
+		}
+		fmt.Fprintln(os.Stderr, "model profile lookup: selected assigned profile")
+		profile, err = client.GetRuntimeModelProfileForAgent(ctx, parsedProfileID.String(), requestedAgentID)
+		if err == nil && profile == nil {
+			err = fmt.Errorf("profile %q is not assigned to the selected agent", parsedProfileID)
+		}
+	} else if requestedAgentID == "" {
+		fmt.Fprintln(os.Stderr, "model profile lookup: runtime default agent assignment")
+		profile, err = client.GetRuntimeAssignedModelProfile(ctx)
+	} else {
+		fmt.Fprintln(os.Stderr, "model profile lookup: requested agent assignment")
+		profile, err = client.GetRuntimeAssignedModelProfileForAgent(ctx, requestedAgentID)
 	}
-	if err == nil && *profileID != "" {
-		// The assigned-profile endpoint validates the runtime's workspace and
-		// default-agent scope. Permit an explicit ID only when it is exactly
-		// that authorized assignment; never resolve arbitrary profile IDs here.
-		if profile.ProfileID != *profileID {
-			err = fmt.Errorf("profile %q is not assigned to the runtime's default agent", *profileID)
+	if err == nil && profile == nil {
+		if requestedAgentID == "" {
+			err = fmt.Errorf("runtime has no active model profile assigned to its default agent (or has no default agent assigned)")
+		} else {
+			err = fmt.Errorf("runtime has no active model profile assigned to the selected agent")
 		}
 	}
 	if err != nil {
@@ -61,7 +84,7 @@ func runModelProfile(args []string) int {
 		APIKey string `json:"api_key,omitempty"`
 	}{ModelProfile: profile}
 	if profile.AuthType == "api_key" {
-		store, storeErr := secrets.NewStore()
+		store, storeErr := secrets.NewStoreFromEnv()
 		if storeErr != nil {
 			fmt.Fprintf(os.Stderr, "model profile credential store unavailable: %v\n", storeErr)
 			return 1
@@ -75,6 +98,41 @@ func runModelProfile(args []string) int {
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
 		fmt.Fprintf(os.Stderr, "write model profile response: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runModelProfiles(args []string) int {
+	fs := flag.NewFlagSet("model profiles", flag.ContinueOnError)
+	agentID := fs.String("agent-id", "", "agent UUID whose assigned model profiles to list")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg := configFromEnv()
+	if !cfg.IsRuntime() || cfg.RuntimeToken == "" || cfg.RuntimeControlPlaneURL == "" {
+		fmt.Fprintln(os.Stderr, "model profiles requires KEI_RUNTIME_TOKEN and KEI_RUNTIME_CONTROL_PLANE_URL")
+		return 2
+	}
+	requestedAgentID := ""
+	if *agentID != "" {
+		parsedAgentID, err := uuid.Parse(*agentID)
+		if err != nil || parsedAgentID == uuid.Nil {
+			fmt.Fprintln(os.Stderr, "model profiles --agent-id must be a valid UUID")
+			return 2
+		}
+		requestedAgentID = parsedAgentID.String()
+	}
+	client := NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	profiles, err := client.ListRuntimeModelProfiles(ctx, requestedAgentID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "model profile list failed: %v\n", err)
+		return 1
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(profiles); err != nil {
+		fmt.Fprintf(os.Stderr, "write model profile list: %v\n", err)
 		return 1
 	}
 	return 0

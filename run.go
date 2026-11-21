@@ -35,7 +35,12 @@ func runPolicy(args []string) int {
 				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID, AgentID: identity.AgentID,
 			}, 30*time.Second)
 		}
-		return keiruntime.RunPolicySync(context.Background(), args[1:], os.Stdout, os.Stderr, cfg, identityFunc, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) })
+		forceSyncBundle := func(identity *keiruntime.Identity) error {
+			return ForceRefreshPolicyBundle(context.Background(), cfg, &RuntimeIdentity{
+				ID: identity.ID, OrgID: identity.OrgID, WorkspaceID: identity.WorkspaceID, AgentID: identity.AgentID,
+			}, 30*time.Second)
+		}
+		return keiruntime.RunPolicySync(context.Background(), args[1:], os.Stdout, os.Stderr, cfg, identityFunc, syncBundle, IsRuntimeRevocation, func() { RevokePolicyState(cfg) }, forceSyncBundle)
 	case "show":
 		return keiruntime.RunPolicyShow(args[1:], os.Stdout, os.Stderr, cfg)
 	}
@@ -53,6 +58,10 @@ func Main(buildVersion string, args []string) int {
 	if len(args) < 1 {
 		usage()
 		return 1
+	}
+
+	if len(args) > 1 && isHelpArg(args[1]) && printCommandHelp(os.Stdout, args[0]) {
+		return 0
 	}
 
 	var code int
@@ -157,8 +166,13 @@ func (c runtimeToolRegistryClient) SyncTools(ctx context.Context, token string, 
 }
 
 func runModel(args []string) int {
-	if len(args) > 0 && args[0] == "profile" {
-		return runModelProfile(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "profile":
+			return runModelProfile(args[1:])
+		case "profiles":
+			return runModelProfiles(args[1:])
+		}
 	}
 	return runModelInvoke(args)
 }
@@ -175,31 +189,32 @@ func hasTopLevelFlags(args []string) bool {
 func usage() {
 	fmt.Fprint(os.Stderr, `kei-proxy - tenant-side runtime policy engine
 
-CLI commands and a long-running serve daemon. Each CLI command performs one
-governed action (authorize, collector ship, or credential sync). The serve
-daemon exposes a local HTTP/1.1 API on a Unix socket and
-optional TCP listener. Customer-hosted runtimes resolve credential metadata
-from Kei and fetch values from the configured secret store. Emits each
-decision as a structured JSON audit event on stderr.
+A long-running serve daemon plus one-shot CLI commands. The serve daemon is
+what a harness talks to: it decides tool calls against the local policy
+bundle over an owner-only Unix socket (and an optional TCP listener).
+Customer-hosted runtimes resolve credential metadata from Kei and fetch
+values from the configured secret store. Emits each decision as a
+structured JSON audit event on stderr.
 
 Usage:
   kei-proxy <command> [flags]
 
 Commands:
-  authorize    authorize a tool call and serve its credential (stdout JSON, exit codes)
-  collector    ship pending audit JSONL records to the control plane (idempotent, resumable)
-  credential   manage credential sync (see: kei-proxy credential --help)
-  hook         report-only harness tool-use hook (see: kei-proxy hook --help)
-  run          run a child process with governed connector credentials
-  model        model profile and invocation commands (see: kei-proxy model --help)
-  runtime      report and maintain a customer runtime installation heartbeat
-  harness      discover tools from all installed harness kinds and sync metadata
-  identity link        start a platform identity claim for the current runtime
-  identity status      resolve chat identity status for the current runtime
-  policy sync  fetch, validate and persist the installation's policy bundle
+  serve        run the local daemon: sessions, policy decisions, model profiles, audit
+  runtime      check the installation credential (bootstrap) or report liveness (heartbeat)
+  policy sync [--force]  fetch, validate and persist the installation's policy bundle; --force requests fresh issuance
   policy show  print the persisted policy bundle's version and enforcement state
-  serve        start the local OpenAI-compatible HTTP listener
+  credential   sync connector credentials into the configured secret store
+  model        model profile and invocation commands
+  hook         report-only harness tool-use hook
+  run          run a child process with connector credentials
+  identity     link a platform identity, or check its status
+  harness      discover tools from all installed harness kinds and sync metadata
+  collector    ship pending audit JSONL records to the control plane (idempotent, resumable)
+  authorize    deprecated one-shot decision; harnesses use the serve socket instead
   help         show this help
+
+Run "kei-proxy <command> --help" for a command's usage.
 
 Environment:
   KEI_RUNTIME_CONTROL_PLANE_URL public Kei gateway URL for a customer-hosted runtime
@@ -226,15 +241,18 @@ Environment:
                             assigned agent from whoami (heartbeat identity event)
   KEI_PROXY_AGENT_VERSION   agent version
   KEI_PROXY_FRAMEWORK       agent framework (e.g. claude, codex)
-  KEI_TOOL_MANIFEST        path to a v2/v3 tool manifest; bootstrap sync negotiates its schema
+  KEI_TOOL_MANIFEST        path to a v3/v4 tool manifest; bootstrap sync negotiates its schema
+  KEI_SECRETS_BACKEND      the single secret store this install uses: aws-secrets-manager,
+                            azure-key-vault, or gcp-secret-manager. Unset (default) means no
+                            secret store; every secret call fails closed. Unknown values fail
+                            at startup.
 
 Examples:
-  kei-proxy authorize --user U1234ABCD --tool github.create_pr --action github:write --resource repo:acme/widgets
   kei-proxy runtime bootstrap
-	kei-proxy identity link --platform discord --platform-user-id 123456789
-  kei-proxy identity status --platform-user-id 123456789 --tenant-id guild-id
-  echo '{"request":{...}}' | KEI_RUNTIME_TOKEN=$KEI_RUNTIME_TOKEN kei-proxy model invoke
-  kei-proxy model profile [--profile-id PROFILE_ID]
-  kei-proxy --user-id U1234ABCD --tool github.create_pr --action github:write
+  kei-proxy serve
+  kei-proxy policy show
+  kei-proxy identity link --platform discord --platform-user-id 123456789
+  kei-proxy model profile [--agent-id AGENT_UUID] [--profile-id PROFILE_UUID]
+  kei-proxy model profiles [--agent-id AGENT_UUID]
 `)
 }

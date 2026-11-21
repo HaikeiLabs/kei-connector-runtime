@@ -11,7 +11,7 @@ func TestDecisionReasonCodeIsTyped(t *testing.T) {
 
 func TestKnownReasonCodes(t *testing.T) {
 	for _, c := range []ReasonCode{
-		ReasonAgentMismatch, ReasonAgentNotAssigned, ReasonAgentNotBoundToConnector,
+		ReasonAgentMismatch, ReasonAgentNotAssigned,
 		ReasonInvalidShellRequest, ReasonInvalidToolArgsDigest, ReasonNoMatchingPolicy,
 		ReasonPolicyBundleInvalid, ReasonPolicyBundleMissing, ReasonPreflightRequired,
 		ReasonRequestCanceled, ReasonSessionNotFound, ReasonSessionRequired,

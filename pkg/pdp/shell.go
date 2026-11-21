@@ -25,31 +25,25 @@ func (e *Evaluator) AuthorizeShellForKind(ctx context.Context, sessionID, kind, 
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
-	if live, reason := e.sessionLive(sessionID); !live {
+	current, ok, reason := e.sessionSnapshot(sessionID)
+	if !ok {
 		return sessionDenial(reason), nil
 	}
-	if e.sessions == nil {
-		return Decision{ReasonCode: ReasonSessionNotFound, DenySource: "identity", Reason: "the session subject is unavailable"}, nil
-	}
-	current, ok := e.sessions.Get(sessionID)
-	if !ok {
-		return Decision{ReasonCode: ReasonSessionNotFound, DenySource: "identity", Reason: "the session subject is unavailable"}, nil
-	}
 	if agentID == "" {
-		return Decision{ReasonCode: ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}, nil
+		return decisionWithSubject(Decision{ReasonCode: ReasonAgentNotAssigned, DenySource: "registry", Reason: "the trusted default agent is unavailable"}, current), nil
 	}
-	stages, ok := shellpolicy.Parse(command)
-	if !ok {
-		return Decision{ReasonCode: ReasonUnsupportedShellSyntax, DenySource: "policy", Reason: unsupportedShellReason}, nil
+	stages, syntaxCode := shellpolicy.ParseWithDiagnostic(command)
+	if syntaxCode != "" {
+		return decisionWithSubject(Decision{
+			ReasonCode: ReasonUnsupportedShellSyntax, SyntaxCode: string(syntaxCode),
+			DenySource: "policy", Reason: unsupportedShellReason,
+		}, current), nil
 	}
 	v, state, err := e.check()
 	if err != nil {
-		return stateDenial(state), nil
+		return decisionWithSubject(stateDenial(state), current), nil
 	}
-	subject := &policybundle.SessionSubject{
-		UserID: current.UserID, Email: current.Email, Source: current.Source,
-		ExternalID: current.ExternalID, Status: string(current.Status),
-	}
+	subject := sessionPolicySubject(current)
 	now := e.now().UTC()
 	decision := shellpolicy.Evaluate(stages, func(argv []string) (policybundle.Decision, shellpolicy.Verdict) {
 		d := v.EvaluateV2ShellForKind(kind, argv, agentID, subject, now)
@@ -62,12 +56,12 @@ func (e *Evaluator) AuthorizeShellForKind(ctx context.Context, sessionID, kind, 
 			return d, shellpolicy.Deny
 		}
 	})
-	return Decision{
+	return decisionWithSubject(Decision{
 		Allow: decision.Outcome == "allow", Reason: decision.Reason, ReasonCode: ReasonCode(decision.ReasonCode),
 		DenySource: denySource(ReasonCode(decision.ReasonCode)), PolicyID: decision.PolicyID,
 		BundleVersion: v.Payload.BundleVersion, BundleDigest: v.Digest,
 		PolicyRevision: v.Payload.PolicyRevision, BundleState: string(state),
-	}, nil
+	}, current), nil
 }
 
 // unsupportedShellReason names what is supported so a denied agent can rewrite

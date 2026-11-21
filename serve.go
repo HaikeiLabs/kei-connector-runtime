@@ -79,6 +79,13 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 		return 1
 	}
 	defer local.Close()
+	local.SetIdentityResolver(func(ctx context.Context) (*keiruntime.Identity, error) {
+		root, err := NewRuntimeClient(cfg.RuntimeControlPlaneURL, 10*time.Second).WhoAmI(ctx, cfg.RuntimeToken)
+		if err != nil {
+			return nil, err
+		}
+		return identityFromRoot(root), nil
+	})
 	unixListener, err := socket.Listen(socketPath)
 	if err != nil {
 		slog.Error("runtime_unix_listener_failed", "path", socketPath, "error", err)
@@ -247,10 +254,11 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 		store := connectorSecretStore()
 		secretResolver := invoke.SecretResolver{IndexPath: credentials.ConnectorIndexPath(cfg.RuntimeStateDir), Store: store}
 		local.SetCredentialStore(creds)
+		local.SetConnectorSecrets(secretResolver)
 		local.SetCommandRunner(&runcommand.Daemon{
 			Authorize:     local.ConnectorGrant,
 			UseCredential: local.UseCredential,
-			Secrets:       secretResolver,
+			Secrets:       local.ConnectorSecrets(),
 			AppendAudit: func(record []byte) error {
 				emitFunc(record)
 				return nil
@@ -322,6 +330,10 @@ func (h *runtimeHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleReady(w)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/model-config":
 		h.handleModelConfig(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/model-profiles":
+		h.handleModelProfiles(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+		h.handleModels(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -399,6 +411,50 @@ func (h *runtimeHTTPHandler) handleHealth(w http.ResponseWriter, r *http.Request
 // assigned model profile as a config source for the harness. The Unix-socket
 // handler applies auth before reaching this method; on the external TCP listener
 // this path requires runtime-token auth.
+func (h *runtimeHTTPHandler) handleModelProfiles(w http.ResponseWriter, r *http.Request) {
+	if err := h.runtimeConfigError(); err != nil {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
+		return
+	}
+	if !h.authorized(r) {
+		writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	profiles, err := h.profiles.ListRuntimeModelProfiles(ctx, r.URL.Query().Get("agent_id"))
+	if err != nil {
+		slog.Warn("model_profiles_lookup_failed", "error", err)
+		writeRuntimeError(w, http.StatusBadGateway, "model_profiles_unavailable", "model profiles could not be resolved")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(profiles)
+}
+
+func (h *runtimeHTTPHandler) handleModels(w http.ResponseWriter, r *http.Request) {
+	if err := h.runtimeConfigError(); err != nil {
+		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
+		return
+	}
+	if !h.authorized(r) {
+		writeRuntimeError(w, http.StatusUnauthorized, "invalid_runtime_token", "runtime authentication failed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	profile, err := h.resolveSelectedModelProfile(ctx, r.URL.Query().Get("agent_id"), r.URL.Query().Get("profile_id"))
+	if err != nil || profile == nil || profile.Status != "active" {
+		writeRuntimeError(w, http.StatusNotFound, "model_not_assigned", "no active assigned model profile was found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"object": "list",
+		"data":   []map[string]string{{"id": profile.DefaultModel, "object": "model"}},
+	})
+}
+
 func (h *runtimeHTTPHandler) handleModelConfig(w http.ResponseWriter, r *http.Request) {
 	if err := h.runtimeConfigError(); err != nil {
 		writeRuntimeError(w, http.StatusServiceUnavailable, "runtime_not_configured", err.Error())
@@ -413,7 +469,7 @@ func (h *runtimeHTTPHandler) handleModelConfig(w http.ResponseWriter, r *http.Re
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	profile, err := h.profiles.GetRuntimeAssignedModelProfile(ctx)
+	profile, err := h.resolveSelectedModelProfile(ctx, r.URL.Query().Get("agent_id"), r.URL.Query().Get("profile_id"))
 	if err != nil {
 		slog.Warn("model_config_no_profile", "error", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -448,10 +504,11 @@ func (h *runtimeHTTPHandler) handleModelConfig(w http.ResponseWriter, r *http.Re
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	json.NewEncoder(w).Encode(map[string]any{
 		"model":      profile.DefaultModel,
 		"endpoint":   profile.Endpoint,
 		"credential": credential,
+		"is_default": profile.IsDefault,
 	})
 }
 
@@ -459,7 +516,7 @@ func (h *runtimeHTTPHandler) handleModelConfig(w http.ResponseWriter, r *http.Re
 // the same backends model profiles use. Without one, opaque_ref connectors
 // deny credential_backend_unavailable.
 func connectorSecretStore() secrets.Store {
-	store, err := secrets.NewStore()
+	store, err := secrets.NewStoreFromEnv()
 	if err != nil {
 		return nil
 	}
@@ -487,6 +544,27 @@ func (h *runtimeHTTPHandler) authorized(r *http.Request) bool {
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
 	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(h.cfg.RuntimeToken)) == 1
+}
+
+func (h *runtimeHTTPHandler) resolveSelectedModelProfile(ctx context.Context, agentID, profileID string) (*ModelProfile, error) {
+	if agentID != "" {
+		parsed, err := uuid.Parse(agentID)
+		if err != nil || parsed == uuid.Nil {
+			return nil, fmt.Errorf("invalid agent_id")
+		}
+		agentID = parsed.String()
+	}
+	if profileID != "" {
+		parsed, err := uuid.Parse(profileID)
+		if err != nil || parsed == uuid.Nil {
+			return nil, fmt.Errorf("invalid profile_id")
+		}
+		return h.profiles.GetRuntimeModelProfileForAgent(ctx, parsed.String(), agentID)
+	}
+	if agentID != "" {
+		return h.profiles.GetRuntimeAssignedModelProfileForAgent(ctx, agentID)
+	}
+	return h.profiles.GetRuntimeAssignedModelProfile(ctx)
 }
 
 func (h *runtimeHTTPHandler) resolveAssignedOrDefaultProfile(ctx context.Context) (*ModelProfile, error) {
