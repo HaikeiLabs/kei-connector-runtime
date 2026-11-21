@@ -2,10 +2,12 @@ package policybundle
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
+	"time"
+
 	bundle "github.com/HaikeiLabs/kei-connector-contracts/bundle"
 	pol "github.com/HaikeiLabs/kei-connector-contracts/policy"
-	"sort"
-	"time"
 )
 
 // Operation is one exact planner-produced connector operation. Resource
@@ -281,7 +283,7 @@ func (v *Verified) evaluateV2HarnessToolForTarget(toolName, agentID, connectorID
 		request["resource_id"] = resource
 	}
 	groups, roles := membershipValues(v.Payload.Identities, subject.UserID, now)
-	decision, winner := evaluateV2CheckWinner(set.denyOverrides(), set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	decision, winner := evaluateV2CheckWinner(set.denyOverrides(), set.ToolPolicies, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID, false)
 	if winner != nil {
 		return decision, winner
 	}
@@ -331,7 +333,7 @@ func (v *Verified) EvaluateV2UnregisteredTool(toolName, agentID string, subject 
 	if subject.Source == "installation_owner" && v.Payload.Subject != nil && v.Payload.Subject.UserID == subject.UserID {
 		groups = v.Payload.Subject.Groups
 	}
-	decision := evaluateV2Check(set.denyOverrides(), set.ToolPolicies, map[string]string{"tool": toolName}, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+	decision := evaluateV2Check(set.denyOverrides(), set.ToolPolicies, map[string]string{"tool": toolName}, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID, false)
 	return v.v2GrantOrRule(decision, v2ToolTarget(toolName), subject, groups, now)
 }
 
@@ -384,7 +386,7 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 			}
 		}
 		covered[op.Capability] = true
-		request := map[string]string{"source": tool.Source, "connector_id": connectorID, "tool": tool.Name, "capability": op.Capability}
+		request := map[string]string{"source": tool.Source, "connector_id": connectorID, "tool": tool.Name, "capability": op.Capability, "operation_class": tool.OperationClass}
 		if op.ResourceType != "" {
 			request["resource_type"] = op.ResourceType
 		}
@@ -394,10 +396,18 @@ func (v *Verified) EvaluateV2Plan(toolName, agentID string, subject *SessionSubj
 		if op.ResourceParent != "" {
 			request["resource_parent"] = op.ResourceParent
 		}
-		decision := evaluateV2Check(set.denyOverrides(), set.Checks, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID)
+		decision := evaluateV2Check(set.denyOverrides(), set.Checks, request, subject, groups, roles, agentID, v.Payload.Audience.OrgID, v.Payload.Audience.WorkspaceID, true)
 		// A rule that matched decided the operation. Where no rule matched, a
-		// live access grant may still open the tool (ADR-038 §2).
+		// live access grant may still open the operation: by the tool target
+		// first, then by the operation's capability target (M1/O1 — a grant
+		// on capability:<operation id> covers every tool bound to that
+		// operation on that connector; a family wildcard opens reads only).
 		decision = v.v2GrantOrRule(decision, v2ToolTarget(tool.Name), subject, groups, now)
+		if decision.Outcome != "allow" && (decision.ReasonCode == "no_matching_policy" || decision.ReasonCode == ReasonNoGrantMatched) {
+			if grant, ok := v.v2CapabilityGrantDecision(op.Capability, tool.OperationClass, subject, groups, now); ok {
+				decision = grant
+			}
+		}
 		if decision.Outcome != "allow" {
 			return decision
 		}
@@ -463,21 +473,24 @@ func (v *Verified) operationResourceRegistered(tool *V2Tool, op Operation) bool 
 // deny_overrides any matching deny wins over every matching permit, priority is
 // not read, and policy id ascending breaks ties (contracts policy.Precedence);
 // otherwise the highest priority decides, then deny before permit, then id.
-func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) Decision {
-	decision, _ := evaluateV2CheckWinner(denyOverrides, checks, request, subject, groups, roles, agentID, orgID, workspaceID)
+func evaluateV2Check(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string, capabilityPermits bool) Decision {
+	decision, _ := evaluateV2CheckWinner(denyOverrides, checks, request, subject, groups, roles, agentID, orgID, workspaceID, capabilityPermits)
 	return decision
 }
 
 // evaluateV2CheckWinner is evaluateV2Check that also returns the winning
 // check, or nil when no check matched.
-func evaluateV2CheckWinner(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string) (Decision, *v2Check) {
+func evaluateV2CheckWinner(denyOverrides bool, checks []v2Check, request map[string]string, subject *SessionSubject, groups, roles []string, agentID, orgID, workspaceID string, capabilityPermits bool) (Decision, *v2Check) {
 	matching := make([]v2Check, 0, len(checks))
 	call := Call{AgentID: agentID, UserID: subject.UserID, Email: subject.Email}
 	for _, check := range checks {
 		// A direct capability permit is a separate compatibility grant and
-		// cannot create the missing tool-call permit. Direct capability denies
-		// remain effective against the operation.
-		if check.Selector["tool"] == "" && check.Effect == policyPermitAction {
+		// cannot create the missing tool-call permit outside the operation
+		// plan. Inside the plan (M1) it covers every tool whose
+		// connector_binding operation is the named capability on that
+		// connector — the permit is the op grant, no separate tool permit.
+		// Direct capability denies remain effective everywhere.
+		if !capabilityPermits && check.Selector["tool"] == "" && check.Effect == policyPermitAction {
 			continue
 		}
 		if check.Effect != policyPermitAction && check.Effect != "deny" || !v2ScopeMatches(check.Scope, agentID, orgID, workspaceID) {
@@ -529,7 +542,23 @@ func v2SelectorMatches(selector map[string]string, request map[string]string) bo
 			continue
 		}
 		actual, ok := request[dimension]
-		if !ok || expected == "" || (expected != "*" && expected != actual) {
+		if !ok || expected == "" {
+			return false
+		}
+		if expected == "*" {
+			continue
+		}
+		if dimension == "capability" && strings.HasSuffix(expected, ".*") && len(expected) > 2 {
+			// A trailing .* capability selector is an operation-family
+			// wildcard (O1): it matches by dot segment and never opens a
+			// write — the plan request carries the tool's operation_class,
+			// and without it in the request the wildcard matches nothing.
+			if !capabilityDotSegmentMatch(expected, actual) || request["operation_class"] != "read" {
+				return false
+			}
+			continue
+		}
+		if expected != actual {
 			return false
 		}
 	}
