@@ -65,6 +65,11 @@ type socketAuthorizeRequest struct {
 	// Caller is optional caller metadata for the audit trail (HAI-527,
 	// kei-connector-contracts authorizerequest). It is never a policy input.
 	Caller *authorizerequest.Caller `json:"caller,omitempty"`
+	// BindingVersion optionally pins a connector plan to one binding version
+	// (contracts #124's kei.authorize-request/v1 field, mirrored locally):
+	// the plan denies with binding_stale when the pinned version is not the
+	// bundle's. Agentware runners send it from the tool manifest.
+	BindingVersion string `json:"binding_version,omitempty"`
 }
 
 type socketAuthorizeConnector struct {
