@@ -97,7 +97,6 @@ type spoolHarnessToolRecord struct {
 	ObservedAt       string   `json:"observed_at"`
 }
 
-
 // harnessAuditRecordFrom maps one spool record to the contract. Records that
 // cannot satisfy the contract's required fields are rejected so a single bad
 // line cannot hold the spool behind a permanent 400.
