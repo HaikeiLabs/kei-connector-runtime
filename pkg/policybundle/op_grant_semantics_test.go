@@ -42,7 +42,7 @@ func opGrantBundle(t *testing.T, now time.Time, checks, toolPolicies, grants []a
 	operation := func(id, capability, template string) map[string]any {
 		return map[string]any{
 			"id": id, "capability": capability,
-			"resource": map[string]any{"type": "issue", "id": map[string]any{"from": "args", "pointer": "/number", "type": "integer"}, "parent": map[string]any{"type": "repository", "id": map[string]any{"from": "context", "field": "repository", "type": "string"}}},
+			"resource":                   map[string]any{"type": "issue", "id": map[string]any{"from": "args", "pointer": "/number", "type": "integer"}, "parent": map[string]any{"type": "repository", "id": map[string]any{"from": "context", "field": "repository", "type": "string"}}},
 			"provider_resource_template": template,
 			"provider_input":             map[string]any{},
 		}
