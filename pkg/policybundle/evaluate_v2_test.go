@@ -279,7 +279,11 @@ func TestEvaluateV2PlanRequiresANDForAllDeclaredCapabilities(t *testing.T) {
 	})
 }
 
-func TestV2DirectCapabilityPermitDoesNotImplyToolPermit(t *testing.T) {
+// M1 (owner decision 2026-11-20, option a): a direct capability permit covers
+// every tool whose connector_binding operations carry the named capabilities —
+// the permit IS the op grant, no separate tool permit. (It once did not: the
+// old skip treated tool-less permits as a separate compatibility grant.)
+func TestV2DirectCapabilityPermitCoversBoundTools(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	v := v2ToolBundle(t, now, []any{
 		map[string]any{"policy_id": "direct-read", "name": "direct", "effect": "permit", "priority": 100, "scope": map[string]any{"org_id": "org-v2", "workspace_id": "ws-v2", "agent_id": "agent-a"}, "selector": map[string]any{"source_principal": "user:user-alice", "capability": "pull_request.read"}},
@@ -287,8 +291,8 @@ func TestV2DirectCapabilityPermitDoesNotImplyToolPermit(t *testing.T) {
 	})
 	subject := &SessionSubject{UserID: "user-alice", Source: "discord", ExternalID: "ext-alice", Status: SubjectLinked}
 	ops := v2TestPlanOps()
-	if d := v.EvaluateV2Plan("github.review_pr", "agent-a", subject, ops, now); d.Outcome != "deny" {
-		t.Fatalf("direct capability permits authorized tool call: %+v", d)
+	if d := v.EvaluateV2Plan("github.review_pr", "agent-a", subject, ops, now); d.Outcome != "allow" {
+		t.Fatalf("direct capability permits did not cover the bound tool: %+v", d)
 	}
 }
 
