@@ -20,6 +20,7 @@ func runModelProfile(args []string) int {
 	fs := flag.NewFlagSet("model profile", flag.ContinueOnError)
 	agentID := fs.String("agent-id", "", "agent UUID whose assigned model profile to resolve")
 	profileID := fs.String("profile-id", "", "model profile ID (must be assigned to the selected agent)")
+	metadataOnly := fs.Bool("metadata-only", false, "return assigned model metadata without resolving or exposing credentials")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -78,6 +79,19 @@ func runModelProfile(args []string) int {
 	if profile.Status != "active" {
 		fmt.Fprintln(os.Stderr, "model profile is not active")
 		return 2
+	}
+	if *metadataOnly {
+		// Callers configuring an external credential source need no secret-store
+		// access or backend references. Keep the same assignment checks above.
+		metadata := *profile
+		metadata.SecretBackend = ""
+		metadata.SecretRef = ""
+		metadata.CredentialStoreInstallation = ""
+		if err := json.NewEncoder(os.Stdout).Encode(metadata); err != nil {
+			fmt.Fprintf(os.Stderr, "write model profile metadata: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 	response := struct {
 		*ModelProfile

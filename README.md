@@ -41,6 +41,9 @@ kei-proxy runtime bootstrap
 # 2. Run the daemon your harness talks to over a local Unix socket.
 kei-proxy serve
 
+# Check daemon readiness without starting another process or contacting a provider.
+kei-proxy status
+
 # 3. In another shell: show the policy bundle version and enforcement state.
 kei-proxy policy show
 ```
@@ -68,6 +71,7 @@ kei-proxy policy show
 | Command | What it does |
 | --- | --- |
 | `serve` | Long-running daemon: sessions, local policy decisions, model profiles, audit shipping and heartbeats over a Unix socket |
+| `status` | Read-only local daemon status and readiness probe; custom socket paths are redacted |
 | `runtime bootstrap` \| `heartbeat` | Check the installation credential and fetch policy; report liveness |
 | `policy sync` \| `show` | Fetch and persist the policy bundle; print its version and state |
 | `credential sync` | Sync connector credentials into your secret store |
@@ -77,7 +81,7 @@ kei-proxy policy show
 | `identity link` \| `status` | Link a chat-platform identity to the installation |
 | `collector` | Ship pending audit records to Kei |
 
-Run `kei-proxy <command> --help` for flags.
+Run `kei-proxy <command> --help` for flags. `kei-proxy model profile --metadata-only` resolves the same assigned profile without reading its credential or emitting secret-store references. Use it when a harness receives its model credential from a separate, trusted provider.
 
 ## Documentation
 
