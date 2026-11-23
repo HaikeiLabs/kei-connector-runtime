@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,11 +23,11 @@ import (
 
 // spoolHarnessLine is a hook spool record as kei-proxy hook writes it, plus a
 // tool_input field the collector must never forward.
-const spoolHarnessLine = `{"schema":"kei.harness-tool-event/v1","event_class":"harness_tool","harness_id":"agent-7","harness_kind":"claude","harness_registered":false,"harness_session_id":"sess-1","tool_use_id":"tu-1","phase":"pre","tool":"shell","skill":"pdf","args_digest":"hmac-sha256:abc","digest_key_id":"dk-1","args_ciphertext":"YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBk+/=","recipient_key_ids":["rk-1","rk-2"],"native_decision":"allow","argv0":"curl","tool_input":{"command":"curl -H token:s3cr3t"},"observed_at":"2026-10-06T12:00:00Z"}`
+const spoolHarnessLine = `{"schema":"kei.harness-tool-event/v1","event_class":"harness_tool","harness_id":"agent-7","harness_kind":"claude","harness_registered":false,"harness_session_id":"sess-1","tool_use_id":"tu-1","phase":"pre","tool":"shell","skill":"pdf","args_digest":"hmac-sha256:abc","digest_key_id":"dk-1","args_ciphertext":"YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBk+/=","recipient_key_ids":["rk-1","rk-2"],"native_decision":"allow","argv0":"curl","resources_touched":["shell:curl","cwd:~/project"],"tool_input":{"command":"curl -H token:s3cr3t"},"observed_at":"2026-10-06T12:00:00Z"}`
 
 var harnessAuditContractFields = map[string]bool{
 	"event_class": true, "harness_agent_id": true, "harness_kind": true, "tool": true, "skill": true,
-	"phase": true, "native_decision": true, "args_digest": true, "digest_key_id": true,
+	"phase": true, "native_decision": true, "args_digest": true, "resources_touched": true, "digest_key_id": true,
 	"args_ciphertext": true, "recipient_key_ids": true, "harness_session_id": true,
 	"tool_use_id": true, "observed_at": true,
 	"caller_harness": true, "caller_session_ref": true,
@@ -114,11 +115,12 @@ func TestHarnessAuditFlushSendsOnlyContractFields(t *testing.T) {
 	want := map[string]any{
 		"event_class": "harness_tool", "harness_agent_id": "agent-7", "harness_kind": "claude",
 		"tool": "shell", "skill": "pdf", "phase": "pre", "native_decision": "allow",
-		"args_digest": "hmac-sha256:abc", "digest_key_id": "dk-1", "harness_session_id": "sess-1",
+		"args_digest": "hmac-sha256:abc", "resources_touched": []any{"shell:curl", "cwd:~/project"},
+		"digest_key_id": "dk-1", "harness_session_id": "sess-1",
 		"tool_use_id": "tu-1", "observed_at": "2026-10-06T12:00:00Z",
 	}
 	for k, v := range want {
-		if rec[k] != v {
+		if !reflect.DeepEqual(rec[k], v) {
 			t.Errorf("%s = %v, want %v", k, rec[k], v)
 		}
 	}
