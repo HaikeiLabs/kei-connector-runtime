@@ -1,6 +1,7 @@
 package policybundle
 
 import (
+	"strings"
 	"time"
 
 	pol "github.com/HaikeiLabs/kei-connector-contracts/policy"
@@ -88,4 +89,82 @@ func grantDenyReason(code string) string {
 		return "the access grant for this call has ended"
 	}
 	return "no access grant covers this call"
+}
+
+// v2CapabilityTargetMatches reports whether a capability grant target covers
+// an operation's capability id: equality, or a trailing .* that covers the
+// remaining dot segments. A family wildcard never opens a write — it widens
+// reads, never writes (the never-more rule migration 193 applies to the
+// coarse-capability mapping).
+func v2CapabilityTargetMatches(pattern, capability, operationClass string) bool {
+	value := strings.TrimPrefix(pattern, "capability:")
+	if value == capability {
+		return true
+	}
+	if !strings.HasSuffix(value, ".*") || len(value) <= 2 {
+		return false
+	}
+	if operationClass != "read" {
+		return false
+	}
+	return capabilityDotSegmentMatch(value, capability)
+}
+
+// capabilityDotSegmentMatch reports whether a trailing-.* capability pattern
+// covers a capability id by dot segment: every non-final pattern segment must
+// equal the corresponding capability segment and the final .* covers the
+// remaining segments (at least one — a family wildcard never matches the
+// family id itself).
+func capabilityDotSegmentMatch(pattern, capability string) bool {
+	patternSegments := strings.Split(pattern, ".")
+	segments := strings.Split(capability, ".")
+	last := len(patternSegments) - 1
+	if len(segments) <= last {
+		return false
+	}
+	for i := 0; i < last; i++ {
+		if patternSegments[i] != segments[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// v2CapabilityGrantDecision decides one plan operation against the bundle's
+// capability-target access grants ("capability:<id>"). It is the runtime's
+// own matcher: the shared policy package has no capability scheme, and a
+// trailing .* capability grant must match by dot segment and never open a
+// write. It reports false when no capability grant matched the principal, so
+// the caller keeps the tool-target decision (ADR-038 §2 semantics: any live
+// matching grant permits; a matched-but-ended grant denies with
+// access_grant_expired).
+func (v *Verified) v2CapabilityGrantDecision(capability, operationClass string, subject *SessionSubject, groups []string, now time.Time) (Decision, bool) {
+	if v == nil || len(v.Payload.AccessGrants) == 0 || capability == "" || subject == nil {
+		return Decision{}, false
+	}
+	matched := false
+	for _, grant := range v.Payload.AccessGrants {
+		if !strings.HasPrefix(grant.Target, "capability:") {
+			continue
+		}
+		if !pol.MatchPrincipal(grant.Principal, subject.UserID, subject.Email, groups) {
+			continue
+		}
+		if !v2CapabilityTargetMatches(grant.Target, capability, operationClass) {
+			continue
+		}
+		if now.Before(grant.ExpireTime) {
+			return Decision{
+				Outcome:    "allow",
+				PolicyID:   "grant:" + grant.Principal + ":" + grant.Target,
+				ReasonCode: ReasonAccessGrantPermit,
+				Reason:     "a live access grant permits the call",
+			}, true
+		}
+		matched = true
+	}
+	if matched {
+		return Decision{Outcome: "deny", ReasonCode: ReasonAccessGrantExpired, Reason: grantDenyReason(ReasonAccessGrantExpired)}, true
+	}
+	return Decision{}, false
 }
