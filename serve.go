@@ -276,7 +276,14 @@ func newServeLocalPDP(cfg Config, seams serveSeams) (*keiruntime.LocalPDP, error
 func newServeHandlers(cfg Config, local *keiruntime.LocalPDP) (tcp, unix http.Handler) {
 	base := newRuntimeHTTPHandler(cfg, local.Sessions).(*runtimeHTTPHandler)
 	local.SetModelConfigHandler(http.HandlerFunc(base.handleModelConfig))
-	return base, local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
+	socketHandler := local.NewSocketHandler(base, base.runtimeConfigError, base.authorized)
+	versionedSocketHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/readyz" {
+			w.Header().Set("X-Kei-Proxy-Version", version)
+		}
+		socketHandler.ServeHTTP(w, r)
+	})
+	return base, versionedSocketHandler
 }
 
 const (

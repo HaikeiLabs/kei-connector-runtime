@@ -96,7 +96,7 @@ func (l *LocalPDP) decideV2ConnectorPlan(ctx context.Context, sessionID string, 
 	if len(contextData) == 0 {
 		contextData = json.RawMessage(`{}`)
 	}
-	d, err := e.AuthorizeV2ConnectorPlan(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted}, req.ToolArgs, contextData)
+	d, err := e.AuthorizeV2ConnectorPlan(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted, BindingVersion: req.BindingVersion}, req.ToolArgs, contextData)
 	return d, true, false, err
 }
 
@@ -320,7 +320,7 @@ func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID stri
 		if !resourceMatches {
 			return denied("operation_plan_invalid", "credential resource does not match the registered operation plan")
 		}
-		d, err := e.AuthorizeV2ConnectorPlan(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted}, req.ToolArgs, contextData)
+		d, err := e.AuthorizeV2ConnectorPlan(ctx, pdp.Request{Session: sessionID, Tool: req.Tool, AgentID: trusted, BindingVersion: req.BindingVersion}, req.ToolArgs, contextData)
 		if err != nil {
 			return pdp.Decision{ReasonCode: pdp.ReasonRequestCanceled, DenySource: "runtime_state", Reason: "request canceled", BundleState: "ready"}, true
 		}

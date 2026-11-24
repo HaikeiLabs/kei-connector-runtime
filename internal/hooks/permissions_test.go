@@ -5,12 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/HaikeiLabs/kei-connector-runtime/pkg/policybundle"
 )
 
 func TestHookReportGoldenFixtures(t *testing.T) {
@@ -90,6 +90,50 @@ func TestReportedToolNormalizesShellNames(t *testing.T) {
 				t.Fatalf("reportedTool(%q) = (%q, %q), want (%q, %q)", tc.tool, tool, argv0, tc.want, tc.argv0)
 			}
 		})
+	}
+}
+
+func TestHarnessResourcesKeepSafeShellContext(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	resources := harnessResources("shell", "/usr/bin/git", filepath.Join(home, "projects", "repo"))
+	want := []string{"shell:git", "cwd:~/projects/repo"}
+	if !reflect.DeepEqual(resources, want) {
+		t.Fatalf("harnessResources = %v, want %v", resources, want)
+	}
+	if strings.Contains(strings.Join(resources, " "), home) {
+		t.Fatalf("home path leaked in resources: %v", resources)
+	}
+	if got := harnessResources("shell", "git", "/private/work"); !reflect.DeepEqual(got, []string{"shell:git"}) {
+		t.Fatalf("outside-home resources = %v, want only shell executable", got)
+	}
+	if got := harnessResources("read_file", "git", filepath.Join(home, "project")); got != nil {
+		t.Fatalf("non-shell resources = %v, want nil", got)
+	}
+}
+
+func TestClaudeHookSpoolsSafeShellResources(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var spool []byte
+	input := `{"tool_name":"Bash","tool_input":{"command":"git status --short"},"cwd":"` + filepath.Join(home, "projects", "repo") + `","session_id":"session-1","tool_use_id":"call-1","hook_event_name":"PreToolUse","native_decision":"ask"}`
+	cfg := Config{AppendAudit: func(record []byte) error {
+		spool = append(spool, record...)
+		return nil
+	}}
+	if code := ReportPermissions([]string{"claude", "--harness", "h1"}, strings.NewReader(input), &bytes.Buffer{}, cfg); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var event permissionEvent
+	if err := json.Unmarshal(spool, &event); err != nil {
+		t.Fatalf("decode spool event: %v", err)
+	}
+	want := []string{"shell:git", "cwd:~/projects/repo"}
+	if !reflect.DeepEqual(event.ResourcesTouched, want) {
+		t.Fatalf("resources_touched = %v, want %v", event.ResourcesTouched, want)
+	}
+	if strings.Contains(string(spool), home) || strings.Contains(string(spool), "git status") {
+		t.Fatalf("spool leaked absolute home or raw command: %s", spool)
 	}
 }
 

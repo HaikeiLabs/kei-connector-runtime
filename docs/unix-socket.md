@@ -6,8 +6,16 @@ path depends on the operating system: `/run/kei-proxy/runtime.sock` on Linux,
 Override with `KEI_RUNTIME_SOCKET_PATH`. The runtime creates the socket with
 mode `0600`, refuses to replace an active socket or a regular file, replaces a
 stale socket left behind by a crash, and removes the socket on graceful
-shutdown. Requests over the socket use the runtime bearer token except for explicitly
-configured tokenless owner-session calls. `KEI_TOKENLESS_OWNER_SESSION` defaults
+shutdown. `kei-proxy status` is a read-only local probe: it checks the socket's
+file type and owner-only mode, then sends only `GET /readyz` over that Unix
+socket. It does not start a daemon, read the runtime token, inspect request
+arguments, or contact a model provider. It reports unavailable, running but
+unready, or ready; a stale socket file is unavailable. A running version is
+reported only when the daemon's readiness response carries a valid build
+version. Custom socket paths are used for probing but redacted from status
+output; platform defaults are shown as safe platform paths/aliases. Requests
+over the socket use the runtime bearer token except for explicitly configured
+tokenless owner-session calls. `KEI_TOKENLESS_OWNER_SESSION` defaults
 on for local desktop installs and off for server deployments; set it to `false`
 to disable. When enabled, the mode-0600 socket binds requests that omit a
 session to a named session for the v2 bundle's verified installation subject.
