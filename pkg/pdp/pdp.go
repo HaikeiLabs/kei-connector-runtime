@@ -391,8 +391,26 @@ func (e *Evaluator) IsV2UnregisteredTool(name string) bool {
 
 func (e *Evaluator) authorizeV2HarnessTool(ctx context.Context, req Request, connectorID, capability, resource string) (Decision, error) {
 	return e.authorizeV2HarnessToolWith(ctx, req, func(v *policybundle.Verified, subject *policybundle.SessionSubject, now time.Time) policybundle.Decision {
+		if connectorID == "" && isPiFilesystemTool(req.Tool) {
+			if req.Resource == "" {
+				return policybundle.Decision{Outcome: "deny", ReasonCode: "resource_required", Reason: "Pi filesystem authorization requires the canonical resource path"}
+			}
+			pathDecision := v.EvaluateV2HarnessPath(req.Resource, req.AgentID, subject, now)
+			if pathDecision.Outcome == "deny" && pathDecision.ReasonCode != "no_matching_policy" {
+				return pathDecision
+			}
+		}
 		return v.EvaluateV2HarnessToolForTarget(req.Tool, req.AgentID, connectorID, capability, resource, subject, now)
 	})
+}
+
+func isPiFilesystemTool(tool string) bool {
+	switch tool {
+	case "pi.read", "pi.write", "pi.edit":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Evaluator) authorizeV2HarnessToolWith(ctx context.Context, req Request, evaluate func(*policybundle.Verified, *policybundle.SessionSubject, time.Time) policybundle.Decision) (Decision, error) {

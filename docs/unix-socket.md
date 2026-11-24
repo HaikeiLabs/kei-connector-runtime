@@ -63,6 +63,21 @@ copied to audit. Missing, malformed, or incomplete plan data denies. The harness
 still executes the provider call; this endpoint returns no preflight handle,
 provider result, or credential.
 
+Registered Pi filesystem tools (`pi.read`, `pi.write`, and `pi.edit`) must also
+supply the adapter's canonical absolute `resource` path. In addition to the
+registered-tool policy, the PDP evaluates matching v2 `harness_policies` with a
+`path:` destination using the verified session membership and Pi harness kind;
+a matching path deny blocks the operation even when its tool policy permits it.
+A path permit never grants the tool call. Path destinations retain glob
+semantics (`path:/proc` matches that exact path; use `path:/proc/**` for its
+descendants). This decision governs only the path string reported by the
+adapter; the runtime does not open or pin the filesystem object. The Pi adapter
+must reject symlink traversal (including parents of new write targets), recheck
+the path after authorization, and pass that same normalized path to Pi. Because
+Pi's built-in filesystem tools open paths by name, this is not an atomic
+check-and-open guarantee against a concurrent process that can mutate those
+directories; use OS-level isolation when that threat is in scope.
+
 A trusted `harness_executor` may instead request an exact-target decision by
 including `connector: {connector_id, capability}` and a non-empty `resource`
 alongside `tool`. The runtime verifies the connector and capability against
