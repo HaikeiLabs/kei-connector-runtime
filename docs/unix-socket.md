@@ -371,7 +371,15 @@ connector/capability/resource context. For a v2 `connector_binding` tool,
 include the same `tool_args` and `tool_context` used for authorization. The
 runtime re-derives and re-evaluates the complete registered plan and verifies
 that the requested credential resource is the planned resource or its declared
-parent scope. `shared` and `per_user` credentials retain their existing
+parent scope. For a `connector_binding` tool, `connector` is optional: the
+daemon derives `connector_id` from the tool's verified binding and
+`capability` from the plan operation whose resource is the requested
+`resource`, so the harness never handles a connector ID. A caller that still
+sends `connector` must name the bound connector (otherwise
+`tool_not_registered`); when no single operation matches the resource, the
+release denies with `operation_plan_invalid`. Releases without a registered
+`connector_binding` tool and `tool_args` still require
+`connector{connector_id, capability}` (`400 invalid_request`). `shared` and `per_user` credentials retain their existing
 session/audience constraints; mismatches, unsupported models, a deny, or
 unavailable credentials return no credential. Optional `on_behalf_of` is forwarded only
 for audit attribution and never affects authorization. The request is

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed: credential release derives the connector for a bound tool
+
+`POST /v1/credentials:release` no longer requires `connector{connector_id,
+capability}` for a registered `connector_binding` tool sent with `tool_args`:
+the daemon takes the connector from the tool's verified binding and the
+capability from the plan operation for the requested resource. A caller that
+still names the connector must name the bound one (`tool_not_registered`
+otherwise). Untooled releases still require `connector{...}`.
+
 ### Added: v4 tool-manifest registration
 
 kei-proxy accepts strictly validated `kei.tool-manifest/v4` manifests during

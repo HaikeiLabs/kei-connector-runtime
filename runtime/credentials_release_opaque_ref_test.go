@@ -171,6 +171,7 @@ func (r *pgRig) auditText() string {
 
 type pgRigOptions struct {
 	mutate     func(map[string]any) map[string]any
+	bundle     []byte // replaces pgBundle when set
 	entries    []credentials.ConnectorReference
 	noResolver bool
 }
@@ -183,7 +184,11 @@ func newPGRig(t *testing.T, opts pgRigOptions) *pgRig {
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	dir := t.TempDir()
-	activateBundle(t, dir, pgBundle(t, opts.mutate))
+	bundle := opts.bundle
+	if bundle == nil {
+		bundle = pgBundle(t, opts.mutate)
+	}
+	activateBundle(t, dir, bundle)
 	index := filepath.Join(t.TempDir(), "connector-credentials.json")
 	for _, entry := range opts.entries {
 		if err := credentials.WriteConnectorReference(index, entry); err != nil {
