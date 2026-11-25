@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added: `GET /v1/agent-config` on the Unix socket
+
+Returns the trusted agent's model profile (no API key) and its bound
+connectors with their connector_binding tools (operation ids, binding
+version, resource template, non-secret origin), from the verified bundle and
+a refresher-held model metadata snapshot. No provider or control-plane call
+on the request; never credential fields; 503 when the bundle or identity is
+unavailable. `GET /v1/model-config` is unchanged.
+
 ### Changed: credential release derives the connector for a bound tool
 
 `POST /v1/credentials:release` no longer requires `connector{connector_id,

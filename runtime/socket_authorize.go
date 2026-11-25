@@ -194,6 +194,7 @@ type LocalPDP struct {
 	Sessions          *pdp.Sessions
 	evaluator         atomic.Pointer[pdp.Evaluator]
 	identity          atomic.Pointer[Identity]
+	modelMetadata     atomic.Pointer[modelProfileSnapshot]
 	identityRefreshMu sync.Mutex
 	identityResolver  func(context.Context) (*Identity, error)
 	emit              EmitAuditFunc
@@ -652,6 +653,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 		case r.URL.Path == "/v1/tools:register" && r.Method == http.MethodPost:
 		case r.URL.Path == mcpManifestSyncPath && r.Method == http.MethodPost && allowUnauthenticatedAuthorize:
 		case r.URL.Path == "/v1/model-config" && r.Method == http.MethodGet && l.modelConfigHandler != nil:
+		// Owner-only Unix socket only, token-authenticated, read-only.
+		case r.URL.Path == agentConfigPath && r.Method == http.MethodGet && allowUnauthenticatedAuthorize:
 		// Owner-only Unix socket only, never a TCP listener, and always
 		// token-authenticated (not a tokenless owner route).
 		case r.URL.Path == subjectTokenPath && r.Method == http.MethodPost && allowUnauthenticatedAuthorize:
@@ -701,6 +704,8 @@ func (l *LocalPDP) newHandler(next http.Handler, checkConfig func() error, check
 			l.handleCredentialRelease(w, r)
 		case r.URL.Path == "/v1/model-config":
 			l.modelConfigHandler.ServeHTTP(w, r)
+		case r.URL.Path == agentConfigPath:
+			l.handleAgentConfig(w)
 		case r.URL.Path == subjectTokenPath:
 			l.handleSubjectToken(w, r)
 		case r.Method == http.MethodPut:

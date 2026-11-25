@@ -1,0 +1,47 @@
+{
+  "connectors": [
+    {
+      "connector_id": "00000000-0000-4000-8000-00000000a001",
+      "kind": "native",
+      "name": "acme-github",
+      "tools": [
+        {
+          "operations": [
+            "list-commits"
+          ],
+          "tool": "github.list_commits"
+        },
+        {
+          "binding_version": "v0.19.0",
+          "operations": [
+            "read-repository"
+          ],
+          "resource_template": "repos/{owner}/{repository}",
+          "tool": "github.read_repo"
+        }
+      ]
+    },
+    {
+      "base_url": "https://grafana.acme.example",
+      "connector_id": "00000000-0000-4000-8000-00000000a002",
+      "kind": "native",
+      "name": "acme-grafana",
+      "tools": [
+        {
+          "operations": [
+            "grafana-read"
+          ],
+          "tool": "grafana.read_repo"
+        }
+      ]
+    }
+  ],
+  "model_profile": {
+    "endpoint": "https://models.acme.example/v1",
+    "is_default": true,
+    "model": "glm-5.3-flash",
+    "profile_id": "00000000-0000-4000-8000-00000000b001",
+    "status": "active"
+  },
+  "schema": "kei.agent-config/v1"
+}
