@@ -94,8 +94,8 @@ type agentConfigConnector struct {
 	ConnectorID string `json:"connector_id"`
 	Name        string `json:"name,omitempty"`
 	Kind        string `json:"kind,omitempty"`
-	// Connection is the contract connection the installation uses; set once
-	// the bundle descriptor carries it (catalog projection, contracts bump).
+	// Connection is the contract connection the installation uses, from
+	// the bundle descriptor; omitted when the bundle does not carry it.
 	Connection string            `json:"connection,omitempty"`
 	BaseURL    string            `json:"base_url,omitempty"`
 	Tools      []agentConfigTool `json:"tools"`
@@ -131,9 +131,13 @@ func assignedModelProfile(verified *policybundle.Verified, agentID string) (agen
 	return agentConfigModelProfile{}, false
 }
 
-// connectorBaseURL is the descriptor's non-secret tenant origin, if any.
+// connectorBaseURL is the descriptor's non-secret provider origin, if any:
+// its resolved base_url (catalog projection), else a Grafana or http_api
+// origin for bundles that do not carry one.
 func connectorBaseURL(c policybundle.Connector) string {
 	switch {
+	case c.BaseURL != "":
+		return c.BaseURL
 	case c.Grafana != nil && c.Grafana.BaseURL != "":
 		return c.Grafana.BaseURL
 	case c.HTTPAPI != nil && c.HTTPAPI.RegisteredBaseURL != "":
@@ -172,7 +176,7 @@ func (l *LocalPDP) handleAgentConfig(w http.ResponseWriter) {
 			bound = []agentConfigTool{}
 		}
 		resp.Connectors = append(resp.Connectors, agentConfigConnector{
-			ConnectorID: c.ID, Name: c.Name, Kind: c.Kind, BaseURL: connectorBaseURL(c), Tools: bound,
+			ConnectorID: c.ID, Name: c.Name, Kind: c.Kind, Connection: c.Connection, BaseURL: connectorBaseURL(c), Tools: bound,
 		})
 	}
 	sort.Slice(resp.Connectors, func(i, j int) bool { return resp.Connectors[i].ConnectorID < resp.Connectors[j].ConnectorID })

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added: connector `connection` and `base_url` in `GET /v1/agent-config`
+
+kei-connector-contracts v0.18.0 → v0.21.1. The v2 bundle connector descriptor
+may carry the installation's contract `connection` and resolved `base_url`;
+the embedded closed v2 schema accepts both (snake_case name; https URL with no
+userinfo, query or fragment), so a catalog projecting them no longer makes
+the bundle invalid. `/v1/agent-config` passes them through and omits them
+when absent; the descriptor `base_url` wins over a Grafana or `http_api`
+origin.
+
 ### Added: `GET /v1/agent-config` on the Unix socket
 
 Returns the trusted agent's model profile (no API key) and its bound

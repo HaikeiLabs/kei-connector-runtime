@@ -32,7 +32,9 @@ const (
 	acSecretRef  = "kei://connectors/" + acGitHub + "/token"
 )
 
-func agentConfigBundle(t *testing.T) []byte {
+// agentConfigBundle builds the fixture; extra, when given, adds fields to the
+// descriptor with that connector id.
+func agentConfigBundle(t *testing.T, extra ...map[string]map[string]any) []byte {
 	t.Helper()
 	policybundle.SetV2SchemaValidator(runtimeV2SchemaValidator(t))
 	t.Cleanup(func() { policybundle.SetV2SchemaValidator(nil) })
@@ -52,15 +54,20 @@ func agentConfigBundle(t *testing.T) []byte {
 			"required_capabilities": []string{capability}, "resource_types": []any{map[string]any{"type": "repository"}}, "plan": plan(opID, capability),
 		}
 	}
-	descriptor := func(id, name, provider, kind string, extra map[string]any) map[string]any {
+	descriptor := func(id, name, provider, kind string, more map[string]any) map[string]any {
 		d := map[string]any{
 			"id": id, "name": name, "provider": provider, "kind": kind,
 			"credential_source": "opaque_ref", "account_model": "shared",
 			"credential_ref": "kei://connectors/" + id + "/token", "credential_backend": "aws-secrets-manager",
 			"capabilities": []any{map[string]any{"name": "repository.read", "mutating": false}},
 		}
-		for k, v := range extra {
+		for k, v := range more {
 			d[k] = v
+		}
+		for _, byID := range extra {
+			for k, v := range byID[id] {
+				d[k] = v
+			}
 		}
 		return d
 	}
@@ -81,7 +88,7 @@ func agentConfigBundle(t *testing.T) []byte {
 			"checks": []any{}, "tool_policies": []any{},
 			"harness_match_semantics": "kei.harness-match/v1", "harness_policies": []any{},
 			"connectors": []any{
-				descriptor(acGitHub, "acme-github", "github", "native", nil),
+				descriptor(acGitHub, "acme-github", "github", "native", map[string]any{"connection": "pat", "base_url": "https://ghe.acme.example/api/v3"}),
 				descriptor(acGrafana, "acme-grafana", "grafana", "native", map[string]any{"grafana": map[string]any{"base_url": "https://grafana.acme.example"}}),
 				descriptor(acOtherAgent, "other-agents-connector", "github", "native", nil),
 			},
@@ -255,4 +262,28 @@ func TestSocketAgentConfigRequiresTokenAndSocket(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("POST: status=%d, want 404", rec.Code)
 	}
+}
+
+// The descriptor's resolved base_url wins over a Grafana or http_api origin;
+// those remain the fallback for bundles from catalogs that do not project it.
+func TestSocketAgentConfigDescriptorBaseURLWins(t *testing.T) {
+	rig := newAgentConfigRig(t, agentConfigBundle(t, map[string]map[string]any{
+		acGrafana: {"connection": "service_account", "base_url": "https://grafana-api.acme.example"},
+	}), trustedIdentity())
+	rec := getAgentConfig(rig.h, policyTestToken)
+	var out struct {
+		Connectors []map[string]any `json:"connectors"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, c := range out.Connectors {
+		if c["connector_id"] == acGrafana {
+			if c["base_url"] != "https://grafana-api.acme.example" || c["connection"] != "service_account" {
+				t.Fatalf("grafana connector = %v, want the descriptor's connection and base_url", c)
+			}
+			return
+		}
+	}
+	t.Fatalf("grafana connector missing: %s", rec.Body.String())
 }
