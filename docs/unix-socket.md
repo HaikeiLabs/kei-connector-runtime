@@ -148,6 +148,7 @@ This daemon-socket model brings three benefits:
 ### API surface
 
 The socket serves `GET /healthz`, `GET /readyz`, `GET /v1/model-config`,
+`GET /v1/agent-config` (Unix socket only),
 `POST /v1/authorize`, `POST /v1/credentials:release`,
 `POST /v1/mcp-manifests:sync` (Unix socket only),
 `PUT/DELETE/GET /v1/session`, and the opt-in
@@ -356,6 +357,44 @@ connector credential.
 **stdin is not passed through.** The child reads an empty stdin (`/dev/null`).
 A command that needs input must take it from a file or argument. If the
 client disconnects, the request is canceled and the child is killed.
+
+### `GET /v1/agent-config` (Unix socket only)
+
+The configuration the platform assigned to this installation's agent, so the
+harness config names no model and no connector ID. It is token-authenticated
+(no tokenless owner access), served only on the owner-only Unix socket (never
+TCP), and built from memory: the verified v2 bundle for the runtime identity's
+default agent (never a caller-supplied agent) plus a model-profile metadata
+snapshot that the policy refresher fetches after a sync (when none is held,
+the bundle assigns another profile, or it is older than 10 minutes). The route
+itself makes no provider and no control-plane call. It is metadata only:
+no credential, secret reference or secret backend; credentials come only from
+`POST /v1/credentials:release` after an allow.
+
+```json
+{
+  "schema": "kei.agent-config/v1",
+  "model_profile": {"profile_id": "…", "status": "active", "model": "…", "endpoint": "https://…", "is_default": true},
+  "connectors": [
+    {"connector_id": "…", "name": "acme-github", "kind": "native", "base_url": "https://…",
+     "tools": [{"tool": "github.read_repo", "operations": ["read-repository"], "binding_version": "v0.19.0", "resource_template": "repos/{owner}/{repository}"}]}
+  ]
+}
+```
+
+- `model_profile` is the agent's assignment in the bundle (`agent_model_profiles`);
+  `model`, `endpoint` and `is_default` appear only while the snapshot's
+  profile is that active assignment. It is absent when the agent has none.
+- `connectors` are the descriptors bound to the agent
+  (`agent_connector_bindings`), each with the registered `connector_binding`
+  tools routed through it. `connection`, `base_url`, `binding_version` and
+  `resource_template` are omitted when the bundle does not carry them;
+  `base_url` today comes from a Grafana or `http_api` descriptor origin, and
+  `connection` once the descriptor carries the installation's connection.
+- `503 agent_config_unavailable` when the runtime identity, its default agent,
+  or a fresh verified v2 bundle is unavailable.
+
+`GET /v1/model-config` is unchanged.
 
 ### `POST /v1/credentials:release` (`KEI_CREDENTIAL_RELEASE=identity`)
 

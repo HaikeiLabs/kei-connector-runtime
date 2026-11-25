@@ -146,7 +146,12 @@ func runServeContext(ctx context.Context, cfg Config, socketPath, addr string) i
 				identity.Store(id)
 				local.SetIdentity(id)
 			},
-			local.AfterSync,
+			func(err error) {
+				local.AfterSync(err)
+				if err == nil && local.ModelProfileMetadataDue(time.Now()) {
+					refreshModelProfileMetadata(ctx, NewControlPlaneModelProfileClient(cfg.RuntimeControlPlaneURL, cfg.RuntimeToken, 10*time.Second), local)
+				}
+			},
 			keiruntime.WithClaimedStateDir(),
 			keiruntime.WithBootstrapResult(func(syncErr error) {
 				var bundleVersion int64
@@ -516,6 +521,29 @@ func (h *runtimeHTTPHandler) handleModelConfig(w http.ResponseWriter, r *http.Re
 		"endpoint":   profile.Endpoint,
 		"credential": credential,
 		"is_default": profile.IsDefault,
+	})
+}
+
+// refreshModelProfileMetadata updates the /v1/agent-config model snapshot
+// from the agent's assigned profile. It runs in the policy refresher, never on
+// a request, and copies only non-secret fields (no API key, secret_ref or
+// backend). A transient error keeps the previous snapshot, which the route
+// still serves only while the bundle assigns that profile; an inactive or
+// missing profile clears it.
+func refreshModelProfileMetadata(ctx context.Context, profiles ControlPlaneModelProfileClient, local *keiruntime.LocalPDP) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	profile, err := profiles.GetRuntimeAssignedModelProfile(ctx)
+	if err != nil {
+		slog.Warn("agent_config_model_profile_refresh_failed", "error", err)
+		return
+	}
+	if profile == nil || (profile.Status != "" && profile.Status != "active") {
+		local.SetModelProfileMetadata(nil)
+		return
+	}
+	local.SetModelProfileMetadata(&keiruntime.ModelProfileMetadata{
+		ProfileID: profile.ProfileID, Model: profile.DefaultModel, Endpoint: profile.Endpoint, IsDefault: profile.IsDefault,
 	})
 }
 
