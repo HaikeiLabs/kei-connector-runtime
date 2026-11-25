@@ -389,8 +389,10 @@ no credential, secret reference or secret backend; credentials come only from
   (`agent_connector_bindings`), each with the registered `connector_binding`
   tools routed through it. `connection`, `base_url`, `binding_version` and
   `resource_template` are omitted when the bundle does not carry them;
-  `base_url` today comes from a Grafana or `http_api` descriptor origin, and
-  `connection` once the descriptor carries the installation's connection.
+  `connection` (the contract connection the installation uses, for example
+  `pat` or `user_oauth`) and `base_url` (the resolved https provider origin)
+  come from the descriptor (contracts v0.21.1). A bundle without a descriptor
+  `base_url` falls back to its Grafana or `http_api` origin.
 - `503 agent_config_unavailable` when the runtime identity, its default agent,
   or a fresh verified v2 bundle is unavailable.
 
