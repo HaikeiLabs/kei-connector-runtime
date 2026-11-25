@@ -243,6 +243,50 @@ func (l *LocalPDP) decideHarnessToolForTarget(ctx context.Context, sessionID str
 	return d, true, false, err
 }
 
+// deriveReleaseConnector is the connector a tool-bound credential release
+// for a registered connector_binding tool targets: the connector_id comes
+// from the tool's verified binding and the capability from the operation of
+// its registered plan whose resource is req.Resource. ok is false when req
+// does not name such a tool with tool_args. An empty capability (no single
+// operation matches) is left for decideCredentialReleaseV2 to deny as
+// operation_plan_invalid.
+func (l *LocalPDP) deriveReleaseConnector(req socketAuthorizeRequest) (*socketAuthorizeConnector, bool) {
+	if req.Tool == "" || len(req.ToolArgs) == 0 {
+		return nil, false
+	}
+	e := l.evaluator.Load()
+	if e == nil {
+		return nil, false
+	}
+	verified, ok := e.Bundle()
+	if !ok {
+		return nil, false
+	}
+	tool, registered := verified.V2ConnectorTool(req.Tool, time.Now().UTC())
+	if !registered || tool.Route.ConnectorBinding == nil || tool.Route.ConnectorBinding.ConnectorID == "" {
+		return nil, false
+	}
+	connectorID := tool.Route.ConnectorBinding.ConnectorID
+	contextData := req.ToolContext
+	if len(contextData) == 0 {
+		contextData = json.RawMessage(`{}`)
+	}
+	capability := ""
+	if operations, err := policybundle.BuildV2Operations(tool, connectorID, req.ToolArgs, contextData); err == nil {
+		for _, operation := range operations {
+			if operation.ProviderResource != req.Resource && operation.CredentialResource != req.Resource {
+				continue
+			}
+			if capability != "" && capability != operation.Capability {
+				capability = "" // ambiguous: the caller must name it
+				break
+			}
+			capability = operation.Capability
+		}
+	}
+	return &socketAuthorizeConnector{ConnectorID: connectorID, Capability: capability}, true
+}
+
 // decideCredentialReleaseV2 authorizes one exact tool/connector/capability/
 // resource tuple using the trusted installation agent and named session.
 func (l *LocalPDP) decideCredentialReleaseV2(ctx context.Context, sessionID string, req socketAuthorizeRequest) (pdp.Decision, bool) {

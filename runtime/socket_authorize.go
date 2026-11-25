@@ -1053,8 +1053,14 @@ func (l *LocalPDP) handleCredentialRelease(w http.ResponseWriter, r *http.Reques
 		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "request must be a "+credentialReleaseRequestSchema+" object with no unknown fields")
 		return
 	}
-	if req.Connector == nil || req.Connector.ConnectorID == "" || req.Connector.Capability == "" {
-		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a connector{connector_id, capability} is required for a credential release")
+	derived := false
+	if req.Connector == nil {
+		// A registered connector_binding tool names its own connector: derive
+		// it (and the capability) from the verified bundle, never the caller.
+		req.Connector, derived = l.deriveReleaseConnector(req)
+	}
+	if req.Connector == nil || req.Connector.ConnectorID == "" || (req.Connector.Capability == "" && !derived) {
+		writeRuntimeError(w, http.StatusBadRequest, "invalid_request", "a connector{connector_id, capability} is required unless tool names a registered connector_binding tool with tool_args")
 		return
 	}
 	if (len(req.ToolContext) > 0 && len(req.ToolArgs) == 0) || (len(req.ToolArgs) > 0 && !l.isV2ConnectorTool(req.Tool)) {
